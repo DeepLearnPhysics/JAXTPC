@@ -1,0 +1,81 @@
+---
+# JAXTPC Detector Configuration
+
+detector:
+  name: JAXTPC Cubic Detector
+  dimensions:  # in centimeters
+    x: 400.0
+    y: 400.0
+    z: 400.0
+
+wire_planes:
+  sides:
+    - side_id: 0
+      description: "TPC1 wire planes (x < 0)"
+      planes:
+        - plane_id: 0
+          type: first_induction
+          angle: 60.0  # degrees
+          wire_spacing: 0.3  # cm
+          distance_from_anode: 0.6  # cm (furthest from detector edge)
+          bias_voltage: -200.0  # V
+        - plane_id: 1
+          type: second_induction
+          angle: -60.0  # degrees
+          wire_spacing: 0.3  # cm
+          distance_from_anode: 0.3  # cm (middle plane)
+          bias_voltage: -200.0  # V
+        - plane_id: 2
+          type: collection
+          angle: 0.0  # degrees
+          wire_spacing: 0.3  # cm
+          distance_from_anode: 0.0  # cm (closest to detector edge)
+          bias_voltage: 500.0  # V
+
+    - side_id: 1
+      description: "TPC2 wire planes (x > 0)"
+      planes:
+        - plane_id: 3
+          type: first_induction
+          angle: 60.0  # degrees
+          wire_spacing: 0.3  # cm
+          distance_from_anode: 0.6  # cm (furthest from detector edge)
+          bias_voltage: -200.0  # V
+        - plane_id: 4
+          type: second_induction
+          angle: -60.0  # degrees
+          wire_spacing: 0.3  # cm
+          distance_from_anode: 0.3  # cm (middle plane)
+          bias_voltage: -200.0  # V
+        - plane_id: 5
+          type: collection
+          angle: 0.0  # degrees
+          wire_spacing: 0.3  # cm
+          distance_from_anode: 0.0  # cm (closest to detector edge)
+          bias_voltage: 500.0  # V
+
+readout:
+  sampling_rate: 2.0  # MHz
+
+simulation:
+  drift:
+    velocity: 1.6  # mm/μs
+    longitudinal_diffusion: 6.2  # cm²/s
+    transverse_diffusion: 16.3  # cm²/s
+    electron_lifetime: 10.0  # ms
+  charge_recombination:
+    model: box
+    recomb_parameters:
+      A: 0.8  # dimensionless
+      B: 0.3  # dimensionless
+
+medium:
+  type: liquid_argon
+  properties:
+    density: 1.396  # g/cm³
+    ionization_energy: 23.6  # eV per ion pair
+  temperature: 87.0  # K
+  pressure: 1.0  # atm
+
+electric_field:
+  field_strength: 500.0  # V/cm
