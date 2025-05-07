@@ -13,20 +13,23 @@ from tools.drift import (_calculate_single_plane_drift_jit,
 from tools.wires import (_calculate_single_plane_wire_distances_jit,
                   calculate_angular_scaling, calculate_angular_scaling_vmap,
                   calculate_segment_wire_angles, calculate_segment_wire_angles_vmap,
-                  calculate_diffusion_response_normalized,
+                  calculate_diffusion_response_normalized, 
                   prepare_segment_modified, fill_signals_array)
 from tools.geometry import generate_detector
 from tools.loader import load_particle_step_data
 from tools.recombination import recombine_steps
+from tools.responses import create_kernels_and_params, apply_response
 
 def create_wire_signal_calculator(
-    detector_config, K_wire=5, K_time=9, max_num_hits_pad=500000
+    detector_config, response_path="tools/wire_responses/", n_dist=6, distance_falloff=1.0,
+    K_wire=5, K_time=9, max_num_hits_pad=500000
 ):
     """
     Factory function: Performs setup and returns a JIT-compiled function
     to calculate wire signals for given PADDED position/charge arrays and mask.
-    Now includes diffusion, electron lifetime effects, angle and wire distance interpolation.
-    Returns signals as a dictionary of arrays with shape (num_wires, num_time_steps, num_angles, num_wire_distances).
+    Now includes diffusion, electron lifetime effects, angle and wire distance interpolation,
+    and wire response convolution.
+    Returns signals as a dictionary of arrays with shape (num_wires, num_time_steps).
     """
     print("--- Creating Wire Signal Calculator (Factory Setup) ---")
     factory_start_time = time.time()
@@ -82,11 +85,32 @@ def create_wire_signal_calculator(
     min_indices_static_tuple = tuple(tuple(int(x) for x in row) for row in min_indices_np)
     num_wires_static_tuple = tuple(tuple(int(x) for x in row) for row in num_wires_np)
 
+    # --- Create wire response kernels ---
+    print("   Loading wire response kernels...")
+    kernels_and_params = create_kernels_and_params(response_path, n_dist, distance_falloff)
+
+    kernel_types = [
+        kernels_and_params['U-plane']['kernels'],
+        kernels_and_params['V-plane']['kernels'],
+        kernels_and_params['Y-plane']['kernels']
+    ]
+
+    # Define the plane type mapping for each side/plane
+    # 0=U, 1=V, 2=Y
+    plane_type_indices = np.array([
+        [0, 1, 2],  # Side 0: U, V, Y
+        [0, 1, 2]   # Side 1: U, V, Y
+    ])
+
+    # Convert to tuple for JIT static argument
+    plane_type_indices_tuple = tuple(tuple(int(x) for x in row) for row in plane_type_indices)
+    
     precalc_end = time.time()
     print(f"   Parameters processed in {precalc_end - factory_start_time:.3f} s")
     print(f"   Config: K_wire={K_wire}, K_time={K_time}, Pad={max_num_hits_pad}")
     print(f"   Physics: Lifetime={electron_lifetime_ms} ms, LongDiff={detector_config['longitudinal_diffusion_cm2_s']} cm²/s, TransDiff={detector_config['transverse_diffusion_cm2_s']} cm²/s")
     print(f"   Interpolation: {num_angles} angles, {num_wire_distances} wire distances")
+    print(f"   Response: {n_dist} distance steps, falloff={distance_falloff}")
 
     # Save parameters for later reference
     all_params = {
@@ -116,11 +140,14 @@ def create_wire_signal_calculator(
         "num_angles": num_angles,
         "wire_distance_points": wire_distance_points,
         "num_wire_distances": num_wire_distances,
+        "plane_type_indices": plane_type_indices,
+        "n_dist": n_dist,
+        "distance_falloff": distance_falloff,
     }
 
     # --- Define the INNER JIT function ---
     @partial(jax.jit, static_argnames=('max_wire_indices_static_tuple', 'min_wire_indices_static_tuple',
-                                      'index_offsets_static_tuple', 'num_wires_static_tuple'))
+                                      'index_offsets_static_tuple', 'num_wires_static_tuple', 'plane_type_indices_tuple'))
     def _calculate_signals_for_event_jit(
         positions_mm_padded_array,          # Dynamic input (max_hits_pad, 3)
         charge_padded_array,                # Dynamic input (max_hits_pad,)
@@ -130,7 +157,8 @@ def create_wire_signal_calculator(
         max_wire_indices_static_tuple,      # Static input (tuple of tuples)
         min_wire_indices_static_tuple,      # Static input (tuple of tuples)
         index_offsets_static_tuple,         # Static input (tuple of tuples)
-        num_wires_static_tuple              # Static input (tuple of tuples)
+        num_wires_static_tuple,             # Static input (tuple of tuples)
+        plane_type_indices_tuple
         ):
         """ JIT - Calculates signals for pre-padded event data using captured & static args. """
         # 1. Prepare Padded Data (Units, Centering)
@@ -237,8 +265,17 @@ def create_wire_signal_calculator(
 
                 # --- STEP 2: Fill output array with signals ---
                 wire_signals_plane = fill_signals_array(indices_and_values, num_wires, num_time_steps, num_angles, num_wire_distances)
+                
+                # --- STEP 3: Apply wire response convolution ---
+                plane_type_idx = plane_type_indices_tuple[side_idx][plane_idx]
+                kernels = kernel_types[plane_type_idx]
+                
+                # Apply convolution and collapse the result
+                wire_signals_plane_collapsed = apply_response(
+                    wire_signals_plane, kernels, num_angles, num_wire_distances
+                )
 
-                results.append(wire_signals_plane)
+                results.append(wire_signals_plane_collapsed)
 
         # Return tuple of results
         return tuple(results)
@@ -249,7 +286,8 @@ def create_wire_signal_calculator(
                                   max_wire_indices_static_tuple=max_indices_static_tuple,
                                   min_wire_indices_static_tuple=min_indices_static_tuple,
                                   index_offsets_static_tuple=index_offsets_static_tuple,
-                                  num_wires_static_tuple=num_wires_static_tuple)
+                                  num_wires_static_tuple=num_wires_static_tuple,
+                                  plane_type_indices_tuple=plane_type_indices_tuple)
 
     # Wrapper function to convert the tuple of results to a dictionary
     def calculate_event_signals(positions_mm_padded, charge_padded, valid_hit_mask_padded, theta_padded, phi_padded):
@@ -274,7 +312,9 @@ def create_wire_signal_calculator(
     return calculate_event_signals, all_params
 
 
-def run_simulation(config_path, data_path, event_idx=0, K_wire=5, K_time=9, MAX_HITS_PADDING=500_000):
+def run_simulation(config_path, data_path, event_idx=0, 
+                   K_wire=5, K_time=9, MAX_HITS_PADDING=500_00, 
+                   n_dist=6, distance_falloff=1.0, response_path="tools/wire_responses/"):
     """
     Run the detector simulation for a specific event.
 
@@ -285,6 +325,9 @@ def run_simulation(config_path, data_path, event_idx=0, K_wire=5, K_time=9, MAX_
         K_wire: Number of wire neighbors to consider in signal calculation
         K_time: Number of time bins to consider in signal calculation
         MAX_HITS_PADDING: Maximum number of hits to pad arrays for JIT compilation
+        n_dist: Number of distance steps for wire response
+        distance_falloff: Falloff parameter for wire response with distance
+        response_path: Path to wire response data files
 
     Returns:
         wire_signals_dict: Dictionary of wire signals
@@ -294,6 +337,7 @@ def run_simulation(config_path, data_path, event_idx=0, K_wire=5, K_time=9, MAX_
     print(" LArTPC Wire Signal Simulation")
     print("="*60)
     print(f"Config: {config_path}, Data: {data_path} (Event {event_idx})")
+    print(f"Response path: {response_path}, n_dist={n_dist}, falloff={distance_falloff}")
     print(f"K={K_wire}, K_time={K_time}, MaxHitsPad={MAX_HITS_PADDING}")
 
     # --- Load Configuration ---
@@ -313,7 +357,8 @@ def run_simulation(config_path, data_path, event_idx=0, K_wire=5, K_time=9, MAX_
     # --- Create the Specialized Calculator (ONCE) ---
     try:
         calculate_event_signals, simulation_params = create_wire_signal_calculator(
-            detector_config, K_wire=K_wire, K_time=K_time, max_num_hits_pad=MAX_HITS_PADDING
+            detector_config, response_path=response_path, n_dist=n_dist, distance_falloff=distance_falloff,
+            K_wire=K_wire, K_time=K_time, max_num_hits_pad=MAX_HITS_PADDING
         )
         # First call will trigger compilation
         print("\nTriggering JIT compilation (if not cached)...")
@@ -353,11 +398,9 @@ def run_simulation(config_path, data_path, event_idx=0, K_wire=5, K_time=9, MAX_
              for side_idx in range(2):
                  for plane_idx in range(3):
                      num_wires = simulation_params['num_wires_actual'][side_idx, plane_idx]
-                     num_angles = simulation_params['num_angles']
-                     num_wire_distances = simulation_params['num_wire_distances']
                      if num_wires > 0:
                          wire_signals_dict[(side_idx, plane_idx)] = jnp.zeros(
-                             (num_wires, simulation_params['num_time_steps'], num_angles, num_wire_distances)
+                             (num_wires, simulation_params['num_time_steps'])
                          )
         else:
             recomb_charge = recombine_steps(step_data, detector_config)
@@ -384,7 +427,6 @@ def run_simulation(config_path, data_path, event_idx=0, K_wire=5, K_time=9, MAX_
                 positions_mm_padded = event_positions_mm[:MAX_HITS_PADDING]
                 theta_padded = event_theta[:MAX_HITS_PADDING]
                 phi_padded = event_phi[:MAX_HITS_PADDING]
-
 
             pad_end = time.time()
             print(f"Padding took {pad_end - pad_start:.4f} s")

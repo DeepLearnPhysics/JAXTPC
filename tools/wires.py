@@ -68,20 +68,30 @@ def calculate_diffusion_response_normalized(
     return jnp.maximum(response, 0.0)
 
 
-@jax.jit
-def calculate_angular_scaling(theta_xz, theta_y):
+@partial(jax.jit, static_argnames=['clipping_value_deg'])
+def calculate_angular_scaling(theta_xz, theta_y, clipping_value_deg=5.0):
     """
     Calculate angular scaling factors based on angles to wire and plane.
 
     Args:
         theta_xz: Angle to wire in the xz-plane (in radians)
         theta_y: Angle to wire plane (in radians)
+        clipping_value_deg: Clipping value in degrees to avoid extreme angles
 
     Returns:
         scaling_factor: Scaling factor for signal calculation
     """
-    # Calculate the scaling factor based on angles
-    scaling_factor = (jnp.cos(theta_xz) * jnp.sin(theta_y))
+    # Clip angles to avoid extreme values
+    clipping_value_rad = jnp.radians(clipping_value_deg)
+
+    theta_xz = jnp.abs(theta_xz)
+    theta_y = jnp.abs(theta_y)
+
+    theta_xz = jnp.clip(theta_xz, clipping_value_rad, jnp.pi/2 - clipping_value_rad)
+    theta_y = jnp.clip(theta_y, clipping_value_rad, jnp.pi/2 - clipping_value_rad)
+
+    scaling_factor = 1/(jnp.cos(theta_xz) * jnp.sin(theta_y))
+
     return scaling_factor
 
 calculate_angular_scaling_vmap = jax.vmap(
@@ -276,3 +286,42 @@ def fill_signals_array(indices_and_values, num_wires, num_time_steps, num_angles
     ].add(signal_values)
 
     return wire_signals
+
+# @partial(jax.jit, static_argnames=["num_wires", "num_time_steps", "num_angles", "num_wire_distances"])
+# def fill_signals_array(indices_and_values, num_wires, num_time_steps, num_angles, num_wire_distances):
+#     """Represent as sparse matrix and convert to dense at the end"""
+#     # Calculate strides (following row-major ordering)
+#     # For a 4D array with dimensions [W, T, A, D]
+#     # stride_W = T * A * D
+#     # stride_T = A * D
+#     # stride_A = D
+#     # stride_D = 1 (implicit)
+
+#     wire_indices, time_indices, angle_indices, wire_dist_indices, signal_values = indices_and_values
+
+#     wire_indices = wire_indices.reshape(-1)
+#     time_indices = time_indices.reshape(-1)
+#     angle_indices = angle_indices.reshape(-1)
+#     wire_dist_indices = wire_dist_indices.reshape(-1)
+#     signal_values = signal_values.reshape(-1)
+    
+#     stride_time = num_angles * num_wire_distances
+#     stride_wire = num_time_steps * stride_time
+    
+#     # Convert 4D indices to 1D indices
+#     linear_indices = (
+#         wire_indices * stride_wire +
+#         time_indices * stride_time +
+#         angle_indices * num_wire_distances +
+#         wire_dist_indices
+#     )
+    
+#     # Use segment_sum to aggregate values
+#     total_size = num_wires * num_time_steps * num_angles * num_wire_distances
+#     output_flat = jax.ops.segment_sum(
+#         signal_values, linear_indices, total_size
+#     )
+    
+#     # Reshape to final dimensions
+#     output = output_flat.reshape((num_wires, num_time_steps, num_angles, num_wire_distances))
+#     return output
