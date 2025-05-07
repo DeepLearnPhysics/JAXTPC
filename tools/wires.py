@@ -6,7 +6,29 @@ from functools import partial
 def _calculate_single_plane_wire_distances_jit(
     positions_yz_centered_cm, angle_rad, wire_spacing_cm, max_wire_idx_abs, index_offset
 ):
-    """JIT helper for batched calculation of closest wire distances using broadcasting."""
+    """
+    Calculate the closest wire indices and distances for each hit in a detector plane.
+    
+    Parameters
+    ----------
+    positions_yz_centered_cm : jnp.ndarray
+        Array of shape (n_hits, 2) containing the (y, z) positions in cm.
+    angle_rad : float
+        Wire angle in radians, measured in the YZ plane.
+    wire_spacing_cm : float
+        Spacing between wires in cm.
+    max_wire_idx_abs : int
+        Maximum absolute wire index.
+    index_offset : int
+        Wire index offset.
+        
+    Returns
+    -------
+    closest_indices_abs : jnp.ndarray
+        Array of shape (n_hits,) containing the absolute indices of the closest wires.
+    closest_distances : jnp.ndarray
+        Array of shape (n_hits,) containing the distances to the closest wires in cm.
+    """
     cos_theta = jnp.cos(angle_rad)
     sin_theta = jnp.sin(angle_rad)
 
@@ -39,7 +61,29 @@ def calculate_diffusion_response_normalized(
     wire_distance_cm, time_difference_us, drift_time_us,
     longitudinal_diffusion_cm2_us, transverse_diffusion_cm2_us, drift_velocity_cm_us
 ):
-    """Calculates normalized 2D Gaussian response without charge scaling."""
+    """
+    Calculate normalized 2D Gaussian response for charge diffusion without charge scaling.
+    
+    Parameters
+    ----------
+    wire_distance_cm : jnp.ndarray
+        Distance from the hit to the wire in cm.
+    time_difference_us : jnp.ndarray
+        Time difference between drift time and bin center in μs.
+    drift_time_us : float
+        Drift time in μs.
+    longitudinal_diffusion_cm2_us : float
+        Longitudinal diffusion coefficient in cm²/μs.
+    transverse_diffusion_cm2_us : float
+        Transverse diffusion coefficient in cm²/μs.
+    drift_velocity_cm_us : float
+        Drift velocity in cm/μs.
+        
+    Returns
+    -------
+    response : jnp.ndarray
+        Normalized diffusion response.
+    """
     # Calculate drift-dependent sigmas with diffusion
     # σ² = 2Dt (where t is drift_time)
 
@@ -72,14 +116,20 @@ def calculate_diffusion_response_normalized(
 def calculate_angular_scaling(theta_xz, theta_y, clipping_value_deg=5.0):
     """
     Calculate angular scaling factors based on angles to wire and plane.
-
-    Args:
-        theta_xz: Angle to wire in the xz-plane (in radians)
-        theta_y: Angle to wire plane (in radians)
-        clipping_value_deg: Clipping value in degrees to avoid extreme angles
-
-    Returns:
-        scaling_factor: Scaling factor for signal calculation
+    
+    Parameters
+    ----------
+    theta_xz : float
+        Angle to wire in the xz-plane in radians.
+    theta_y : float
+        Angle to wire plane in radians.
+    clipping_value_deg : float, optional
+        Clipping value in degrees to avoid extreme angles, by default 5.0.
+        
+    Returns
+    -------
+    scaling_factor : float
+        Scaling factor for signal calculation.
     """
     # Clip angles to avoid extreme values
     clipping_value_rad = jnp.radians(clipping_value_deg)
@@ -101,16 +151,23 @@ calculate_angular_scaling_vmap = jax.vmap(
 @jax.jit
 def calculate_segment_wire_angles(theta, phi, wire_angle):
     """
-    Calculate angles between an segment and a wire/plane.
-
-    Args:
-        theta: Polar angle (0 to π) from the positive z-axis
-        phi: Azimuthal angle (-π to π) from the positive x-axis
-        wire_angle: Angle of the wire in the yz-plane (in radians)
-
-    Returns:
-        angle_to_wire (theta_xz): Acute angle between segment and wire (in radians)
-        angle_to_plane (theta_y): Acute angle between segment and wire plane (in radians)
+    Calculate angles between a segment and a wire/plane.
+    
+    Parameters
+    ----------
+    theta : float
+        Polar angle (0 to π) from the positive z-axis in radians.
+    phi : float
+        Azimuthal angle (-π to π) from the positive x-axis in radians.
+    wire_angle : float
+        Angle of the wire in the yz-plane in radians.
+        
+    Returns
+    -------
+    angle_to_wire : float
+        Acute angle between segment and wire in radians (theta_xz).
+    angle_to_plane : float
+        Acute angle between segment and wire plane in radians (theta_y).
     """
     # Calculate segment direction vector
     dx = jnp.sin(theta) * jnp.cos(phi)
@@ -152,7 +209,62 @@ def prepare_segment_modified(
     longitudinal_diffusion_cm2_us, transverse_diffusion_cm2_us, drift_velocity_cm_us,
     num_angles, num_wire_distances, min_idx_abs, num_wires, num_time_steps
 ):
-    """Process a single hit with detailed intermediate results for visualization."""
+    """
+    Process a single hit with detailed intermediate results for visualization.
+    
+    Parameters
+    ----------
+    charge : float
+        Charge deposited by the hit.
+    drift_time_us : float
+        Drift time of the hit in μs.
+    drift_distance_cm : float
+        Drift distance of the hit in cm.
+    closest_index_abs : int
+        Absolute index of the closest wire.
+    closest_distance : float
+        Distance to the closest wire in cm.
+    attenuation_factor : float
+        Attenuation factor due to electron lifetime.
+    theta_xz_rad : float
+        Angle to wire in the xz-plane in radians.
+    theta_y_rad : float
+        Angle to wire plane in radians.
+    angular_scaling_factor : float
+        Angular scaling factor for the hit.
+    valid_hit : bool
+        Whether the hit is valid.
+    K_wire : int
+        Number of wire neighbors to consider.
+    K_time : int
+        Number of time bins to consider.
+    wire_spacing_cm : float
+        Spacing between wires in cm.
+    time_step_size_us : float
+        Size of time step in μs.
+    longitudinal_diffusion_cm2_us : float
+        Longitudinal diffusion coefficient in cm²/μs.
+    transverse_diffusion_cm2_us : float
+        Transverse diffusion coefficient in cm²/μs.
+    drift_velocity_cm_us : float
+        Drift velocity in cm/μs.
+    num_angles : int
+        Number of angle bins.
+    num_wire_distances : int
+        Number of wire distance bins.
+    min_idx_abs : int
+        Minimum absolute wire index.
+    num_wires : int
+        Number of wires in the plane.
+    num_time_steps : int
+        Number of time steps in the simulation.
+        
+    Returns
+    -------
+    tuple
+        Tuple containing indices and values for the hit:
+        (wire_indices_rel, time_indices_out, angle_indices_out, wire_dist_indices_out, signal_values_out)
+    """
     # Only process if valid hit
     charge = jnp.where(valid_hit, charge, 0.0)
 
@@ -265,15 +377,25 @@ def prepare_segment_modified(
 @partial(jax.jit, static_argnames=["num_wires", "num_time_steps", "num_angles", "num_wire_distances"])
 def fill_signals_array(indices_and_values, num_wires, num_time_steps, num_angles, num_wire_distances):
     """
-    Simple function to fill output array with calculated signal values.
-
-    Args:
-        indices_and_values: Tuple of (wire_indices, time_indices, angle_indices,
-                           wire_dist_indices, signal_values)
-        output_shape: Shape of the output array
-
-    Returns:
-        Filled signals array
+    Fill output array with calculated signal values.
+    
+    Parameters
+    ----------
+    indices_and_values : tuple
+        Tuple of (wire_indices, time_indices, angle_indices, wire_dist_indices, signal_values).
+    num_wires : int
+        Number of wires in the plane.
+    num_time_steps : int
+        Number of time steps in the simulation.
+    num_angles : int
+        Number of angle bins.
+    num_wire_distances : int
+        Number of wire distance bins.
+        
+    Returns
+    -------
+    jnp.ndarray
+        Filled signals array of shape (num_wires, num_time_steps, num_angles, num_wire_distances).
     """
     wire_indices, time_indices, angle_indices, wire_dist_indices, signal_values = indices_and_values
 

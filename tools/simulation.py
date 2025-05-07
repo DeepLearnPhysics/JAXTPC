@@ -25,14 +25,37 @@ def create_wire_signal_calculator(
     K_wire=5, K_time=9, max_num_hits_pad=500000
 ):
     """
-    Factory function: Performs setup and returns a JIT-compiled function
-    to calculate wire signals for given PADDED position/charge arrays and mask.
-    Now includes diffusion, electron lifetime effects, angle and wire distance interpolation,
-    and wire response convolution.
-    Returns signals as a dictionary of arrays with shape (num_wires, num_time_steps).
+    Factory function that creates a JIT-compiled function to calculate wire signals.
+    
+    Performs setup and returns a function to calculate wire signals for given 
+    PADDED position/charge arrays and mask. Includes diffusion, electron lifetime 
+    effects, angle and wire distance interpolation, and wire response convolution.
+    
+    Parameters
+    ----------
+    detector_config : dict
+        Detector configuration dictionary with pre-calculated parameters.
+    response_path : str, optional
+        Path to wire response data, by default "tools/wire_responses/".
+    n_dist : int, optional
+        Number of distance steps for wire response, by default 6.
+    distance_falloff : float, optional
+        Falloff parameter for wire response distance scaling, by default 1.0.
+    K_wire : int, optional
+        Number of wire neighbors to consider in signal calculation, by default 5.
+    K_time : int, optional
+        Number of time bins to consider in signal calculation, by default 9.
+    max_num_hits_pad : int, optional
+        Maximum number of hits to pad arrays for JIT compilation, by default 500000.
+        
+    Returns
+    -------
+    function
+        Function to calculate wire signals.
+    dict
+        Dictionary of all parameters used in the calculation.
     """
     print("--- Creating Wire Signal Calculator (Factory Setup) ---")
-    factory_start_time = time.time()
 
     # --- Extract the precalculated parameters ---
     print("   Reading detector parameters...")
@@ -105,8 +128,6 @@ def create_wire_signal_calculator(
     # Convert to tuple for JIT static argument
     plane_type_indices_tuple = tuple(tuple(int(x) for x in row) for row in plane_type_indices)
     
-    precalc_end = time.time()
-    print(f"   Parameters processed in {precalc_end - factory_start_time:.3f} s")
     print(f"   Config: K_wire={K_wire}, K_time={K_time}, Pad={max_num_hits_pad}")
     print(f"   Physics: Lifetime={electron_lifetime_ms} ms, LongDiff={detector_config['longitudinal_diffusion_cm2_s']} cm²/s, TransDiff={detector_config['transverse_diffusion_cm2_s']} cm²/s")
     print(f"   Interpolation: {num_angles} angles, {num_wire_distances} wire distances")
@@ -291,6 +312,28 @@ def create_wire_signal_calculator(
 
     # Wrapper function to convert the tuple of results to a dictionary
     def calculate_event_signals(positions_mm_padded, charge_padded, valid_hit_mask_padded, theta_padded, phi_padded):
+        """
+        Calculate wire signals for an event with padded inputs.
+        
+        Parameters
+        ----------
+        positions_mm_padded : jnp.ndarray
+            Padded array of hit positions in mm, shape (max_hits_pad, 3).
+        charge_padded : jnp.ndarray
+            Padded array of hit charges, shape (max_hits_pad,).
+        valid_hit_mask_padded : jnp.ndarray
+            Padded boolean mask for valid hits, shape (max_hits_pad,).
+        theta_padded : jnp.ndarray
+            Padded array of theta angles in radians, shape (max_hits_pad,).
+        phi_padded : jnp.ndarray
+            Padded array of phi angles in radians, shape (max_hits_pad,).
+            
+        Returns
+        -------
+        dict
+            Dictionary of wire signals, keyed by (side_idx, plane_idx).
+        """
+        
         # Call the JIT-compiled function
         result_tuple = final_calculator_jit(positions_mm_padded, charge_padded, valid_hit_mask_padded,
                                            theta_padded, phi_padded)
@@ -305,9 +348,6 @@ def create_wire_signal_calculator(
 
         return result_dict
 
-    factory_end_time = time.time()
-    print(f"--- Factory setup finished ({factory_end_time - factory_start_time:.2f} s) ---")
-
     # Return the wrapper function and the parameters dict
     return calculate_event_signals, all_params
 
@@ -317,21 +357,34 @@ def run_simulation(config_path, data_path, event_idx=0,
                    n_dist=6, distance_falloff=1.0, response_path="tools/wire_responses/"):
     """
     Run the detector simulation for a specific event.
-
-    Args:
-        config_path: Path to detector configuration YAML file
-        data_path: Path to particle step data HDF5 file
-        event_idx: Index of event to process
-        K_wire: Number of wire neighbors to consider in signal calculation
-        K_time: Number of time bins to consider in signal calculation
-        MAX_HITS_PADDING: Maximum number of hits to pad arrays for JIT compilation
-        n_dist: Number of distance steps for wire response
-        distance_falloff: Falloff parameter for wire response with distance
-        response_path: Path to wire response data files
-
-    Returns:
-        wire_signals_dict: Dictionary of wire signals
-        simulation_params: Dictionary of simulation parameters
+    
+    Parameters
+    ----------
+    config_path : str
+        Path to detector configuration YAML file.
+    data_path : str
+        Path to particle step data HDF5 file.
+    event_idx : int, optional
+        Index of event to process, by default 0.
+    K_wire : int, optional
+        Number of wire neighbors to consider in signal calculation, by default 5.
+    K_time : int, optional
+        Number of time bins to consider in signal calculation, by default 9.
+    MAX_HITS_PADDING : int, optional
+        Maximum number of hits to pad arrays for JIT compilation, by default 50000.
+    n_dist : int, optional
+        Number of distance steps for wire response, by default 6.
+    distance_falloff : float, optional
+        Falloff parameter for wire response distance scaling, by default 1.0.
+    response_path : str, optional
+        Path to wire response data, by default "tools/wire_responses/".
+        
+    Returns
+    -------
+    dict
+        Dictionary of wire signals, keyed by (side_idx, plane_idx).
+    dict
+        Dictionary of simulation parameters.
     """
     print("="*60)
     print(" LArTPC Wire Signal Simulation")
@@ -378,7 +431,6 @@ def run_simulation(config_path, data_path, event_idx=0,
     # --- Process Event Data ---
     try:
         print(f"\n--- Processing Event {event_idx} ---")
-        proc_start = time.time()
         step_data = load_particle_step_data(data_path, event_idx)
         event_positions_mm = jnp.asarray(step_data.get('position', jnp.empty((0,3))), dtype=jnp.float32)
         event_de = step_data.get('de', jnp.empty((0,)))
@@ -409,7 +461,6 @@ def run_simulation(config_path, data_path, event_idx=0,
 
             # --- Perform Padding BEFORE JIT call ---
             print("Padding event data...")
-            pad_start = time.time()
             pad_width = MAX_HITS_PADDING - n_hits
 
             if pad_width > 0:
@@ -428,12 +479,8 @@ def run_simulation(config_path, data_path, event_idx=0,
                 theta_padded = event_theta[:MAX_HITS_PADDING]
                 phi_padded = event_phi[:MAX_HITS_PADDING]
 
-            pad_end = time.time()
-            print(f"Padding took {pad_end - pad_start:.4f} s")
-
             # --- Run the specialized JIT calculation ---
             print("Executing JIT calculator for the event...")
-            exec_start = time.time()
             wire_signals_dict = calculate_event_signals(
                 positions_mm_padded,
                 charge_padded,
@@ -444,11 +491,6 @@ def run_simulation(config_path, data_path, event_idx=0,
             # Ensure all calculations are complete
             for key, arr in wire_signals_dict.items():
                 jax.device_get(arr)
-            exec_end = time.time()
-            print(f"Event calculation finished in {exec_end - exec_start:.3f} s")
-
-        proc_end = time.time()
-        print(f"Event processing took {proc_end - proc_start:.2f} s total.")
 
         return wire_signals_dict, simulation_params
 

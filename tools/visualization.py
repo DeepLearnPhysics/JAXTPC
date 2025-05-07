@@ -8,19 +8,23 @@ import time
 def visualize_wire_signals(wire_signals_dict, simulation_params, figsize=(20, 10), log_norm=False):
     """
     Visualize wire signals stored in a dictionary, using different color schemes per plane type.
-
-    Args:
-        wire_signals_dict: Dictionary of wire signals, keyed by (side_idx, plane_idx)
-        simulation_params: Dictionary containing simulation parameters
-        figsize: Figure size (width, height) in inches
-        log_norm: If True, use logarithmic normalization for all plots
-
-    Returns:
-        matplotlib Figure object
+    
+    Parameters
+    ----------
+    wire_signals_dict : dict
+        Dictionary of wire signals, keyed by (side_idx, plane_idx).
+    simulation_params : dict
+        Dictionary containing simulation parameters.
+    figsize : tuple, optional
+        Figure size (width, height) in inches, by default (20, 10).
+    log_norm : bool, optional
+        If True, use logarithmic normalization for all plots, by default False.
+        
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The matplotlib Figure object.
     """
-    print("--- Starting Visualization ---")
-    vis_start = time.time()
-
     # Extract pre-calculated parameters
     num_time_steps = simulation_params['num_time_steps']
     time_step_size_us = simulation_params['time_step_size_us']
@@ -157,29 +161,34 @@ def visualize_wire_signals(wire_signals_dict, simulation_params, figsize=(20, 10
             cbar = fig.colorbar(im, cax=cax)
             cbar.ax.tick_params(labelsize=tick_size, colors='black')
             cbar.set_label('Signal Strength', fontsize=label_size, color='black')
-
-    vis_end = time.time()
-    print(f"--- Visualization Finished ({vis_end - vis_start:.3f} s) ---")
     return fig
 
 
 def visualize_single_plane(wire_signals_dict, simulation_params, side_idx=0, plane_idx=0, figsize=(10, 10), log_norm=False):
     """
     Visualize wire signals for a single side/plane combination using appropriate color scheme.
-
-    Args:
-        wire_signals_dict: Dictionary of wire signals, keyed by (side_idx, plane_idx)
-        simulation_params: Dictionary containing simulation parameters
-        side_idx: Index of the side to plot (0=West, 1=East)
-        plane_idx: Index of the plane to plot (0=U, 1=V, 2=Y)
-        figsize: Figure size (width, height) in inches
-        log_norm: If True, use logarithmic normalization
-
-    Returns:
-        matplotlib Figure object
+    
+    Parameters
+    ----------
+    wire_signals_dict : dict
+        Dictionary of wire signals, keyed by (side_idx, plane_idx).
+    simulation_params : dict
+        Dictionary containing simulation parameters.
+    side_idx : int, optional
+        Index of the side to plot (0=West, 1=East), by default 0.
+    plane_idx : int, optional
+        Index of the plane to plot (0=U, 1=V, 2=Y), by default 0.
+    figsize : tuple, optional
+        Figure size (width, height) in inches, by default (10, 10).
+    log_norm : bool, optional
+        If True, use logarithmic normalization, by default False.
+        
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The matplotlib Figure object.
     """
     print(f"--- Starting Visualization for Side {side_idx}, Plane {plane_idx} ---")
-    vis_start = time.time()
 
     # Extract pre-calculated parameters
     num_time_steps = simulation_params['num_time_steps']
@@ -305,9 +314,6 @@ def visualize_single_plane(wire_signals_dict, simulation_params, side_idx=0, pla
         cbar.ax.tick_params(labelsize=tick_size, colors='black')
         cbar.set_label('Signal Strength', fontsize=label_size, color='black')
         cbar.outline.set_edgecolor('white')
-
-    vis_end = time.time()
-    print(f"--- Visualization Finished ({vis_end - vis_start:.3f} s) ---")
     return fig
 
 # def visualize_wire_signals(wire_signals_dict, simulation_params, figsize=(20, 10)):

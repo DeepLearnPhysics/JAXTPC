@@ -6,10 +6,40 @@ import json
 
 
 class ParticleStepExtractor:
-    """Simplified extractor for particle steps from HDF5 files."""
+    """
+    Simplified extractor for particle steps from HDF5 files.
+    
+    This class extracts particle step data from an HDF5 file and converts it to JAX arrays.
+    It handles the standard structure of particle physics HDF5 files with steps, particles,
+    and associations between them.
+    
+    Attributes
+    ----------
+    file_path : str
+        Path to the HDF5 file.
+    file : h5py.File or None
+        The opened HDF5 file or None if not opened.
+    verbose : bool
+        Whether to print verbose information.
+    pstep_path : str or None
+        The actual path to the particle step dataset.
+    particle_path : str or None
+        The actual path to the particle dataset.
+    association_path : str or None
+        The actual path to the association dataset.
+    """
 
     def __init__(self, file_path: str, verbose: bool = False):
-        """Initialize the extractor with the path to an HDF5 file."""
+        """
+        Initialize the extractor with the path to an HDF5 file.
+        
+        Parameters
+        ----------
+        file_path : str
+            Path to the HDF5 file.
+        verbose : bool, optional
+            Whether to print verbose information, by default False.
+        """
         self.file_path = file_path
         self.file = None
         self.verbose = verbose
@@ -37,7 +67,12 @@ class ParticleStepExtractor:
             print(f"Association path: {self.association_path}")
 
     def _find_dataset_paths(self):
-        """Find the actual dataset paths in the file."""
+        """
+        Find the actual dataset paths in the file.
+        
+        Checks for the existence of common paths and sets the actual paths
+        found in the file.
+        """
         # Find step path
         for path in self.pstep_paths:
             if path in self.file:
@@ -57,25 +92,67 @@ class ParticleStepExtractor:
                 break
 
     def open_file(self):
-        """Open the HDF5 file."""
+        """
+        Open the HDF5 file.
+        
+        Opens the file in read mode and stores the file object.
+        """
         self.file = h5py.File(self.file_path, 'r')
 
     def close(self):
-        """Close the HDF5 file."""
+        """
+        Close the HDF5 file.
+        
+        Closes the file if it is open and sets the file object to None.
+        """
         if self.file is not None:
             self.file.close()
             self.file = None
 
     def __enter__(self):
+        """
+        Context manager entry method.
+        
+        Returns
+        -------
+        ParticleStepExtractor
+            The extractor object.
+        """
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Context manager exit method.
+        
+        Closes the file when exiting the context.
+        
+        Parameters
+        ----------
+        exc_type : type
+            Exception type if an exception was raised.
+        exc_val : Exception
+            Exception value if an exception was raised.
+        exc_tb : traceback
+            Exception traceback if an exception was raised.
+        """
         self.close()
 
     def _get_numeric_fields(self, dataset, event_idx=0):
         """
         Extract numeric fields from a dataset for a specific event.
         Skips string fields that JAX doesn't support.
+        
+        Parameters
+        ----------
+        dataset : str
+            Path to the dataset in the HDF5 file.
+        event_idx : int, optional
+            Index of the event to extract, by default 0.
+            
+        Returns
+        -------
+        dict
+            Dictionary mapping field names to JAX arrays.
         """
         if dataset not in self.file:
             if self.verbose:
@@ -115,7 +192,17 @@ class ParticleStepExtractor:
     def get_step_to_particle_mapping(self, event_idx=0):
         """
         Create a mapping from each step to its parent particle.
-        Returns a JAX array where index[i] gives the particle index for step i.
+        
+        Parameters
+        ----------
+        event_idx : int, optional
+            Index of the event to extract, by default 0.
+            
+        Returns
+        -------
+        jnp.ndarray or None
+            JAX array where index[i] gives the particle index for step i,
+            or None if the mapping could not be created.
         """
         if not self.association_path or self.association_path not in self.file:
             if self.verbose:
@@ -156,9 +243,16 @@ class ParticleStepExtractor:
         """
         Extract step data as JAX arrays.
         For each property, returns an array of shape (N, ...) where N is the number of steps.
-
-        Returns:
-            Dictionary mapping property names to JAX arrays
+        
+        Parameters
+        ----------
+        event_idx : int, optional
+            Index of the event to extract, by default 0.
+            
+        Returns
+        -------
+        dict
+            Dictionary mapping property names to JAX arrays.
         """
         # Get step data
         step_data = self._get_numeric_fields(self.pstep_path, event_idx)
@@ -207,21 +301,35 @@ class ParticleStepExtractor:
 def load_particle_step_data(file_path, event_idx=0, verbose=False):
     """
     Convenience function to extract particle step data from an HDF5 file.
-
-    Args:
-        file_path: Path to the HDF5 file
-        event_idx: Index of the event to extract (default: 0)
-        verbose: Print verbose information
-
-    Returns:
-        Dictionary mapping property names to JAX arrays
+    
+    This function creates a ParticleStepExtractor, extracts the data,
+    and closes the file, all in one call.
+    
+    Parameters
+    ----------
+    file_path : str
+        Path to the HDF5 file.
+    event_idx : int, optional
+        Index of the event to extract, by default 0.
+    verbose : bool, optional
+        Whether to print verbose information, by default False.
+        
+    Returns
+    -------
+    dict
+        Dictionary mapping property names to JAX arrays.
     """
     with ParticleStepExtractor(file_path, verbose=verbose) as extractor:
         return extractor.extract_step_arrays(event_idx)
 
 
 def main():
-    """Example usage of the particle step extractor."""
+    """
+    Example usage of the particle step extractor.
+    
+    This function demonstrates how to use the particle step extractor
+    from the command line with various options.
+    """
     import argparse
     import sys
 

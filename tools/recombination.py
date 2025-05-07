@@ -8,12 +8,14 @@ def calculate_box_model_charge(de, dx, params):
     """
     Calculate deposited charge using the standard Box model.
 
-    Parameters:
+    Parameters
+    ----------
         de: Array of energy depositions (MeV)
         dx: Array of step lengths (cm)
         params: Tuple of parameters (field_strength, density, w_value, A, B)
 
-    Returns:
+    Returns
+    -------
         Array of deposited charge (electrons) for each step
     """
 
@@ -40,10 +42,12 @@ def extract_params_for_box_model(detector_config):
     """
     Extract recombination parameters from the detector configuration.
 
-    Parameters:
+    Parameters
+    ----------
         detector_config: Dictionary with detector configuration parameters
 
-    Returns:
+    Returns
+    -------
         Tuple of parameters (field_strength, density, w_value, A, B)
     """
     field_strength = detector_config['electric_field']['field_strength']
@@ -59,11 +63,13 @@ def recombine_steps(step_data, detector_config):
     """
     Process particle steps to calculate deposited charge.
 
-    Parameters:
+    Parameters
+    ----------
         step_data: Dictionary containing arrays from the particle step data
         detector_config: Dictionary with detector configuration parameters
 
-    Returns:
+    Returns
+    -------
         Array of deposited charge for each step
     """
     params = extract_params_for_box_model(detector_config)

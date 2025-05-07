@@ -9,11 +9,15 @@ def load_data(file_path):
     """
     Load convolution kernel data from NPZ files.
     
-    Args:
-        file_path: Path to the directory containing NPZ files
+    Parameters
+    ----------
+    file_path : str
+        Path to the directory containing NPZ files.
         
-    Returns:
-        Dictionary with U-plane, V-plane, and Y-plane data
+    Returns
+    -------
+    dict
+        Dictionary with U-plane, V-plane, and Y-plane data.
     """
     u_data = np.load(file_path + "fig9_u_plane.npz", allow_pickle=True)['arr_0'].item()
     v_data = np.load(file_path + "fig9_v_plane.npz", allow_pickle=True)['arr_0'].item()
@@ -25,13 +29,19 @@ def create_distance_kernels(kernels, n_dist, distance_falloff=1.0):
     """
     Create n_dist copies of kernels with exponential decay based on distance.
 
-    Args:
-        kernels: List of 1D arrays of shape [n_angles]
-        n_dist: Number of distance copies to create
-        distance_falloff: Controls how quickly response falls off with distance
+    Parameters
+    ----------
+    kernels : list
+        List of 1D JAX arrays of shape [n_angles].
+    n_dist : int
+        Number of distance copies to create.
+    distance_falloff : float, optional
+        Controls how quickly response falls off with distance, by default 1.0.
 
-    Returns:
-        Array of shape (n_angles, n_dist, kernel_length)
+    Returns
+    -------
+    jnp.ndarray
+        Array of shape (n_angles, n_dist, kernel_length).
     """
     n_angles = len(kernels)
     kernel_length = kernels[0].shape[0]
@@ -55,12 +65,17 @@ def convolve_single_wire(wire_data, kernel):
     """
     Convolve a wire's time data with a kernel using FFT (more efficient for large kernels).
 
-    Args:
-        wire_data: 1D array of time data for a wire
-        kernel: 1D array, the convolution kernel
+    Parameters
+    ----------
+    wire_data : jnp.ndarray
+        1D array of time data for a wire.
+    kernel : jnp.ndarray
+        1D array, the convolution kernel.
 
-    Returns:
-        1D array with convolution result
+    Returns
+    -------
+    jnp.ndarray
+        1D array with convolution result.
     """
     n = len(wire_data)
     kernel_padded = jnp.pad(kernel, (0, n - len(kernel)), 'constant')
@@ -82,13 +97,19 @@ def create_kernels_and_params(file_path="wire_responses/", n_dist=6, distance_fa
     """
     Create kernels and parameters for the convolution.
 
-    Args:
-        file_path: Path to the NPZ files
-        n_dist: Number of distance copies to create
-        distance_falloff: Falloff parameter for the exponential decay
+    Parameters
+    ----------
+    file_path : str, optional
+        Path to the NPZ files, by default "wire_responses/".
+    n_dist : int, optional
+        Number of distance copies to create, by default 6.
+    distance_falloff : float, optional
+        Falloff parameter for the exponential decay, by default 1.0.
 
-    Returns:
-        Dictionary containing kernels and parameters for each plane
+    Returns
+    -------
+    dict
+        Dictionary containing kernels and parameters for each plane.
     """
     # Load the data
     data_dict = load_data(file_path)
@@ -137,14 +158,21 @@ def run_convolutions(C, kernels, num_angles, num_dist):
     """
     Run convolutions for each angle and distance sequentially.
 
-    Args:
-        C: Array of shape (n_wires, n_time, n_angles, n_dist)
-        kernels: Array of shape (n_angles, n_dist, kernel_length)
-        num_angles: Number of angles
-        num_dist: Number of distances
+    Parameters
+    ----------
+    C : jnp.ndarray
+        Array of shape (n_wires, n_time, n_angles, n_dist).
+    kernels : jnp.ndarray
+        Array of shape (n_angles, n_dist, kernel_length).
+    num_angles : int
+        Number of angles.
+    num_dist : int
+        Number of distances.
 
-    Returns:
-        Array of shape (n_wires, n_time) with convolution results
+    Returns
+    -------
+    jnp.ndarray
+        Array of shape (n_wires, n_time) with convolution results.
     """
     results = jnp.empty_like(C)
     for angle_idx in range(num_angles):
@@ -161,13 +189,20 @@ def apply_response(wire_signals_plane, kernels, num_angles, num_dist):
     """
     Apply response kernels to signal plane.
     
-    Args:
-        wire_signals_plane: Array of shape (n_wires, n_time, n_angles, n_dist)
-        kernels: Array of shape (n_angles, n_dist, kernel_length)
-        num_angles: Number of angles
-        num_dist: Number of distances
+    Parameters
+    ----------
+    wire_signals_plane : jnp.ndarray
+        Array of shape (n_wires, n_time, n_angles, n_dist).
+    kernels : jnp.ndarray
+        Array of shape (n_angles, n_dist, kernel_length).
+    num_angles : int
+        Number of angles.
+    num_dist : int
+        Number of distances.
         
-    Returns:
-        Array of shape (n_wires, n_time) with convolution results
+    Returns
+    -------
+    jnp.ndarray
+        Array of shape (n_wires, n_time) with convolution results.
     """
     return run_convolutions(wire_signals_plane, kernels, num_angles, num_dist)
