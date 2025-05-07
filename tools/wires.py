@@ -111,6 +111,89 @@ def calculate_diffusion_response_normalized(
 
     return jnp.maximum(response, 0.0)
 
+@jax.jit
+def calculate_wire_diffusion_normalized(
+    wire_distance_cm, drift_time_us, transverse_diffusion_cm2_us
+):
+    """
+    Calculate normalized 1D Gaussian response for wire (transverse) diffusion.
+    
+    Parameters
+    ----------
+    wire_distance_cm : jnp.ndarray
+        Distance from the hit to the wire in cm.
+    drift_time_us : float
+        Drift time in μs.
+    transverse_diffusion_cm2_us : float
+        Transverse diffusion coefficient in cm²/μs.
+        
+    Returns
+    -------
+    response : jnp.ndarray
+        Normalized wire diffusion response.
+    """
+    # Spatial diffusion (transverse)
+    sigma_wire_squared = 2.0 * transverse_diffusion_cm2_us * drift_time_us
+
+    # Ensure minimum sigma value
+    min_sigma = 1e-4
+    sigma_wire_squared = jnp.maximum(sigma_wire_squared, min_sigma ** 2)
+
+    # Calculate Gaussian term
+    wire_term = -(wire_distance_cm**2) / (2.0 * sigma_wire_squared)
+
+    # Calculate normalization factor for 1D Gaussian
+    norm_factor = 1.0 / (jnp.sqrt(2.0 * jnp.pi * sigma_wire_squared))
+
+    # Apply Gaussian formula
+    response = norm_factor * jnp.exp(wire_term)
+
+    return jnp.maximum(response, 0.0)
+
+
+@jax.jit
+def calculate_time_diffusion_normalized(
+    time_difference_us, drift_time_us,
+    longitudinal_diffusion_cm2_us, drift_velocity_cm_us
+):
+    """
+    Calculate normalized 1D Gaussian response for time (longitudinal) diffusion.
+    
+    Parameters
+    ----------
+    time_difference_us : jnp.ndarray
+        Time difference between drift time and bin center in μs.
+    drift_time_us : float
+        Drift time in μs.
+    longitudinal_diffusion_cm2_us : float
+        Longitudinal diffusion coefficient in cm²/μs.
+    drift_velocity_cm_us : float
+        Drift velocity in cm/μs.
+        
+    Returns
+    -------
+    response : jnp.ndarray
+        Normalized time diffusion response.
+    """
+    # Time diffusion (longitudinal) - convert from spatial to time units
+    longitudinal_diffusion_us2_us = longitudinal_diffusion_cm2_us / (drift_velocity_cm_us ** 2)
+    sigma_time_squared = 2.0 * longitudinal_diffusion_us2_us * drift_time_us
+
+    # Ensure minimum sigma value
+    min_sigma = 1e-4
+    sigma_time_squared = jnp.maximum(sigma_time_squared, min_sigma ** 2)
+
+    # Calculate Gaussian term
+    time_term = -(time_difference_us**2) / (2.0 * sigma_time_squared)
+
+    # Calculate normalization factor for 1D Gaussian
+    norm_factor = 1.0 / (jnp.sqrt(2.0 * jnp.pi * sigma_time_squared))
+
+    # Apply Gaussian formula
+    response = norm_factor * jnp.exp(time_term)
+
+    return jnp.maximum(response, 0.0)
+
 
 @partial(jax.jit, static_argnames=['clipping_value_deg'])
 def calculate_angular_scaling(theta_xz, theta_y, clipping_value_deg=5.0):
@@ -291,19 +374,26 @@ def prepare_segment_modified(
     wire_distances_2d = jnp.expand_dims(jnp.abs(wire_distances_cm), axis=1)  # Shape: (K_wire, 1)
     time_differences_2d = jnp.expand_dims(time_differences_us, axis=0)  # Shape: (1, K_time)
 
-    # Calculate normalized diffusion response (without charge)
-    diffusion_response_normalized = calculate_diffusion_response_normalized(
+    # Calculate normalized wire diffusion response
+    wire_diffusion = calculate_wire_diffusion_normalized(
         wire_distances_2d,
+        drift_time_us,
+        transverse_diffusion_cm2_us
+    )  # Shape: (K_wire, 1)
+    
+    # Calculate normalized time diffusion response
+    time_diffusion = calculate_time_diffusion_normalized(
         time_differences_2d,
         drift_time_us,
         longitudinal_diffusion_cm2_us,
-        transverse_diffusion_cm2_us,
         drift_velocity_cm_us
-    )  # Shape: (K_wire, K_time)
-
+    )  # Shape: (1, K_time)
+    
+    # Combine wire and time diffusion responses using broadcasting
+    diffusion_response_normalized = wire_diffusion * time_diffusion  # Shape: (K_wire, K_time)
+    
     # Apply charge for full diffusion response
     diffusion_response = diffusion_response_normalized * attenuated_charge
-
     # 5. Angle interpolation (theta_xz)
     theta_xz_deg = jnp.clip(theta_xz_rad * (180.0 / jnp.pi), 0.0, 90.0)
     angle_step = 90.0 / (num_angles - 1)
