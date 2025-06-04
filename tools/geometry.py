@@ -222,7 +222,7 @@ def get_single_plane_wire_params(detector_config: Dict[str, Any],
     ], dtype=jnp.float32)
 
     # Project corners onto the wire direction
-    r_values = corners_centered[:, 0] * cos_theta + corners_centered[:, 1] * sin_theta
+    r_values = corners_centered[:, 0] * sin_theta + corners_centered[:, 1] * cos_theta
     r_min = jnp.min(r_values)
     r_max = jnp.max(r_values)
 
@@ -335,7 +335,7 @@ def pre_calculate_all_wire_params(detector_config: Dict[str, Any],
             # Calculate min_idx_abs
             cos_theta = np.cos(angle)
             sin_theta = np.sin(angle)
-            r_values = corners_centered[:, 0] * cos_theta + corners_centered[:, 1] * sin_theta
+            r_values = corners_centered[:, 0] * sin_theta + corners_centered[:, 1] * cos_theta
             r_min = np.min(r_values)
             idx_min_rel = np.floor(r_min / spacing - 1e-9).astype(np.int32)
             min_idx_abs = idx_min_rel + offset

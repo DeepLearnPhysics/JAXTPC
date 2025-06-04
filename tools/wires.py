@@ -37,7 +37,7 @@ def _calculate_single_plane_wire_distances_jit(
     P_z_cm = positions_yz_centered_cm[:, 1]  # Shape: (n_hits,)
 
     # Calculate r_prime (the wire coordinate) for all positions
-    r_prime = P_y_cm * cos_theta + P_z_cm * sin_theta  # Shape: (n_hits,)
+    r_prime = P_y_cm * sin_theta + P_z_cm * cos_theta  # Shape: (n_hits,)
 
     # Calculate index and distance to closest wire
     idx_rel_floor = jnp.floor(r_prime / (wire_spacing_cm + 1e-9) - 1e-9)  # Shape: (n_hits,)
@@ -54,6 +54,71 @@ def _calculate_single_plane_wire_distances_jit(
     closest_indices_abs = (closest_idx_rel.astype(jnp.int32) + index_offset)   # Shape: (n_hits,)
 
     return closest_indices_abs, closest_distances
+
+
+@partial(jax.jit, static_argnums=(3,))
+def calculate_k_nearest_wires(positions_yz_cm, angle_rad, wire_spacing_cm,
+                              K, max_wire_idx_abs, index_offset):
+    """
+    Calculate K nearest wire indices and distances for each hit in a detector plane.
+
+    Parameters
+    ----------
+    positions_yz_cm : jnp.ndarray
+        Array of shape (n_hits, 2) containing the (y, z) positions in cm.
+    angle_rad : float
+        Wire angle in radians, measured in the YZ plane.
+    wire_spacing_cm : float
+        Spacing between wires in cm.
+    K : int
+        Number of nearest wires to find.
+    max_wire_idx_abs : int
+        Maximum absolute wire index.
+    index_offset : int
+        Wire index offset.
+
+    Returns
+    -------
+    wire_indices : jnp.ndarray
+        Array of shape (n_hits, K) containing the indices of the K nearest wires.
+    wire_distances : jnp.ndarray
+        Array of shape (n_hits, K) containing the distances to K nearest wires.
+    """
+    cos_theta = jnp.cos(angle_rad)
+    sin_theta = jnp.sin(angle_rad)
+
+    # Extract y and z components
+    P_y_cm = positions_yz_cm[:, 0]
+    P_z_cm = positions_yz_cm[:, 1]
+
+    # Calculate r_prime (the wire coordinate) for all positions
+    r_prime = P_y_cm * sin_theta + P_z_cm * cos_theta
+
+    # Find the closest wire index
+    closest_idx_rel = jnp.round(r_prime / wire_spacing_cm).astype(jnp.int32)
+    closest_idx_abs = closest_idx_rel + index_offset
+
+    # Calculate how many wires to take on each side
+    half_k = (K - 1) // 2
+
+    # Create offsets array
+    offsets = jnp.arange(-half_k, K - half_k)
+
+    # Calculate indices for K nearest wires using broadcasting
+    # Shape: (n_hits, 1) + (K,) -> (n_hits, K)
+    wire_indices = closest_idx_abs[:, jnp.newaxis] + offsets
+
+    # Calculate distances for each wire
+    # Shape: (n_hits, 1) - (n_hits, K) * scalar -> (n_hits, K)
+    wire_r_values = (wire_indices - index_offset) * wire_spacing_cm
+    wire_distances = r_prime[:, jnp.newaxis] - wire_r_values
+
+    # Replace out-of-bounds indices with -1
+    valid_mask = (wire_indices >= 0) & (wire_indices <= max_wire_idx_abs)
+    wire_indices = jnp.where(valid_mask, wire_indices, -1)
+    wire_distances = jnp.where(valid_mask, wire_distances, jnp.nan)
+
+    return wire_indices, wire_distances
 
 
 @jax.jit
