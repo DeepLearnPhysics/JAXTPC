@@ -316,6 +316,192 @@ def visualize_single_plane(wire_signals_dict, simulation_params, side_idx=0, pla
         cbar.outline.set_edgecolor('white')
     return fig
 
+
+def visualize_wire_planes_colored_by_index(detector_config, figsize=(15, 10)):
+    """
+    Visualize all 6 wire planes (3 on each side) of the LArTPC detector,
+    coloring the wires based on their index.
+
+    Parameters
+    ----------
+    detector_config : dict
+        Detector configuration dictionary with pre-calculated parameters.
+    figsize : tuple, optional
+        Figure size (width, height) in inches, by default (15, 10).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The matplotlib Figure object.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+    # Extract detector dimensions
+    detector_dims = detector_config['detector']['dimensions']
+    detector_y = detector_dims['y']
+    detector_z = detector_dims['z']
+
+    # Extract wire plane information
+    sides = detector_config['wire_planes']['sides']
+
+    # Create figure and axes - 2 rows (for sides) x 3 columns (for planes)
+    fig, axes = plt.subplots(2, 3, figsize=figsize)
+
+    # Set up titles for the planes
+    plane_types = ['First Induction (U)', 'Second Induction (V)', 'Collection (Y)']
+
+    # Define a colormap for the wire indices
+    cmap = plt.cm.viridis
+
+    # Loop through each side (0: x < 0, 1: x > 0)
+    for side_idx, side in enumerate(sides):
+        side_desc = side['description']
+
+        # Loop through each plane on this side
+        for plane_idx, plane in enumerate(side['planes']):
+            ax = axes[side_idx, plane_idx]
+
+            # Extract plane parameters
+            angle_deg = plane['angle']
+            angle_rad = np.radians(angle_deg)
+            wire_spacing = plane['wire_spacing']
+            distance_from_anode = plane['distance_from_anode']
+
+            # Display information
+            title = f"{side_desc}\n{plane_types[plane_idx]}"
+            ax.set_title(title)
+
+            # Draw a representation of the detector boundaries
+            # Z is horizontal (width) and Y is vertical (height)
+            ax.add_patch(plt.Rectangle((0, 0), detector_z, detector_y, fill=False, color='black', linestyle='--'))
+
+            # Calculate sine and cosine once
+            cos_theta = np.cos(angle_rad)
+            sin_theta = np.sin(angle_rad)
+
+            # Calculate the parameter values for all four corners of the detector
+            corners = [
+                (0, 0),  # Bottom-left (y=0, z=0)
+                (detector_y, 0),  # Top-left (y=detector_y, z=0)
+                (0, detector_z),  # Bottom-right (y=0, z=detector_z)
+                (detector_y, detector_z)  # Top-right (y=detector_y, z=detector_z)
+            ]
+
+            # NEW PARAMETRIZATION: r = z * cos(θ) + y * sin(θ)
+            r_values = [z * cos_theta + y * sin_theta for y, z in corners]
+            r_min = min(r_values)
+            r_max = max(r_values)
+
+            # Calculate index offset for negative angles
+            offset = 0
+            if r_min < 0:
+                offset = int(np.abs(np.floor(r_min / wire_spacing))) + 1
+
+            # Calculate exact wire index range with offset applied
+            idx_min = int(np.floor(r_min / wire_spacing)) + offset
+            idx_max = int(np.ceil(r_max / wire_spacing)) + offset
+
+            # Store the number of wires for normalization
+            num_wires = idx_max - idx_min + 1
+
+            # Draw each wire within this range
+            for wire_idx in range(idx_min, idx_max + 1):
+                # Wire parameter r (adjusted for offset)
+                r = (wire_idx - offset) * wire_spacing
+
+                # Calculate intersection points with the four boundaries
+                # Using parametrization: r = z * cos(θ) + y * sin(θ)
+                intersections = []
+
+                # Check intersection with y=0 (bottom boundary)
+                # r = z * cos(θ) + 0 * sin(θ) => z = r / cos(θ)
+                if abs(cos_theta) > 1e-10:
+                    z = r / cos_theta
+                    if 0 <= z <= detector_z:
+                        intersections.append((0, z))
+
+                # Check intersection with y=detector_y (top boundary)
+                # r = z * cos(θ) + detector_y * sin(θ) => z = (r - detector_y * sin(θ)) / cos(θ)
+                if abs(cos_theta) > 1e-10:
+                    z = (r - detector_y * sin_theta) / cos_theta
+                    if 0 <= z <= detector_z:
+                        intersections.append((detector_y, z))
+
+                # Check intersection with z=0 (left boundary)
+                # r = 0 * cos(θ) + y * sin(θ) => y = r / sin(θ)
+                if abs(sin_theta) > 1e-10:
+                    y = r / sin_theta
+                    if 0 <= y <= detector_y:
+                        intersections.append((y, 0))
+
+                # Check intersection with z=detector_z (right boundary)
+                # r = detector_z * cos(θ) + y * sin(θ) => y = (r - detector_z * cos(θ)) / sin(θ)
+                if abs(sin_theta) > 1e-10:
+                    y = (r - detector_z * cos_theta) / sin_theta
+                    if 0 <= y <= detector_y:
+                        intersections.append((y, detector_z))
+
+                # Draw the wire if we have at least 2 intersections
+                if len(intersections) >= 2:
+                    # Sort intersections appropriately
+                    if len(intersections) > 2:
+                        # Remove duplicates first
+                        unique_intersections = []
+                        for pt in intersections:
+                            is_duplicate = False
+                            for existing in unique_intersections:
+                                if abs(pt[0] - existing[0]) < 1e-6 and abs(pt[1] - existing[1]) < 1e-6:
+                                    is_duplicate = True
+                                    break
+                            if not is_duplicate:
+                                unique_intersections.append(pt)
+                        intersections = unique_intersections
+
+                    if len(intersections) >= 2:
+                        # Sort by the coordinate that varies most
+                        p1, p2 = intersections[0], intersections[1]
+                        dy = abs(p2[0] - p1[0])
+                        dz = abs(p2[1] - p1[1])
+
+                        if dz > dy:
+                            intersections.sort(key=lambda p: p[1])  # Sort by z
+                        else:
+                            intersections.sort(key=lambda p: p[0])  # Sort by y
+
+                        p1, p2 = intersections[0], intersections[-1]
+
+                        # Calculate normalized wire index for coloring
+                        norm_idx = (wire_idx - idx_min) / max(1, num_wires - 1)
+                        color = cmap(norm_idx)
+
+                        # Plot with Z on x-axis and Y on y-axis
+                        ax.plot([p1[1], p2[1]], [p1[0], p2[0]], color=color, linewidth=0.8, alpha=0.7)
+
+            # Set axis properties - Z horizontal, Y vertical
+            ax.set_xlabel('Z Position (cm)')
+            ax.set_ylabel('Y Position (cm)')
+            ax.set_xlim(0, detector_z)
+            ax.set_ylim(0, detector_y)
+            ax.grid(alpha=0.3)
+
+            # Add plane info as text
+            info_text = f"Angle: {angle_deg}°\nSpacing: {wire_spacing} cm\nDistance from anode: {distance_from_anode} cm"
+            ax.text(0.05, 0.95, info_text, transform=ax.transAxes, va='top',
+                    bbox=dict(facecolor='white', alpha=0.7))
+
+            # Add a mini colorbar for this subplot
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=idx_min, vmax=idx_max))
+            sm.set_array([])
+            cbar = plt.colorbar(sm, cax=cax)
+            cbar.set_label('Wire Index')
+
+    plt.tight_layout()
+    return fig
+
 # def visualize_wire_signals(wire_signals_dict, simulation_params, figsize=(20, 10)):
 #     """
 #     Visualize wire signals stored in a dictionary.
