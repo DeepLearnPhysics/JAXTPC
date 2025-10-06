@@ -352,12 +352,6 @@ def main():
         else:
             print(f"  {key}: {type(value)}")
 
-    # Example analysis: energy deposits by particle type
-    if 'de' in step_data and 'particle_pdg' in step_data:
-        # Get unique particle types
-        particle_types = jnp.unique(step_data['particle_pdg'])
-        print("\nEnergy deposits by particle type:")
-
         for pdg in particle_types:
             # Get steps for this particle type
             mask = step_data['particle_pdg'] == pdg
