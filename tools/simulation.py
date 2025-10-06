@@ -13,38 +13,31 @@ from tools.drift import (_calculate_single_plane_drift_jit,
 from tools.wires import (_calculate_single_plane_wire_distances_jit,
                   calculate_angular_scaling, calculate_angular_scaling_vmap,
                   calculate_segment_wire_angles, calculate_segment_wire_angles_vmap,
-                  calculate_diffusion_response_normalized, 
-                  prepare_segment_modified, fill_signals_array)
+                  prepare_segment_no_diffusion, fill_signals_from_kernels)
 from tools.geometry import generate_detector
 from tools.loader import load_particle_step_data
 from tools.recombination import recombine_steps
-from tools.responses import create_kernels_and_params, apply_response
+from tools.response_kernels import load_response_kernels, apply_diffusion_response
 
 def create_wire_signal_calculator(
-    detector_config, response_path="tools/wire_responses/", n_dist=6, distance_falloff=1.0,
-    K_wire=5, K_time=9, max_num_hits_pad=500000
+    detector_config, response_path="tools/responses/", num_s=16,
+    max_num_hits_pad=500000
 ):
     """
     Factory function that creates a JIT-compiled function to calculate wire signals.
     
     Performs setup and returns a function to calculate wire signals for given 
-    PADDED position/charge arrays and mask. Includes diffusion, electron lifetime 
-    effects, angle and wire distance interpolation, and wire response convolution.
+    PADDED position/charge arrays and mask. Includes diffusion via response kernels,
+    electron lifetime effects, and angular scaling.
     
     Parameters
     ----------
     detector_config : dict
         Detector configuration dictionary with pre-calculated parameters.
     response_path : str, optional
-        Path to wire response data, by default "tools/wire_responses/".
-    n_dist : int, optional
-        Number of distance steps for wire response, by default 6.
-    distance_falloff : float, optional
-        Falloff parameter for wire response distance scaling, by default 1.0.
-    K_wire : int, optional
-        Number of wire neighbors to consider in signal calculation, by default 5.
-    K_time : int, optional
-        Number of time bins to consider in signal calculation, by default 9.
+        Path to wire response kernel data, by default "tools/responses/".
+    num_s : int, optional
+        Number of diffusion levels in kernel interpolation, by default 16.
     max_num_hits_pad : int, optional
         Maximum number of hits to pad arrays for JIT compilation, by default 500000.
         
@@ -87,16 +80,6 @@ def create_wire_signal_calculator(
     longitudinal_diffusion_cm2_us = detector_config['longitudinal_diffusion_cm2_us']
     transverse_diffusion_cm2_us = detector_config['transverse_diffusion_cm2_us']
 
-    # Resolution parameters
-    sigma_wire_base_cm = detector_config.get('sigma_wire_base_cm', 0.3)
-    sigma_time_base_us = detector_config.get('sigma_time_base_us', 0.5)
-
-    # Define angle and wire distance interpolation points
-    angle_points = jnp.linspace(0, 90, 10)  # 10 points from 0 to 90 degrees
-    num_angles = len(angle_points)
-    wire_distance_points = jnp.array([0.0, 0.5, 1.0, 1.5, 2.0, 2.5])  # 6 distance points
-    num_wire_distances = len(wire_distance_points)
-
     # --- Convert arrays needed as static args into hashable tuples ---
     index_offsets_np = np.array(index_offsets_all_jax)
     max_indices_np = np.array(max_wire_indices_abs_all_jax)
@@ -110,28 +93,28 @@ def create_wire_signal_calculator(
 
     # --- Create wire response kernels ---
     print("   Loading wire response kernels...")
-    kernels_and_params = create_kernels_and_params(response_path, n_dist, distance_falloff)
-
-    kernel_types = [
-        kernels_and_params['U-plane']['kernels'],
-        kernels_and_params['V-plane']['kernels'],
-        kernels_and_params['Y-plane']['kernels']
-    ]
-
-    # Define the plane type mapping for each side/plane
-    # 0=U, 1=V, 2=Y
-    plane_type_indices = np.array([
-        [0, 1, 2],  # Side 0: U, V, Y
-        [0, 1, 2]   # Side 1: U, V, Y
-    ])
-
-    # Convert to tuple for JIT static argument
-    plane_type_indices_tuple = tuple(tuple(int(x) for x in row) for row in plane_type_indices)
+    # Load kernels with proper wire and time spacing
+    # The kernels use 0.1 cm bin spacing for sub-wire interpolation
+    # This is independent of the actual physical wire spacing
+    kernel_wire_spacing = 0.1  # Fixed kernel bin spacing
+    time_spacing_float = float(time_step_size_us)
     
-    print(f"   Config: K_wire={K_wire}, K_time={K_time}, Pad={max_num_hits_pad}")
+    kernel_info = load_response_kernels(
+        response_path=response_path, 
+        num_s=num_s,
+        wire_spacing=kernel_wire_spacing,
+        time_spacing=time_spacing_float
+    )
+    
+    # Define the plane type mapping for each side/plane
+    # 'U', 'V', 'Y'
+    plane_types = [
+        ['U', 'V', 'Y'],  # Side 0: U, V, Y
+        ['U', 'V', 'Y']   # Side 1: U, V, Y
+    ]
+    
+    print(f"   Config: Pad={max_num_hits_pad}, num_s={num_s}")
     print(f"   Physics: Lifetime={electron_lifetime_ms} ms, LongDiff={detector_config['longitudinal_diffusion_cm2_s']} cm²/s, TransDiff={detector_config['transverse_diffusion_cm2_s']} cm²/s")
-    print(f"   Interpolation: {num_angles} angles, {num_wire_distances} wire distances")
-    print(f"   Response: {n_dist} distance steps, falloff={distance_falloff}")
 
     # Save parameters for later reference
     all_params = {
@@ -144,8 +127,6 @@ def create_wire_signal_calculator(
         "max_abs_indices": max_wire_indices_abs_all_jax,
         "min_abs_indices": min_wire_indices_abs_all_jax,
         "num_wires_actual": num_wires_actual,
-        "K_wire": K_wire,
-        "K_time": K_time,
         "max_num_hits_pad": max_num_hits_pad,
         "all_plane_distances_cm": all_plane_distances_cm,
         "detector_half_width_x_cm": detector_half_width_x_cm,
@@ -154,32 +135,27 @@ def create_wire_signal_calculator(
         "electron_lifetime_ms": electron_lifetime_ms,
         "longitudinal_diffusion_cm2_s": detector_config['longitudinal_diffusion_cm2_s'],
         "transverse_diffusion_cm2_s": detector_config['transverse_diffusion_cm2_s'],
-        "sigma_wire_base_cm": sigma_wire_base_cm,
-        "sigma_time_base_us": sigma_time_base_us,
+        "longitudinal_diffusion_cm2_us": longitudinal_diffusion_cm2_us,
+        "transverse_diffusion_cm2_us": transverse_diffusion_cm2_us,
         "furthest_plane_indices": furthest_plane_indices,
-        "angle_points": angle_points,
-        "num_angles": num_angles,
-        "wire_distance_points": wire_distance_points,
-        "num_wire_distances": num_wire_distances,
-        "plane_type_indices": plane_type_indices,
-        "n_dist": n_dist,
-        "distance_falloff": distance_falloff,
+        "plane_types": plane_types,
+        "num_s": num_s,
+        "kernel_info": kernel_info,
     }
 
     # --- Define the INNER JIT function ---
     @partial(jax.jit, static_argnames=('max_wire_indices_static_tuple', 'min_wire_indices_static_tuple',
-                                      'index_offsets_static_tuple', 'num_wires_static_tuple', 'plane_type_indices_tuple'))
+                                      'index_offsets_static_tuple', 'num_wires_static_tuple'))
     def _calculate_signals_for_event_jit(
         positions_mm_padded_array,          # Dynamic input (max_hits_pad, 3)
         charge_padded_array,                # Dynamic input (max_hits_pad,)
         valid_hit_mask_padded_array,        # Dynamic input (max_hits_pad,)
-        theta_padded_array,                 # Dynamic input (max_hits_pad,) - NEW
-        phi_padded_array,                   # Dynamic input (max_hits_pad,) - NEW
+        theta_padded_array,                 # Dynamic input (max_hits_pad,)
+        phi_padded_array,                   # Dynamic input (max_hits_pad,)
         max_wire_indices_static_tuple,      # Static input (tuple of tuples)
         min_wire_indices_static_tuple,      # Static input (tuple of tuples)
         index_offsets_static_tuple,         # Static input (tuple of tuples)
-        num_wires_static_tuple,             # Static input (tuple of tuples)
-        plane_type_indices_tuple
+        num_wires_static_tuple             # Static input (tuple of tuples)
         ):
         """ JIT - Calculates signals for pre-padded event data using captured & static args. """
         # 1. Prepare Padded Data (Units, Centering)
@@ -199,7 +175,7 @@ def create_wire_signal_calculator(
             charge_side_masked_padded = jnp.where(is_on_side_mask_padded, charge_padded, 0.0)
             combined_mask_for_jit = valid_hit_mask_padded & is_on_side_mask_padded
 
-            # Calculate drift for the closest plane on this side
+            # Calculate drift for the furthest plane on this side
             furthest_plane_idx = furthest_plane_indices[side_idx]
             furthest_plane_dist_cm = all_plane_distances_cm[side_idx, furthest_plane_idx]
 
@@ -221,6 +197,9 @@ def create_wire_signal_calculator(
                 min_idx_abs = min_wire_indices_static_tuple[side_idx][plane_idx]
                 num_wires = num_wires_static_tuple[side_idx][plane_idx]
 
+                # Get plane type for kernel selection
+                plane_type = plane_types[side_idx][plane_idx]
+
                 # --- Calculate Drift ---
                 # Calculate distance difference between furthest plane and this plane
                 plane_dist_difference_cm = furthest_plane_dist_cm - plane_dist_cm
@@ -230,6 +209,14 @@ def create_wire_signal_calculator(
                     drift_velocity_cm_us,
                     plane_dist_difference_cm
                 )
+
+                # --- Calculate s parameter for diffusion ---
+                # s = drift_distance / total_travel_distance
+                # total_travel_distance is half the detector width
+                total_travel_distance_cm = detector_half_width_x_cm
+                s_values = drift_distance_cm_padded / total_travel_distance_cm
+                # Clip s to [0, 1] range
+                s_values = jnp.clip(s_values, 0.0, 1.0)
 
                 # --- Calculate electron lifetime attenuation ---
                 electron_lifetime_us = electron_lifetime_ms * 1000.0  # Convert ms to us
@@ -247,56 +234,55 @@ def create_wire_signal_calculator(
                     theta_padded, phi_padded, angle_rad
                 )
 
-                # Calculate the angular scaling factor
-                angular_scaling_factor = calculate_angular_scaling_vmap(theta_xz, theta_y)
+                # # Calculate the angular scaling factor
+                # angular_scaling_factor = calculate_angular_scaling_vmap(theta_xz, theta_y)
 
-                # --- STEP 1: Process segments with prepare_segment ---
+                # --- STEP 1: Process segments without diffusion ---
                 # Create vmapped version to process all hits
                 prepare_segment_vmap = jax.vmap(
-                    prepare_segment_modified,
-                    in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None,
-                            None, None, None, None, None, None, None, None),
+                    prepare_segment_no_diffusion,
+                    in_axes=(0, 0, 0, 0, 0, 0, None, None, None, None),
                 )
 
-                # Process all hits and get indices and values
-                indices_and_values = prepare_segment_vmap(
+                # Process all hits and get indices, offsets, and intensities
+                segment_data = prepare_segment_vmap(
                     charge_side_masked_padded,
                     drift_time_us_padded,
-                    drift_distance_cm_padded,
                     closest_indices_abs,
                     closest_distances,
                     attenuation_factors,
-                    theta_xz,
-                    theta_y,
-                    angular_scaling_factor,
                     combined_mask_for_jit,
-                    K_wire,
-                    K_time,
                     spacing_cm,
                     time_step_size_us,
-                    longitudinal_diffusion_cm2_us,
-                    transverse_diffusion_cm2_us,
-                    drift_velocity_cm_us,
-                    num_angles,
-                    num_wire_distances,
                     min_idx_abs,
-                    num_wires,
-                    num_time_steps
+                    num_wires
+                )
+                
+                wire_indices_rel, wire_offsets, time_indices, time_offsets, intensities = segment_data
+
+                # --- STEP 2: Apply diffusion response kernels ---
+                # Get kernel data and parameters for this plane type
+                plane_info = kernel_info[plane_type]
+                DKernel = plane_info['DKernel']
+                kernel_num_wires = plane_info['num_wires']
+                kernel_height = plane_info['kernel_height']
+                kernel_wire_stride = plane_info['wire_stride']
+                kernel_wire_spacing = plane_info['wire_spacing']
+                kernel_time_spacing = plane_info['time_spacing']
+                
+                # Get kernel contributions for this plane type
+                contributions = apply_diffusion_response(
+                    DKernel, s_values, wire_offsets, time_offsets,
+                    kernel_wire_stride, kernel_wire_spacing, kernel_time_spacing, kernel_num_wires
                 )
 
-                # --- STEP 2: Fill output array with signals ---
-                wire_signals_plane = fill_signals_array(indices_and_values, num_wires, num_time_steps, num_angles, num_wire_distances)
-                
-                # --- STEP 3: Apply wire response convolution ---
-                plane_type_idx = plane_type_indices_tuple[side_idx][plane_idx]
-                kernels = kernel_types[plane_type_idx]
-                
-                # Apply convolution and collapse the result
-                wire_signals_plane_collapsed = apply_response(
-                    wire_signals_plane, kernels, num_angles, num_wire_distances
+                # --- STEP 3: Fill output array with kernel contributions ---
+                wire_signals_plane = fill_signals_from_kernels(
+                    wire_indices_rel, time_indices, intensities, contributions,
+                    num_wires, num_time_steps, kernel_num_wires, kernel_height
                 )
-
-                results.append(wire_signals_plane_collapsed)
+                
+                results.append(wire_signals_plane)
 
         # Return tuple of results
         return tuple(results)
@@ -307,8 +293,7 @@ def create_wire_signal_calculator(
                                   max_wire_indices_static_tuple=max_indices_static_tuple,
                                   min_wire_indices_static_tuple=min_indices_static_tuple,
                                   index_offsets_static_tuple=index_offsets_static_tuple,
-                                  num_wires_static_tuple=num_wires_static_tuple,
-                                  plane_type_indices_tuple=plane_type_indices_tuple)
+                                  num_wires_static_tuple=num_wires_static_tuple)
 
     # Wrapper function to convert the tuple of results to a dictionary
     def calculate_event_signals(positions_mm_padded, charge_padded, valid_hit_mask_padded, theta_padded, phi_padded):
@@ -353,8 +338,7 @@ def create_wire_signal_calculator(
 
 
 def run_simulation(config_path, data_path, event_idx=0, 
-                   K_wire=5, K_time=9, MAX_HITS_PADDING=500_00, 
-                   n_dist=6, distance_falloff=1.0, response_path="tools/wire_responses/"):
+                   MAX_HITS_PADDING=500000, num_s=16, response_path="tools/responses/"):
     """
     Run the detector simulation for a specific event.
     
@@ -366,18 +350,12 @@ def run_simulation(config_path, data_path, event_idx=0,
         Path to particle step data HDF5 file.
     event_idx : int, optional
         Index of event to process, by default 0.
-    K_wire : int, optional
-        Number of wire neighbors to consider in signal calculation, by default 5.
-    K_time : int, optional
-        Number of time bins to consider in signal calculation, by default 9.
     MAX_HITS_PADDING : int, optional
-        Maximum number of hits to pad arrays for JIT compilation, by default 50000.
-    n_dist : int, optional
-        Number of distance steps for wire response, by default 6.
-    distance_falloff : float, optional
-        Falloff parameter for wire response distance scaling, by default 1.0.
+        Maximum number of hits to pad arrays for JIT compilation, by default 500000.
+    num_s : int, optional
+        Number of diffusion levels in kernel interpolation, by default 16.
     response_path : str, optional
-        Path to wire response data, by default "tools/wire_responses/".
+        Path to wire response kernel data, by default "tools/responses/".
         
     Returns
     -------
@@ -390,8 +368,7 @@ def run_simulation(config_path, data_path, event_idx=0,
     print(" LArTPC Wire Signal Simulation")
     print("="*60)
     print(f"Config: {config_path}, Data: {data_path} (Event {event_idx})")
-    print(f"Response path: {response_path}, n_dist={n_dist}, falloff={distance_falloff}")
-    print(f"K={K_wire}, K_time={K_time}, MaxHitsPad={MAX_HITS_PADDING}")
+    print(f"MaxHitsPad={MAX_HITS_PADDING}, num_s={num_s}")
 
     # --- Load Configuration ---
     if not os.path.exists(config_path):
@@ -410,8 +387,8 @@ def run_simulation(config_path, data_path, event_idx=0,
     # --- Create the Specialized Calculator (ONCE) ---
     try:
         calculate_event_signals, simulation_params = create_wire_signal_calculator(
-            detector_config, response_path=response_path, n_dist=n_dist, distance_falloff=distance_falloff,
-            K_wire=K_wire, K_time=K_time, max_num_hits_pad=MAX_HITS_PADDING
+            detector_config, response_path=response_path, num_s=num_s,
+            max_num_hits_pad=MAX_HITS_PADDING
         )
         # First call will trigger compilation
         print("\nTriggering JIT compilation (if not cached)...")
@@ -434,6 +411,10 @@ def run_simulation(config_path, data_path, event_idx=0,
         step_data = load_particle_step_data(data_path, event_idx)
         event_positions_mm = jnp.asarray(step_data.get('position', jnp.empty((0,3))), dtype=jnp.float32)
         event_de = step_data.get('de', jnp.empty((0,)))
+
+        positions_x = event_positions_mm[:, 0]
+        print(f"number on east side: {jnp.sum(positions_x >= 0)}")
+        print(f"number on west side: {jnp.sum(positions_x < 0)}")
 
         # Extract theta and phi from step_data
         event_theta = jnp.asarray(step_data.get('theta', jnp.zeros((event_positions_mm.shape[0],))), dtype=jnp.float32)
