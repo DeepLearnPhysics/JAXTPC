@@ -349,13 +349,82 @@ calculate_segment_wire_angles_vmap = jax.vmap(
     calculate_segment_wire_angles, in_axes=(0, 0, None)
 )
 
-@partial(jax.jit, static_argnames=['K_wire', 'K_time', 'num_angles', 'num_wire_distances', 'num_wires', 'num_time_steps'])
+@partial(jax.jit, static_argnames=['num_wires'])
+def prepare_segment_no_diffusion(
+    charge, drift_time_us, closest_index_abs, closest_distance,
+    attenuation_factor, valid_hit,
+    wire_spacing_cm, time_step_size_us,
+    min_idx_abs, num_wires
+):
+    """
+    Process a single hit without diffusion (handled by response kernels).
+    
+    Parameters
+    ----------
+    charge : float
+        Charge deposited by the hit.
+    drift_time_us : float
+        Drift time of the hit in μs.
+    closest_index_abs : int
+        Absolute index of the closest wire.
+    closest_distance : float
+        Distance to the closest wire in cm.
+    attenuation_factor : float
+        Attenuation factor due to electron lifetime.
+    valid_hit : bool
+        Whether the hit is valid.
+    wire_spacing_cm : float
+        Spacing between wires in cm.
+    time_step_size_us : float
+        Size of time step in μs.
+    min_idx_abs : int
+        Minimum absolute wire index.
+    num_wires : int
+        Number of wires in the plane.
+        
+    Returns
+    -------
+    tuple
+        Tuple containing indices, offsets, and intensity:
+        (wire_index, wire_offset, time_index, time_offset, intensity)
+    """
+    # Only process if valid hit
+    charge = jnp.where(valid_hit, charge, 0.0)
+
+    # Calculate central time bin and offset
+    time_index = jnp.floor(drift_time_us / time_step_size_us).astype(jnp.int32)
+    time_offset = (drift_time_us / time_step_size_us) - time_index
+
+    # Calculate wire offset (fractional part of wire position)
+    wire_offset = jnp.abs(closest_distance) / wire_spacing_cm
+
+    # Apply charge scaling and attenuation
+    intensity = charge * attenuation_factor
+
+    # Convert to relative wire index
+    wire_index_rel = jnp.where(
+        (closest_index_abs >= 0) & (closest_index_abs < num_wires),
+        closest_index_abs - min_idx_abs,
+        -1  # Invalid index
+    )
+    
+    # Set intensity to 0 for invalid hits
+    intensity = jnp.where(
+        valid_hit & (wire_index_rel >= 0),
+        intensity,
+        0.0
+    )
+
+    return wire_index_rel, wire_offset, time_index, time_offset, intensity
+
+
+@partial(jax.jit, static_argnames=['K_wire', 'K_time', 'num_wires', 'num_time_steps'])
 def prepare_segment_modified(
     charge, drift_time_us, drift_distance_cm, closest_index_abs, closest_distance,
     attenuation_factor, theta_xz_rad, theta_y_rad, angular_scaling_factor, valid_hit,
     K_wire, K_time, wire_spacing_cm, time_step_size_us,
     longitudinal_diffusion_cm2_us, transverse_diffusion_cm2_us, drift_velocity_cm_us,
-    num_angles, num_wire_distances, min_idx_abs, num_wires, num_time_steps
+    min_idx_abs, num_wires, num_time_steps
 ):
     """
     Process a single hit with detailed intermediate results for visualization.
@@ -396,10 +465,6 @@ def prepare_segment_modified(
         Transverse diffusion coefficient in cm²/μs.
     drift_velocity_cm_us : float
         Drift velocity in cm/μs.
-    num_angles : int
-        Number of angle bins.
-    num_wire_distances : int
-        Number of wire distance bins.
     min_idx_abs : int
         Minimum absolute wire index.
     num_wires : int
@@ -411,7 +476,7 @@ def prepare_segment_modified(
     -------
     tuple
         Tuple containing indices and values for the hit:
-        (wire_indices_rel, time_indices_out, angle_indices_out, wire_dist_indices_out, signal_values_out)
+        (wire_indices_rel, time_indices_out, signal_values_out)
     """
     # Only process if valid hit
     charge = jnp.where(valid_hit, charge, 0.0)
@@ -459,110 +524,133 @@ def prepare_segment_modified(
     
     # Apply charge for full diffusion response
     diffusion_response = diffusion_response_normalized * attenuated_charge
-    # 5. Angle interpolation (theta_xz)
-    theta_xz_deg = jnp.clip(theta_xz_rad * (180.0 / jnp.pi), 0.0, 90.0)
-    angle_step = 90.0 / (num_angles - 1)
-    normalized_pos_angle = theta_xz_deg / angle_step
-    lower_idx_angle = jnp.clip(jnp.floor(normalized_pos_angle).astype(jnp.int32), 0, num_angles - 2)
-    upper_idx_angle = lower_idx_angle + 1
-    frac_angle = normalized_pos_angle - lower_idx_angle
-    angle_indices = jnp.array([lower_idx_angle, upper_idx_angle])  # Shape: (2,)
-    angle_weights = jnp.array([1.0 - frac_angle, frac_angle])  # Shape: (2,)
-
-    # 6. Wire distance interpolation
-    wire_dist_wire_units = jnp.abs(wire_distances_cm) / wire_spacing_cm  # Shape: (K_wire,)
-    wire_dist_clipped = jnp.clip(wire_dist_wire_units, 0.0, 2.5)
-    bin_idx = jnp.clip(jnp.floor(wire_dist_clipped / 0.5).astype(jnp.int32), 0, num_wire_distances - 2)
-    lower_idx_dist = bin_idx
-    upper_idx_dist = bin_idx + 1
-    bin_lower = lower_idx_dist * 0.5
-    frac_dist = (wire_dist_clipped - bin_lower) / 0.5
-
-    # Wire distance indices and weights
-    wire_dist_indices = jnp.stack([lower_idx_dist, upper_idx_dist], axis=1)  # Shape: (K_wire, 2)
-    wire_dist_weights = jnp.stack([1.0 - frac_dist, frac_dist], axis=1)  # Shape: (K_wire, 2)
-
-    # Initialize arrays for broadcasting across 4D
-    wire_indices_4d = jnp.zeros((K_wire, K_time, 2, 2), dtype=jnp.int32)
-    time_indices_4d = jnp.zeros((K_wire, K_time, 2, 2), dtype=jnp.int32)
-    angle_indices_4d = jnp.zeros((K_wire, K_time, 2, 2), dtype=jnp.int32)
-    wire_dist_indices_4d = jnp.zeros((K_wire, K_time, 2, 2), dtype=jnp.int32)
-
-    # Prepare 4D arrays of indices - similar to original code
-    for w in range(K_wire):
-        wire_indices_4d = wire_indices_4d.at[w, :, :, :].set(wire_indices[w])
-
-    for t in range(K_time):
-        time_indices_4d = time_indices_4d.at[:, t, :, :].set(time_bins[t])
-
-    for a in range(2):
-        angle_indices_4d = angle_indices_4d.at[:, :, a, :].set(angle_indices[a])
-
-    for w in range(K_wire):
-        for d in range(2):
-            wire_dist_indices_4d = wire_dist_indices_4d.at[w, :, :, d].set(wire_dist_indices[w, d])
-
-    # Calculate signals using broadcasting
-    # Reshape for broadcasting
-    diffusion_2d = diffusion_response[:, :, jnp.newaxis, jnp.newaxis]  # (K_wire, K_time, 1, 1)
-    angle_weights_2d = angle_weights.reshape((1, 1, 2, 1))  # (1, 1, 2, 1)
-    wire_dist_weights_4d = wire_dist_weights.reshape((K_wire, 1, 1, 2))  # (K_wire, 1, 1, 2)
-
-    # Compute signals with broadcasting
-    signal_values_4d = diffusion_2d * angle_weights_2d * wire_dist_weights_4d
 
     # Create validity mask
-    wire_valid = (wire_indices_4d >= 0) & (wire_indices_4d < num_wires)
-    time_valid = (time_indices_4d >= 0) & (time_indices_4d < num_time_steps)
+    wire_valid = (wire_indices >= 0) & (wire_indices < num_wires)
+    time_valid = (time_bins >= 0) & (time_bins < num_time_steps)
 
-    # Combine validity masks
-    valid_mask = wire_valid & time_valid & valid_hit
+    # Combine validity masks - expand to 2D
+    wire_valid_2d = wire_valid[:, jnp.newaxis]  # Shape: (K_wire, 1)
+    time_valid_2d = time_valid[jnp.newaxis, :]  # Shape: (1, K_time)
+    valid_mask_2d = wire_valid_2d & time_valid_2d & valid_hit  # Shape: (K_wire, K_time)
 
     # Apply validity mask to zero out invalid entries
-    wire_indices_rel = jnp.where(valid_mask, wire_indices_4d - min_idx_abs, 0).reshape(-1)
-    time_indices_out = jnp.where(valid_mask, time_indices_4d, 0).reshape(-1)
-    angle_indices_out = jnp.where(valid_mask, angle_indices_4d, 0).reshape(-1)
-    wire_dist_indices_out = jnp.where(valid_mask, wire_dist_indices_4d, 0).reshape(-1)
-    signal_values_out = jnp.where(valid_mask, signal_values_4d, 0.0).reshape(-1)
+    wire_indices_rel = jnp.where(wire_valid, wire_indices - min_idx_abs, 0)
+    time_indices_out = time_bins
+    signal_values_2d = jnp.where(valid_mask_2d, diffusion_response, 0.0)
 
-    # Return processed indices (already with min_idx offset) and values
-    return wire_indices_rel, time_indices_out, angle_indices_out, wire_dist_indices_out, signal_values_out
+    # Flatten the arrays for output
+    wire_indices_rel_flat = jnp.repeat(wire_indices_rel, K_time)
+    time_indices_out_flat = jnp.tile(time_indices_out, K_wire)
+    signal_values_out = signal_values_2d.reshape(-1)
+
+    # Return processed indices and values
+    return wire_indices_rel_flat, time_indices_out_flat, signal_values_out
 
 
-@partial(jax.jit, static_argnames=["num_wires", "num_time_steps", "num_angles", "num_wire_distances"])
-def fill_signals_array(indices_and_values, num_wires, num_time_steps, num_angles, num_wire_distances):
+@partial(jax.jit, static_argnames=["num_wires", "num_time_steps"])
+def fill_signals_array(indices_and_values, num_wires, num_time_steps):
     """
     Fill output array with calculated signal values.
     
     Parameters
     ----------
     indices_and_values : tuple
-        Tuple of (wire_indices, time_indices, angle_indices, wire_dist_indices, signal_values).
+        Tuple of (wire_indices, time_indices, signal_values).
     num_wires : int
         Number of wires in the plane.
     num_time_steps : int
         Number of time steps in the simulation.
-    num_angles : int
-        Number of angle bins.
-    num_wire_distances : int
-        Number of wire distance bins.
         
     Returns
     -------
     jnp.ndarray
-        Filled signals array of shape (num_wires, num_time_steps, num_angles, num_wire_distances).
+        Filled signals array of shape (num_wires, num_time_steps).
     """
-    wire_indices, time_indices, angle_indices, wire_dist_indices, signal_values = indices_and_values
+    wire_indices, time_indices, signal_values = indices_and_values
 
     # Create output array
-    wire_signals = jnp.zeros((num_wires, num_time_steps, num_angles, num_wire_distances))
+    wire_signals = jnp.zeros((num_wires, num_time_steps))
 
     # Fill array using scatter_add
     wire_signals = wire_signals.at[
-        wire_indices, time_indices, angle_indices, wire_dist_indices
+        wire_indices, time_indices
     ].add(signal_values)
 
     return wire_signals
+
+
+@partial(jax.jit, static_argnames=('num_wires', 'num_time_steps', 'kernel_num_wires', 'kernel_height'))
+def fill_signals_from_kernels(wire_indices, time_indices, intensities, contributions,
+                            num_wires, num_time_steps, kernel_num_wires, kernel_height):
+    """
+    Fill signals array from kernel contributions for multiple segments.
+    
+    This function efficiently accumulates kernel contributions from multiple segments
+    into a signals array without explicit loops, using JAX's vectorized operations.
+    
+    Args:
+        wire_indices: (N,) center wire index for each segment
+        time_indices: (N,) start time index for each segment
+        intensities: (N,) intensity scaling factor for each segment
+        contributions: (N, kernel_num_wires, kernel_height) kernel response for each segment
+        num_wires: Total number of wires in output (static)
+        num_time_steps: Total number of time steps in output (static)
+        kernel_num_wires: Number of wires in kernel (static)
+        kernel_height: Number of time bins in kernel (static)
+    
+    Returns:
+        signals: (num_wires, num_time_steps) accumulated wire signals
+    """
+    # Initialize output array
+    signals = jnp.zeros((num_wires, num_time_steps))
+    
+    # Calculate wire offset to center kernel on wire_indices
+    wire_offset = kernel_num_wires // 2
+    
+    # Create kernel index offsets (reused for all segments)
+    kernel_wire_offsets = jnp.arange(kernel_num_wires)  # shape: (kernel_num_wires,)
+    kernel_time_offsets = jnp.arange(kernel_height)     # shape: (kernel_height,)
+    
+    # Compute absolute wire positions for all segments
+    # Shape: (N, kernel_num_wires)
+    wire_positions = wire_indices[:, None] - wire_offset + kernel_wire_offsets[None, :]
+    
+    # Compute absolute time positions for all segments  
+    # Shape: (N, kernel_height)
+    time_positions = time_indices[:, None] + kernel_time_offsets[None, :]
+    
+    # Scale all contributions by their intensities
+    # Shape: (N, kernel_num_wires, kernel_height)
+    scaled_contributions = contributions * intensities[:, None, None]
+    
+    # Create flattened indices for scatter operation
+    # Flatten wire positions: (N * kernel_num_wires,)
+    flat_wire_indices = wire_positions.reshape(-1)
+    
+    # Create corresponding time indices for each wire
+    # We need to broadcast time_positions to match wire dimensions
+    # Shape: (N, kernel_num_wires, kernel_height) -> (N * kernel_num_wires * kernel_height,)
+    time_positions_broadcast = jnp.broadcast_to(
+        time_positions[:, None, :], 
+        (wire_indices.shape[0], kernel_num_wires, kernel_height)
+    )
+    flat_time_indices = time_positions_broadcast.reshape(-1)
+    
+    # Flatten contributions
+    # Shape: (N * kernel_num_wires * kernel_height,)
+    flat_contributions = scaled_contributions.reshape(-1)
+    
+    # Create 2D indices for scatter
+    # Wire indices need to be repeated for each time bin
+    wire_indices_repeated = jnp.repeat(flat_wire_indices, kernel_height)
+    
+    # Use .at[].add() to accumulate all contributions at once
+    # mode='drop' will silently ignore out-of-bounds indices
+    signals = signals.at[wire_indices_repeated, flat_time_indices].add(flat_contributions, mode='drop')
+    
+    return signals
+
 
 # @partial(jax.jit, static_argnames=["num_wires", "num_time_steps", "num_angles", "num_wire_distances"])
 # def fill_signals_array(indices_and_values, num_wires, num_time_steps, num_angles, num_wire_distances):
