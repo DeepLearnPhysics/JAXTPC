@@ -1,15 +1,12 @@
 ---
-# JAXTPC Detector Configuration
+# JAXTPC Detector Configuration, Almost SBND size
 
 detector:
   name: JAXTPC Cubic Detector
   dimensions:  # in centimeters
-    x: 1900.0
-    y: 1800.0
-    z: 6600.0
-#    x: 432.0
-#    y: 432.0
-#    z: 432.0
+    x: 432.0
+    y: 432.0
+    z: 432.0
 
 wire_planes:
   sides:
