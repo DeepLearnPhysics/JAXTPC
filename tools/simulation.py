@@ -82,8 +82,7 @@ from tools.recombination import recombine_steps
 
 # Default padding tiers - array sizes that trigger JIT recompilation
 # Using fixed tiers limits the number of JIT versions cached
-PADDING_TIERS = (50_000, 75_000, 150_000, 250_000_000, 350_000, 450_000, 550_000, 650_000,
-                 750_000, 850_000, 950_000, 1_000_000)
+PADDING_TIERS = (50_000, 200_000)
 
 
 def pick_padding_tier(n_hits, tiers=PADDING_TIERS):
