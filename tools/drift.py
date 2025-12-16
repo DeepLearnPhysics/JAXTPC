@@ -1,12 +1,20 @@
+"""
+Drift physics calculations for LArTPC simulation.
+
+This module provides JIT-compiled functions for calculating electron drift
+times and distances, as well as charge attenuation due to electron lifetime.
+"""
+
 import jax
 import jax.numpy as jnp
 from functools import partial
 
+
 @partial(jax.jit, static_argnums=(1,))
-def _calculate_single_plane_drift_jit(positions_cm, detector_half_width_x, drift_velocity_cm_us, plane_dist_from_anode_cm):
+def compute_drift_to_plane(positions_cm, detector_half_width_x, drift_velocity_cm_us, plane_dist_from_anode_cm):
     """
     Calculate the drift time and distance to a single plane for each position.
-    
+
     Parameters
     ----------
     positions_cm : jnp.ndarray
@@ -17,7 +25,7 @@ def _calculate_single_plane_drift_jit(positions_cm, detector_half_width_x, drift
         Drift velocity in cm/μs.
     plane_dist_from_anode_cm : float
         Distance of the plane from the anode in cm.
-        
+
     Returns
     -------
     drift_distance_cm : jnp.ndarray
@@ -43,11 +51,11 @@ def _calculate_single_plane_drift_jit(positions_cm, detector_half_width_x, drift
 
 
 @jax.jit
-def _calculate_single_plane_drift_correction(drift_distance_cm, drift_time_us, drift_velocity_cm_us, plane_dist_difference_cm):
+def correct_drift_for_plane(drift_distance_cm, drift_time_us, drift_velocity_cm_us, plane_dist_difference_cm):
     """
     Correct drift time/distance for planes relative to the furthest plane.
     The correction is subtracted because planes closer to the anode have less drift distance.
-    
+
     Parameters
     ----------
     drift_distance_cm : jnp.ndarray
@@ -59,7 +67,7 @@ def _calculate_single_plane_drift_correction(drift_distance_cm, drift_time_us, d
     plane_dist_difference_cm : float
         Distance difference between the furthest plane and this plane in cm.
         Positive value means this plane is closer to the anode than the furthest plane.
-        
+
     Returns
     -------
     corrected_drift_distance_cm : jnp.ndarray
@@ -84,11 +92,11 @@ def _calculate_single_plane_drift_correction(drift_distance_cm, drift_time_us, d
 
 
 @jax.jit
-def calculate_drift_attenuation(drift_distance_cm, drift_velocity_cm_us, electron_lifetime_ms):
+def compute_lifetime_attenuation(drift_distance_cm, drift_velocity_cm_us, electron_lifetime_ms):
     """
     Calculate charge attenuation due to electron lifetime during drift.
     Uses exponential decay model.
-    
+
     Parameters
     ----------
     drift_distance_cm : jnp.ndarray
@@ -97,7 +105,7 @@ def calculate_drift_attenuation(drift_distance_cm, drift_velocity_cm_us, electro
         Drift velocity in cm/μs.
     electron_lifetime_ms : float
         Electron lifetime in milliseconds.
-        
+
     Returns
     -------
     attenuation : jnp.ndarray
@@ -116,3 +124,9 @@ def calculate_drift_attenuation(drift_distance_cm, drift_velocity_cm_us, electro
     attenuation = jnp.exp(-drift_time_us / electron_lifetime_us)
 
     return attenuation
+
+
+# Backward compatibility aliases (deprecated)
+_calculate_single_plane_drift_jit = compute_drift_to_plane
+_calculate_single_plane_drift_correction = correct_drift_for_plane
+calculate_drift_attenuation = compute_lifetime_attenuation

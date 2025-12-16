@@ -6,6 +6,60 @@ import jax.numpy as jnp
 from typing import Dict, Tuple, Optional, Any, List, Union
 
 
+def calculate_max_diffusion_sigmas(
+    detector_half_width_cm,
+    drift_velocity_cm_us,
+    transverse_diffusion_cm2_us,
+    longitudinal_diffusion_cm2_us,
+    wire_spacing_cm,
+    time_spacing_us
+):
+    """
+    Calculate maximum diffusion sigmas for the detector in both physical and unitless coordinates.
+
+    Parameters
+    ----------
+    detector_half_width_cm : float
+        Half-width of detector (max drift distance) in cm
+    drift_velocity_cm_us : float
+        Drift velocity in cm/μs
+    transverse_diffusion_cm2_us : float
+        Transverse diffusion coefficient in cm²/μs
+    longitudinal_diffusion_cm2_us : float
+        Longitudinal diffusion coefficient in cm²/μs
+    wire_spacing_cm : float
+        Wire spacing in cm (for converting to unitless)
+    time_spacing_us : float
+        Time bin spacing in μs (for converting to unitless)
+
+    Returns
+    -------
+    max_sigma_trans_cm : float
+        Maximum transverse sigma in cm
+    max_sigma_long_us : float
+        Maximum longitudinal sigma in μs
+    max_sigma_trans_unitless : float
+        Maximum transverse sigma in unitless grid coordinates (wires)
+    max_sigma_long_unitless : float
+        Maximum longitudinal sigma in unitless grid coordinates (time bins)
+    """
+    # Maximum drift time
+    max_drift_time_us = detector_half_width_cm / drift_velocity_cm_us
+
+    # Transverse sigma (spatial - in cm)
+    max_sigma_trans_cm = np.sqrt(2.0 * transverse_diffusion_cm2_us * max_drift_time_us)
+
+    # Longitudinal sigma (temporal - in μs)
+    D_long_temporal = longitudinal_diffusion_cm2_us / (drift_velocity_cm_us ** 2)
+    max_sigma_long_us = np.sqrt(2.0 * D_long_temporal * max_drift_time_us)
+
+    # Convert to unitless coordinates by dividing by grid spacing
+    max_sigma_trans_unitless = max_sigma_trans_cm / wire_spacing_cm
+    max_sigma_long_unitless = max_sigma_long_us / time_spacing_us
+
+    return max_sigma_trans_cm, max_sigma_long_us, max_sigma_trans_unitless, max_sigma_long_unitless
+
+
 def generate_detector(config_file_path: str) -> Optional[Dict[str, Any]]:
     """
     Reads a JAXTPC detector configuration YAML file and returns a detector dictionary
@@ -97,9 +151,25 @@ def _precalculate_all_parameters(detector_config: Dict[str, Any]) -> Dict[str, A
     params['longitudinal_diffusion_cm2_us'] = params['longitudinal_diffusion_cm2_s'] / 1e6
     params['transverse_diffusion_cm2_us'] = params['transverse_diffusion_cm2_s'] / 1e6
 
-    # Base detector resolution parameters
-    params['sigma_wire_base_cm'] = 0.3
-    params['sigma_time_base_us'] = 0.5
+    # Get wire spacing from config (using first plane as reference - all planes have same spacing)
+    wire_spacing_cm = float(detector_config['wire_planes']['sides'][0]['planes'][0]['wire_spacing'])
+
+    # Calculate maximum diffusion sigmas (both physical and unitless)
+    (max_sigma_trans_cm, max_sigma_long_us,
+     max_sigma_trans_unitless, max_sigma_long_unitless) = calculate_max_diffusion_sigmas(
+        detector_half_width_x,
+        drift_velocity_cm_us,
+        params['transverse_diffusion_cm2_us'],
+        params['longitudinal_diffusion_cm2_us'],
+        wire_spacing_cm,
+        time_step_size_us
+    )
+    params['max_sigma_trans_cm'] = max_sigma_trans_cm
+    params['max_sigma_long_us'] = max_sigma_long_us
+    params['max_sigma_trans_unitless'] = max_sigma_trans_unitless
+    params['max_sigma_long_unitless'] = max_sigma_long_unitless
+
+    # Note: sigma_wire_base_cm and sigma_time_base_us were removed as unused
 
     return params
 
@@ -405,6 +475,9 @@ def print_detector_summary(detector_config: Dict[str, Any]) -> None:
     print(f"Electron lifetime: {detector_config['electron_lifetime_ms']:.2f} ms")
     print(f"Longitudinal diffusion: {detector_config['longitudinal_diffusion_cm2_s']:.6f} cm²/s")
     print(f"Transverse diffusion: {detector_config['transverse_diffusion_cm2_s']:.6f} cm²/s")
+    print(f"\nDiffusion Sigmas (at max drift):")
+    print(f"  Transverse:  {detector_config['max_sigma_trans_cm']:.3f} cm  ({detector_config['max_sigma_trans_unitless']:.3f} unitless)")
+    print(f"  Longitudinal: {detector_config['max_sigma_long_us']:.3f} μs  ({detector_config['max_sigma_long_unitless']:.3f} unitless)")
 
 
 if __name__ == "__main__":
