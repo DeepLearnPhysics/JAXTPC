@@ -148,7 +148,7 @@ class DetectorSimulator:
     def __init__(
         self,
         detector_config,
-        response_path="tools_refactored/responses/",
+        response_path="tools/responses/",
         track_config=None,
         diffusion_params=None,
         padding_tiers=PADDING_TIERS,
@@ -798,7 +798,7 @@ class DetectorSimulator:
 
 def run_simulation(config_path, data_path, event_idx=0,
                    num_s=16,
-                   response_path="tools_refactored/responses/",
+                   response_path="tools/responses/",
                    track_threshold=1.0,
                    padding_tiers=PADDING_TIERS):
     """

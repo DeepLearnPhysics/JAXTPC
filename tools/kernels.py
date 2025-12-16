@@ -391,7 +391,7 @@ def interpolate_diffusion_kernel_batch(DKernel, s_observed_batch, w_offset_batch
 # HIGH-LEVEL API
 # ============================================================================
 
-def load_response_kernels(response_path="tools_refactored/responses/", num_s=16,
+def load_response_kernels(response_path="tools/responses/", num_s=16,
                          wire_spacing=0.1, time_spacing=0.5,
                          max_sigma_trans_unitless=None, max_sigma_long_unitless=None):
     """
