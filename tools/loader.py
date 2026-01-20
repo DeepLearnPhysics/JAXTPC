@@ -4,6 +4,8 @@ import numpy as np
 from typing import Dict, List, Tuple, Any, Optional
 import json
 
+from tools.config import DepositData
+
 
 class ParticleStepExtractor:
     """
@@ -298,13 +300,14 @@ class ParticleStepExtractor:
         return result
 
 
-def load_particle_step_data(file_path, event_idx=0, verbose=False):
+def load_particle_step_data(file_path, event_idx=0, verbose=False) -> DepositData:
     """
-    Convenience function to extract particle step data from an HDF5 file.
-    
+    Load particle step data from an HDF5 file and return as DepositData.
+
     This function creates a ParticleStepExtractor, extracts the data,
-    and closes the file, all in one call.
-    
+    converts to appropriate dtypes, and returns a DepositData namedtuple
+    ready for simulation.
+
     Parameters
     ----------
     file_path : str
@@ -313,68 +316,64 @@ def load_particle_step_data(file_path, event_idx=0, verbose=False):
         Index of the event to extract, by default 0.
     verbose : bool, optional
         Whether to print verbose information, by default False.
-        
+
     Returns
     -------
-    dict
-        Dictionary mapping property names to JAX arrays.
+    DepositData
+        Namedtuple with positions_mm, de, dx, valid_mask, theta, phi, track_ids.
     """
     with ParticleStepExtractor(file_path, verbose=verbose) as extractor:
-        return extractor.extract_step_arrays(event_idx)
+        step_data = extractor.extract_step_arrays(event_idx)
+
+    # Get positions and determine array size
+    positions_mm = jnp.asarray(
+        step_data.get('position', jnp.empty((0, 3))), dtype=jnp.float32
+    )
+    n = positions_mm.shape[0]
+
+    return DepositData(
+        positions_mm=positions_mm,
+        de=jnp.asarray(step_data.get('de', jnp.zeros((n,))), dtype=jnp.float32),
+        dx=jnp.asarray(step_data.get('dx', jnp.zeros((n,))), dtype=jnp.float32),
+        valid_mask=jnp.ones(n, dtype=bool),
+        theta=jnp.asarray(step_data.get('theta', jnp.zeros((n,))), dtype=jnp.float32),
+        phi=jnp.asarray(step_data.get('phi', jnp.zeros((n,))), dtype=jnp.float32),
+        track_ids=jnp.asarray(step_data.get('track_id', jnp.ones((n,))), dtype=jnp.int32),
+    )
 
 
 def main():
     """
     Example usage of the particle step extractor.
-    
+
     This function demonstrates how to use the particle step extractor
     from the command line with various options.
     """
     import argparse
-    import sys
 
     parser = argparse.ArgumentParser(description='Extract particle step data from HDF5 files')
     parser.add_argument('file_path', help='Path to the HDF5 file')
     parser.add_argument('--event', '-e', type=int, default=0, help='Event index (default: 0)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Print verbose information')
-    parser.add_argument('--output', '-o', help='Save data to JSON file (will convert JAX arrays to lists)')
 
     args = parser.parse_args()
 
-    # Extract step data
-    step_data = load_particle_step_data(args.file_path, args.event, args.verbose)
+    # Extract step data as DepositData
+    deposit_data = load_particle_step_data(args.file_path, args.event, args.verbose)
 
-    # Print summary of the extracted data
-    print("\nExtracted step arrays:")
-    for key, value in step_data.items():
-        if hasattr(value, 'shape'):
-            print(f"  {key}: shape={value.shape}, dtype={value.dtype}")
-        else:
-            print(f"  {key}: {type(value)}")
+    # Print summary
+    n_segments = deposit_data.positions_mm.shape[0]
+    n_tracks = len(jnp.unique(deposit_data.track_ids))
+    total_de = jnp.sum(deposit_data.de)
 
-        for pdg in particle_types:
-            # Get steps for this particle type
-            mask = step_data['particle_pdg'] == pdg
-            energy = jnp.sum(step_data['de'][mask])
-            print(f"  PDG code {pdg}: total energy = {energy}")
-
-    # Save to file if requested
-    if args.output:
-        try:
-            # Convert JAX arrays to lists for JSON serialization
-            json_data = {}
-            for key, value in step_data.items():
-                if hasattr(value, 'shape'):
-                    json_data[key] = value.tolist()
-                else:
-                    json_data[key] = value
-
-            with open(args.output, 'w') as f:
-                json.dump(json_data, f)
-
-            print(f"\nData saved to {args.output}")
-        except Exception as e:
-            print(f"Error saving data: {e}", file=sys.stderr)
+    print(f"\nLoaded DepositData:")
+    print(f"  Segments: {n_segments:,}")
+    print(f"  Unique tracks: {n_tracks}")
+    print(f"  Total dE: {total_de:.2f} MeV")
+    print(f"\nFields:")
+    for field in deposit_data._fields:
+        arr = getattr(deposit_data, field)
+        print(f"  {field}: shape={arr.shape}, dtype={arr.dtype}")
 
 
 if __name__ == "__main__":
