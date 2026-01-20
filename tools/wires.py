@@ -654,6 +654,11 @@ def accumulate_response_signals(wire_indices, time_indices, intensities, contrib
     # Calculate wire offset to center kernel on wire_indices
     wire_offset = kernel_num_wires // 2
 
+    # Calculate time offset to center kernel on time_indices
+    # Kernel time coords span -31.5 to +31.5 μs (centered at t=0 = arrival time)
+    # So kernel center (index kernel_height//2) should align with arrival time
+    time_offset_center = kernel_height // 2
+
     # Create kernel index offsets (reused for all segments)
     kernel_wire_offsets = jnp.arange(kernel_num_wires)  # shape: (kernel_num_wires,)
     kernel_time_offsets = jnp.arange(kernel_height)     # shape: (kernel_height,)
@@ -662,9 +667,9 @@ def accumulate_response_signals(wire_indices, time_indices, intensities, contrib
     # Shape: (N, kernel_num_wires)
     wire_positions = wire_indices[:, None] - wire_offset + kernel_wire_offsets[None, :]
 
-    # Compute absolute time positions for all segments
+    # Compute absolute time positions for all segments (centered on arrival time)
     # Shape: (N, kernel_height)
-    time_positions = time_indices[:, None] + kernel_time_offsets[None, :]
+    time_positions = time_indices[:, None] - time_offset_center + kernel_time_offsets[None, :]
 
     # Scale all contributions by their intensities
     # Shape: (N, kernel_num_wires, kernel_height)
@@ -817,6 +822,7 @@ def scatter_contributions_to_buckets(
     """
     N = wire_indices.shape[0]
     wire_offset = kernel_num_wires // 2
+    time_offset_center = kernel_height // 2  # Center kernel on arrival time
 
     # Scale contributions by intensity
     scaled = contributions * intensities[:, None, None]
@@ -826,14 +832,14 @@ def scatter_contributions_to_buckets(
     kw_idx = jnp.arange(kernel_num_wires)[None, :, None]
     kt_idx = jnp.arange(kernel_height)[None, None, :]
 
-    # Global coordinates (wire_indices is center, offset to get start)
+    # Global coordinates (centered on wire_indices and time_indices)
     gw = (wire_indices[:, None, None] - wire_offset + kw_idx).astype(jnp.int32)
-    gt = (time_indices[:, None, None] + kt_idx).astype(jnp.int32)
+    gt = (time_indices[:, None, None] - time_offset_center + kt_idx).astype(jnp.int32)
 
     # Compute which quadrant each kernel element falls into
     # Home bucket based on kernel start position
     home_bw = (wire_indices[:, None, None] - wire_offset) // B1
-    home_bt = time_indices[:, None, None] // B2
+    home_bt = (time_indices[:, None, None] - time_offset_center) // B2
 
     # Cell bucket for each kernel element
     cell_bw = gw // B1
@@ -892,6 +898,7 @@ def scatter_contributions_to_buckets_batched(
     """
     N = wire_indices.shape[0]
     wire_offset = kernel_num_wires // 2
+    time_offset_center = kernel_height // 2  # Center kernel on arrival time
 
     # Pad to multiple of batch_size
     n_batches = (N + batch_size - 1) // batch_size
@@ -925,12 +932,13 @@ def scatter_contributions_to_buckets_batched(
         scaled = bc * bi[:, None, None]
 
         # Global coordinates - shape (batch_size, K1, K2)
+        # Centered on wire and time indices
         gw = (bw[:, None, None] - wire_offset + kw_idx[None, :, None]).astype(jnp.int32)
-        gt = (bt[:, None, None] + kt_idx[None, None, :]).astype(jnp.int32)
+        gt = (bt[:, None, None] - time_offset_center + kt_idx[None, None, :]).astype(jnp.int32)
 
         # Home bucket
         home_bw = (bw[:, None, None] - wire_offset) // B1
-        home_bt = bt[:, None, None] // B2
+        home_bt = (bt[:, None, None] - time_offset_center) // B2
 
         # Cell bucket
         cell_bw = gw // B1
