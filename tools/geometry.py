@@ -1,4 +1,11 @@
-# detector_geometry.py
+"""
+Detector geometry configuration for LArTPC simulation.
+
+This module handles loading and parsing detector configuration from YAML files,
+and pre-calculates all geometry parameters needed for simulation including
+wire positions, drift parameters, and diffusion coefficients.
+"""
+
 import yaml
 import os
 import numpy as np
@@ -62,15 +69,18 @@ def calculate_max_diffusion_sigmas(
 
 def generate_detector(config_file_path: str) -> Optional[Dict[str, Any]]:
     """
-    Reads a JAXTPC detector configuration YAML file and returns a detector dictionary
-    with all precalculated geometry parameters needed for simulation.
+    Read a JAXTPC detector configuration YAML file and return a detector dictionary.
 
-    Parameters:
-        config_file_path (str): Path to the YAML configuration file.
+    Parameters
+    ----------
+    config_file_path : str
+        Path to the YAML configuration file.
 
-    Returns:
-        Optional[Dict[str, Any]]: A dictionary containing all detector properties and
-        derived parameters, or None if loading fails.
+    Returns
+    -------
+    dict or None
+        A dictionary containing all detector properties and derived parameters,
+        or None if loading fails.
     """
     if not os.path.exists(config_file_path):
         print(f"Error: Configuration file not found at {config_file_path}")
@@ -106,11 +116,15 @@ def _precalculate_all_parameters(detector_config: Dict[str, Any]) -> Dict[str, A
     """
     Calculate all derived parameters needed for simulation from the detector config.
 
-    Parameters:
-        detector_config (Dict[str, Any]): Original detector configuration dictionary.
+    Parameters
+    ----------
+    detector_config : dict
+        Original detector configuration dictionary.
 
-    Returns:
-        Dict[str, Any]: Dictionary of all derived parameters.
+    Returns
+    -------
+    dict
+        Dictionary of all derived parameters.
     """
     params = {}
 
@@ -169,20 +183,25 @@ def _precalculate_all_parameters(detector_config: Dict[str, Any]) -> Dict[str, A
     params['max_sigma_trans_unitless'] = max_sigma_trans_unitless
     params['max_sigma_long_unitless'] = max_sigma_long_unitless
 
-    # Note: sigma_wire_base_cm and sigma_time_base_us were removed as unused
+    # Load electrons per ADC conversion factor (default to MicroBooNE value if not specified)
+    params['electrons_per_adc'] = float(detector_config['readout'].get('electrons_per_adc', 182))
 
     return params
 
 
 def get_detector_dimensions(detector_config: Dict[str, Any]) -> Dict[str, float]:
     """
-    Extracts detector dimensions from config and converts them to floats.
+    Extract detector dimensions from config and convert them to floats.
 
-    Parameters:
-        detector_config (Dict[str, Any]): Detector configuration dictionary.
+    Parameters
+    ----------
+    detector_config : dict
+        Detector configuration dictionary.
 
-    Returns:
-        Dict[str, float]: Dictionary of detector dimensions in cm.
+    Returns
+    -------
+    dict
+        Dictionary of detector dimensions in cm.
     """
     dims_cm = detector_config['detector']['dimensions']
     return {k: float(v) for k, v in dims_cm.items()}
@@ -191,15 +210,20 @@ def get_detector_dimensions(detector_config: Dict[str, Any]) -> Dict[str, float]
 def get_drift_params(detector_config: Dict[str, Any],
                      dims_cm: Optional[Dict[str, float]] = None) -> Tuple[float, float]:
     """
-    Extracts global drift parameters, converting velocity to cm/us.
+    Extract global drift parameters, converting velocity to cm/us.
 
-    Parameters:
-        detector_config (Dict[str, Any]): Detector configuration dictionary.
-        dims_cm (Optional[Dict[str, float]]): Pre-calculated dimensions to avoid redundant
-                                             calculation. If None, dimensions are calculated.
+    Parameters
+    ----------
+    detector_config : dict
+        Detector configuration dictionary.
+    dims_cm : dict, optional
+        Pre-calculated dimensions to avoid redundant calculation.
+        If None, dimensions are calculated.
 
-    Returns:
-        Tuple[float, float]: detector_half_width_x (cm), drift_velocity (cm/us)
+    Returns
+    -------
+    tuple
+        (detector_half_width_x, drift_velocity) in cm and cm/us respectively.
     """
     if dims_cm is None:
         dims_cm = get_detector_dimensions(detector_config)
@@ -216,15 +240,19 @@ def get_drift_params(detector_config: Dict[str, Any],
 
 def get_plane_geometry(detector_config: Dict[str, Any]) -> Tuple[jnp.ndarray, np.ndarray]:
     """
-    Gets distances for all planes from the anode and identifies the furthest plane for each side.
+    Get distances for all planes from anode and identify furthest plane per side.
 
-    Parameters:
-        detector_config (Dict[str, Any]): Detector configuration dictionary.
+    Parameters
+    ----------
+    detector_config : dict
+        Detector configuration dictionary.
 
-    Returns:
-        Tuple[jnp.ndarray, np.ndarray]:
-            - all_plane_distances_cm: Array of shape (2, 3) with distances from anode
-            - furthest_plane_indices: Array of shape (2,) with indices of furthest planes
+    Returns
+    -------
+    all_plane_distances_cm : jnp.ndarray
+        Array of shape (2, 3) with distances from anode in cm.
+    furthest_plane_indices : np.ndarray
+        Array of shape (2,) with indices of furthest planes.
     """
     # Get plane distances
     distances_cm = np.zeros((2, 3), dtype=float)
@@ -250,23 +278,34 @@ def get_single_plane_wire_params(detector_config: Dict[str, Any],
                                  plane_idx: int,
                                  dims_cm: Optional[Dict[str, float]] = None) -> Tuple[float, float, int, int, int]:
     """
-    Extracts wire parameters for a single specified plane. Handles angles, spacing (cm),
-    calculates offset and wire count/range.
+    Extract wire parameters for a single specified plane.
 
-    Parameters:
-        detector_config (Dict[str, Any]): Detector configuration dictionary.
-        side_idx (int): Index of the detector side (0 or 1).
-        plane_idx (int): Index of the plane (0, 1, or 2).
-        dims_cm (Optional[Dict[str, float]]): Pre-calculated dimensions to avoid redundant
-                                             calculation. If None, dimensions are calculated.
+    Handles angles, spacing (cm), calculates offset and wire count/range.
 
-    Returns:
-        Tuple[float, float, int, int, int]: Tuple containing:
-            - angle_rad (float): Wire angle in radians.
-            - wire_spacing_cm (float): Spacing between wires in cm.
-            - index_offset (int): Wire index offset.
-            - num_wires (int): Number of wires in the plane.
-            - max_wire_idx_abs (int): Maximum absolute wire index.
+    Parameters
+    ----------
+    detector_config : dict
+        Detector configuration dictionary.
+    side_idx : int
+        Index of the detector side (0 or 1).
+    plane_idx : int
+        Index of the plane (0, 1, or 2).
+    dims_cm : dict, optional
+        Pre-calculated dimensions to avoid redundant calculation.
+        If None, dimensions are calculated.
+
+    Returns
+    -------
+    angle_rad : float
+        Wire angle in radians.
+    wire_spacing_cm : float
+        Spacing between wires in cm.
+    index_offset : int
+        Wire index offset.
+    num_wires : int
+        Number of wires in the plane.
+    max_wire_idx_abs : int
+        Maximum absolute wire index.
     """
     if dims_cm is None:
         dims_cm = get_detector_dimensions(detector_config)
@@ -318,21 +357,27 @@ def calculate_time_params(detector_config: Dict[str, Any],
                           dims_cm: Optional[Dict[str, float]] = None,
                           drift_velocity_cm_us: Optional[float] = None) -> Tuple[int, float, float]:
     """
-    Calculates time-related parameters from the detector config.
+    Calculate time-related parameters from the detector config.
 
-    Parameters:
-        detector_config (Dict[str, Any]): Detector configuration dictionary.
-        dims_cm (Optional[Dict[str, float]]): Pre-calculated dimensions to avoid redundant
-                                             calculation. If None, dimensions are calculated.
-        drift_velocity_cm_us (Optional[float]): Pre-calculated drift velocity to avoid
-                                               redundant calculation. If None, velocity
-                                               is calculated.
+    Parameters
+    ----------
+    detector_config : dict
+        Detector configuration dictionary.
+    dims_cm : dict, optional
+        Pre-calculated dimensions to avoid redundant calculation.
+        If None, dimensions are calculated.
+    drift_velocity_cm_us : float, optional
+        Pre-calculated drift velocity to avoid redundant calculation.
+        If None, velocity is calculated.
 
-    Returns:
-        Tuple[int, float, float]: Tuple containing:
-            - num_time_steps (int): Number of time steps for simulation.
-            - time_step_size_us (float): Size of time step in μs.
-            - max_drift_time_us (float): Maximum drift time in μs.
+    Returns
+    -------
+    num_time_steps : int
+        Number of time steps for simulation.
+    time_step_size_us : float
+        Size of time step in μs.
+    max_drift_time_us : float
+        Maximum drift time in μs.
     """
     if dims_cm is None:
         dims_cm = get_detector_dimensions(detector_config)
@@ -362,21 +407,30 @@ def calculate_time_params(detector_config: Dict[str, Any],
 def pre_calculate_all_wire_params(detector_config: Dict[str, Any],
                                   dims_cm: Optional[Dict[str, float]] = None) -> Tuple[jnp.ndarray, ...]:
     """
-    Pre-calculates wire parameters for all planes and sides.
+    Pre-calculate wire parameters for all planes and sides.
 
-    Parameters:
-        detector_config (Dict[str, Any]): Detector configuration dictionary.
-        dims_cm (Optional[Dict[str, float]]): Pre-calculated dimensions to avoid redundant
-                                             calculation. If None, dimensions are calculated.
+    Parameters
+    ----------
+    detector_config : dict
+        Detector configuration dictionary.
+    dims_cm : dict, optional
+        Pre-calculated dimensions to avoid redundant calculation.
+        If None, dimensions are calculated.
 
-    Returns:
-        Tuple[jnp.ndarray, ...]: Tuple containing six arrays of shape (2, 3):
-            - angles_rad: Wire angles in radians.
-            - wire_spacings_cm: Spacing between wires in cm.
-            - index_offsets: Wire index offsets.
-            - num_wires_all: Number of wires for each plane.
-            - max_wire_indices_abs_all: Maximum absolute wire indices.
-            - min_wire_indices_abs_all: Minimum absolute wire indices.
+    Returns
+    -------
+    angles_rad : jnp.ndarray
+        Wire angles in radians, shape (2, 3).
+    wire_spacings_cm : jnp.ndarray
+        Spacing between wires in cm, shape (2, 3).
+    index_offsets : jnp.ndarray
+        Wire index offsets, shape (2, 3).
+    num_wires_all : jnp.ndarray
+        Number of wires for each plane, shape (2, 3).
+    max_wire_indices_abs_all : jnp.ndarray
+        Maximum absolute wire indices, shape (2, 3).
+    min_wire_indices_abs_all : jnp.ndarray
+        Minimum absolute wire indices, shape (2, 3).
     """
     if dims_cm is None:
         dims_cm = get_detector_dimensions(detector_config)
@@ -429,14 +483,12 @@ def pre_calculate_all_wire_params(detector_config: Dict[str, Any],
 
 def print_detector_summary(detector_config: Dict[str, Any]) -> None:
     """
-    Prints a summary of the detector configuration.
+    Print a summary of the detector configuration.
 
-    Parameters:
-        detector_config (Dict[str, Any]): Detector configuration dictionary with
-                                         pre-calculated parameters.
-
-    Returns:
-        None
+    Parameters
+    ----------
+    detector_config : dict
+        Detector configuration dictionary with pre-calculated parameters.
     """
     print("Detector Configuration Summary")
     print("==============================")

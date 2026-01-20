@@ -216,6 +216,10 @@ def create_diffusion_kernel_array(planes=['U', 'V', 'Y'], num_s=16, kernel_dir='
             filename = f'{kernel_dir}/{plane}_plane_kernel.npz'
             kernel, x_coords, y_coords, loaded_plane, dx, dy = load_kernel(filename)
 
+            # Scale kernel by time_spacing for proper discrete integration
+            # The kernel represents response density; multiplying by dt converts to charge-per-bin
+            kernel = kernel * time_spacing
+
             # Initialize DKernel array
             kernel_shape = kernel.shape
             DKernel = jnp.zeros((num_s, *kernel_shape))
@@ -272,7 +276,9 @@ def interpolate_diffusion_kernel(DKernel, s_observed, w_offset, t_offset,
     w_offset : float
         Wire offset in [0, 1.0) - wire offset in units of wire_spacing
     t_offset : float
-        Time offset in [0, 0.5) - time offset in units of time_spacing
+        Time offset in [0, 1.0) - fractional position within simulation time bin.
+        Since kernel and simulation use the same time resolution (0.5 μs),
+        this fractional position is used directly for interpolation.
     wire_stride : int
         Static wire stride (10 for 0.1 spacing to 1.0 spacing)
     wire_spacing : float
@@ -336,7 +342,9 @@ def interpolate_diffusion_kernel(DKernel, s_observed, w_offset, t_offset,
         values_s_interp_right = (1 - s_alpha) * values_s_n_right + s_alpha * values_s_n_plus_1_right
         values_w_interp = (1 - w_alpha) * values_s_interp_left + w_alpha * values_s_interp_right
 
-        t_alpha = t_offset / time_spacing
+        # Time interpolation: t_offset is already fractional bin position [0, 1)
+        # No conversion needed since kernel and simulation have same time resolution
+        t_alpha = t_offset
         interpolated_values = (1 - t_alpha) * values_w_interp[:-1] + t_alpha * values_w_interp[1:]
         output_values = output_values.at[wire_idx, :].set(interpolated_values)
 

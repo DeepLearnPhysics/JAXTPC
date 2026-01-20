@@ -73,7 +73,7 @@ from tools.track_hits import group_hits_by_track, label_hits
 # Core modules
 from tools.geometry import generate_detector
 from tools.loader import load_particle_step_data
-from tools.recombination import recombine_steps
+from tools.recombination import calculate_modified_box_charge, extract_recombination_params
 
 
 # =============================================================================
@@ -162,6 +162,12 @@ class DetectorSimulator:
         self.use_bucketed = use_bucketed
         self.sparse_output = use_bucketed  # sparse_output is True when use_bucketed is True
         self.max_active_buckets = max_active_buckets
+
+        # Store ADC conversion factor (response output is in electrons)
+        self.electrons_per_adc = detector_config['electrons_per_adc']
+
+        # Extract recombination parameters (for use inside JIT)
+        self.recomb_params = extract_recombination_params(detector_config)
 
         # Extract parameter bundles
         print("   Extracting parameters...")
@@ -266,7 +272,8 @@ class DetectorSimulator:
             Actual counts: n_east, n_west, n_tracks.
         """
         positions_mm = deposit_data.positions_mm
-        charges = deposit_data.charges
+        de = deposit_data.de
+        dx = deposit_data.dx
         valid_mask = deposit_data.valid_mask
         theta = deposit_data.theta
         phi = deposit_data.phi
@@ -290,23 +297,24 @@ class DetectorSimulator:
 
         # Extract and pad each side
         east_data = self._extract_and_pad(
-            positions_mm, charges, theta, phi, track_ids,
+            positions_mm, de, dx, theta, phi, track_ids,
             east_mask, n_east, east_tier
         )
         west_data = self._extract_and_pad(
-            positions_mm, charges, theta, phi, track_ids,
+            positions_mm, de, dx, theta, phi, track_ids,
             west_mask, n_west, west_tier
         )
 
         counts = {'n_east': n_east, 'n_west': n_west, 'n_tracks': n_tracks}
         return east_data, west_data, counts
 
-    def _extract_and_pad(self, positions_mm, charges, theta, phi, track_ids,
+    def _extract_and_pad(self, positions_mm, de, dx, theta, phi, track_ids,
                          mask, n_valid, pad_size):
         """Extract masked data and pad to target size."""
         # Extract valid entries
         pos = positions_mm[mask]
-        chg = charges[mask]
+        de_arr = de[mask]
+        dx_arr = dx[mask]
         th = theta[mask]
         ph = phi[mask]
         tid = track_ids[mask]
@@ -317,7 +325,8 @@ class DetectorSimulator:
         if pad_width > 0:
             valid_out = jnp.arange(pad_size) < n_valid
             pos = jnp.pad(pos, ((0, pad_width), (0, 0)), constant_values=0.0)
-            chg = jnp.pad(chg, (0, pad_width), constant_values=0.0)
+            de_arr = jnp.pad(de_arr, (0, pad_width), constant_values=0.0)
+            dx_arr = jnp.pad(dx_arr, (0, pad_width), constant_values=0.0)
             th = jnp.pad(th, (0, pad_width), constant_values=0.0)
             ph = jnp.pad(ph, (0, pad_width), constant_values=0.0)
             tid = jnp.pad(tid, (0, pad_width), constant_values=0)
@@ -325,14 +334,16 @@ class DetectorSimulator:
             # Truncate if needed (shouldn't happen if tier picked correctly)
             valid_out = jnp.ones(pad_size, dtype=bool)
             pos = pos[:pad_size]
-            chg = chg[:pad_size]
+            de_arr = de_arr[:pad_size]
+            dx_arr = dx_arr[:pad_size]
             th = th[:pad_size]
             ph = ph[:pad_size]
             tid = tid[:pad_size]
 
         return DepositData(
             positions_mm=pos,
-            charges=chg,
+            de=de_arr,
+            dx=dx_arr,
             valid_mask=valid_out,
             theta=th,
             phi=ph,
@@ -379,6 +390,7 @@ class DetectorSimulator:
         plane_names = self.plane_names
         response_kernels = self.response_kernels
         track_threshold = self.track_config.threshold
+        electrons_per_adc = self.electrons_per_adc
 
         max_tracks = self.track_config.max_tracks
         max_wires = self._max_wires
@@ -390,6 +402,9 @@ class DetectorSimulator:
         max_indices_tuple = self._max_indices_tuple
         min_indices_tuple = self._min_indices_tuple
         num_wires_tuple = self._num_wires_tuple
+
+        # Recombination parameters (captured in closure)
+        recomb_params = self.recomb_params
 
         # Choose accumulation function based on mode
         if self.use_bucketed:
@@ -404,6 +419,9 @@ class DetectorSimulator:
                     num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
                     max_buckets
                 )
+
+                # Convert from electrons to ADC
+                buckets = buckets / electrons_per_adc
 
                 if sparse_output:
                     B1 = 2 * kernel_num_wires
@@ -420,10 +438,12 @@ class DetectorSimulator:
         else:
             def accumulate_fn(wire_idx, time_idx, intensities, contributions,
                               num_wires_plane, num_time_steps, kernel_num_wires, kernel_height):
-                return accumulate_response_signals(
+                signal = accumulate_response_signals(
                     wire_idx, time_idx, intensities, contributions,
                     num_wires_plane, num_time_steps, kernel_num_wires, kernel_height
                 )
+                # Convert from electrons to ADC
+                return signal / electrons_per_adc
 
         @partial(jax.jit, static_argnames=(
             'max_hits_east', 'max_hits_west',  # Per-side padding sizes
@@ -433,10 +453,10 @@ class DetectorSimulator:
         ))
         def _calculate_signals_jit(
             # East side inputs (side 0, x < 0)
-            east_positions_mm, east_charges, east_valid_mask,
+            east_positions_mm, east_de, east_dx, east_valid_mask,
             east_theta, east_phi, east_track_ids,
             # West side inputs (side 1, x >= 0)
-            west_positions_mm, west_charges, west_valid_mask,
+            west_positions_mm, west_de, west_dx, west_valid_mask,
             west_theta, west_phi, west_track_ids,
             # Static args
             max_hits_east, max_hits_west,
@@ -454,18 +474,24 @@ class DetectorSimulator:
                 # Select data for this side - no masking needed, already split!
                 if side_idx == 0:  # East (x < 0)
                     positions_mm = east_positions_mm
-                    charges = east_charges
+                    de = east_de
+                    dx = east_dx
                     valid_mask = east_valid_mask
                     theta = east_theta
                     phi = east_phi
                     track_ids = east_track_ids
                 else:  # West (x >= 0)
                     positions_mm = west_positions_mm
-                    charges = west_charges
+                    de = west_de
+                    dx = west_dx
                     valid_mask = west_valid_mask
                     theta = west_theta
                     phi = west_phi
                     track_ids = west_track_ids
+
+                # Apply charge recombination (Modified Box model)
+                # This converts energy deposits (de, dx) to collected electrons
+                charges = calculate_modified_box_charge(de, dx, recomb_params)
 
                 # Convert positions to cm
                 positions_cm = positions_mm / 10.0
@@ -650,7 +676,7 @@ class DetectorSimulator:
                         kernel_wire_stride, kernel_wire_spacing, kernel_time_spacing, kernel_num_wires
                     )
 
-                    # Accumulate response signals
+                    # Accumulate response signals (output is in ADC)
                     response_signal = accumulate_fn(
                         wire_indices_rel_kernel, time_indices_kernel, intensities, kernel_contributions,
                         num_wires_plane, num_time_steps, kernel_num_wires, kernel_height
@@ -702,10 +728,10 @@ class DetectorSimulator:
         # Call JIT-compiled calculator
         response_tuple, track_hits_tuple = self._calculator_jit_raw(
             # East data
-            east_data.positions_mm, east_data.charges, east_data.valid_mask,
+            east_data.positions_mm, east_data.de, east_data.dx, east_data.valid_mask,
             east_data.theta, east_data.phi, east_data.track_ids,
             # West data
-            west_data.positions_mm, west_data.charges, west_data.valid_mask,
+            west_data.positions_mm, west_data.de, west_data.dx, west_data.valid_mask,
             west_data.theta, west_data.phi, west_data.track_ids,
             # Static args
             max_hits_east=max_hits_east,
@@ -756,7 +782,8 @@ class DetectorSimulator:
 
         dummy_east = DepositData(
             positions_mm=jnp.zeros((min_tier, 3), dtype=jnp.float32),
-            charges=jnp.zeros((min_tier,), dtype=jnp.float32),
+            de=jnp.zeros((min_tier,), dtype=jnp.float32),
+            dx=jnp.zeros((min_tier,), dtype=jnp.float32),
             valid_mask=jnp.zeros((min_tier,), dtype=bool),
             theta=jnp.zeros((min_tier,), dtype=jnp.float32),
             phi=jnp.zeros((min_tier,), dtype=jnp.float32),
@@ -764,7 +791,8 @@ class DetectorSimulator:
         )
         dummy_west = DepositData(
             positions_mm=jnp.zeros((min_tier, 3), dtype=jnp.float32),
-            charges=jnp.zeros((min_tier,), dtype=jnp.float32),
+            de=jnp.zeros((min_tier,), dtype=jnp.float32),
+            dx=jnp.zeros((min_tier,), dtype=jnp.float32),
             valid_mask=jnp.zeros((min_tier,), dtype=bool),
             theta=jnp.zeros((min_tier,), dtype=jnp.float32),
             phi=jnp.zeros((min_tier,), dtype=jnp.float32),
@@ -773,9 +801,9 @@ class DetectorSimulator:
 
         # Call directly to avoid split/pad logic
         _ = self._calculator_jit_raw(
-            dummy_east.positions_mm, dummy_east.charges, dummy_east.valid_mask,
+            dummy_east.positions_mm, dummy_east.de, dummy_east.dx, dummy_east.valid_mask,
             dummy_east.theta, dummy_east.phi, dummy_east.track_ids,
-            dummy_west.positions_mm, dummy_west.charges, dummy_west.valid_mask,
+            dummy_west.positions_mm, dummy_west.de, dummy_west.dx, dummy_west.valid_mask,
             dummy_west.theta, dummy_west.phi, dummy_west.track_ids,
             max_hits_east=min_tier,
             max_hits_west=min_tier,
@@ -890,9 +918,9 @@ def run_simulation(config_path, data_path, event_idx=0,
             print("WARNING: Event contains no particle steps.")
             return {}, {}, simulator
 
-        # Get recombined charge
-        recomb_charge = recombine_steps(step_data, detector_config)
-        recomb_charge = jnp.asarray(recomb_charge, dtype=jnp.float32)
+        # Extract de and dx (recombination is now done inside the simulator)
+        event_de = jnp.asarray(step_data.get('de', jnp.zeros((n_hits,))), dtype=jnp.float32)
+        event_dx = jnp.asarray(step_data.get('dx', jnp.zeros((n_hits,))), dtype=jnp.float32)
 
         # Extract angles and track IDs
         event_theta = jnp.asarray(step_data.get('theta', jnp.zeros((n_hits,))), dtype=jnp.float32)
@@ -902,9 +930,11 @@ def run_simulation(config_path, data_path, event_idx=0,
         print(f"Unique tracks: {len(jnp.unique(event_track_ids)):,}")
 
         # Create deposit data (no manual padding needed!)
+        # Recombination (de/dx -> electrons) is now done inside the simulator
         deposit_data = DepositData(
             positions_mm=event_positions_mm,
-            charges=recomb_charge,
+            de=event_de,
+            dx=event_dx,
             valid_mask=jnp.ones(n_hits, dtype=bool),
             theta=event_theta,
             phi=event_phi,

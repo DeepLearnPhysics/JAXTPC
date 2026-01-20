@@ -124,9 +124,3 @@ def compute_lifetime_attenuation(drift_distance_cm, drift_velocity_cm_us, electr
     attenuation = jnp.exp(-drift_time_us / electron_lifetime_us)
 
     return attenuation
-
-
-# Backward compatibility aliases (deprecated)
-_calculate_single_plane_drift_jit = compute_drift_to_plane
-_calculate_single_plane_drift_correction = correct_drift_for_plane
-calculate_drift_attenuation = compute_lifetime_attenuation
