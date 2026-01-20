@@ -56,6 +56,7 @@ wire_planes:
 
 readout:
   sampling_rate: 2.0  # MHz
+  electrons_per_adc: 182  # electrons per ADC count (from MicroBooNE electronics)
 
 simulation:
   drift:
@@ -64,10 +65,10 @@ simulation:
     transverse_diffusion: 16.3  # cm²/s
     electron_lifetime: 10.0  # ms
   charge_recombination:
-    model: box
+    model: modified_box
     recomb_parameters:
-      A: 0.8  # dimensionless
-      B: 0.3  # dimensionless
+      alpha: 0.93  # dimensionless (ArgoNeuT 2013)
+      beta: 0.212  # (kV/cm)(g/cm²)/MeV (ArgoNeuT 2013)
 
 medium:
   type: liquid_argon

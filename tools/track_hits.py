@@ -260,8 +260,3 @@ def sparse_hits_to_dense(track_hit_result, num_wires, num_time_steps, min_wire_i
         dense = dense.at[wire_indices, time_indices].add(charges)
 
     return dense
-
-
-# Backward compatibility aliases (deprecated)
-aggregate_hits_by_track = group_hits_by_track
-get_matched_hits = label_hits

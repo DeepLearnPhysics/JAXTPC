@@ -1,6 +1,9 @@
 """
 Sparse utilities for converting between dense, bucket, and truly sparse formats.
 
+This module provides functions for converting wire signals between different
+storage formats: dense arrays, sparse buckets, and truly sparse (indices, values).
+
 Truly sparse format:
     - indices: (N, 2) int32 array with [wire_idx, time_idx] per row
     - values: (N,) float32 array with signal values
@@ -14,13 +17,19 @@ def dense_to_sparse(dense_array, threshold=0.0):
     """
     Convert dense (num_wires, num_time_steps) array to sparse format.
 
-    Args:
-        dense_array: (num_wires, num_time_steps) array
-        threshold: Only include values with |value| > threshold (keeps sign)
+    Parameters
+    ----------
+    dense_array : jnp.ndarray
+        Array of shape (num_wires, num_time_steps) containing signal values.
+    threshold : float, optional
+        Only include values with |value| > threshold (keeps sign), by default 0.0.
 
-    Returns:
-        indices: (N, 2) int32 array with [wire_idx, time_idx] per row
-        values: (N,) float32 array with signal values (preserves sign)
+    Returns
+    -------
+    indices : jnp.ndarray
+        Array of shape (N, 2) with [wire_idx, time_idx] per row.
+    values : jnp.ndarray
+        Array of shape (N,) with signal values (preserves sign).
     """
     # Use absolute value for threshold check, but keep original signed values
     mask = jnp.abs(dense_array) > threshold
@@ -36,17 +45,31 @@ def sparse_buckets_to_sparse(buckets, compact_to_key, num_active,
     """
     Convert sparse buckets format directly to truly sparse (indices, values).
 
-    Args:
-        buckets: (max_buckets, B1, B2) bucket data
-        compact_to_key: (max_buckets,) mapping to bucket keys
-        num_active: number of active buckets
-        B1, B2: bucket dimensions
-        num_wires, num_time_steps: detector dimensions
-        threshold: Only include values with |value| > threshold (keeps sign)
+    Parameters
+    ----------
+    buckets : jnp.ndarray
+        Array of shape (max_buckets, B1, B2) containing bucket data.
+    compact_to_key : jnp.ndarray
+        Array of shape (max_buckets,) mapping compact index to bucket keys.
+    num_active : int
+        Number of active buckets.
+    B1 : int
+        Bucket dimension in wire direction.
+    B2 : int
+        Bucket dimension in time direction.
+    num_wires : int
+        Total number of wires in detector.
+    num_time_steps : int
+        Total number of time steps in detector.
+    threshold : float, optional
+        Only include values with |value| > threshold (keeps sign), by default 0.0.
 
-    Returns:
-        indices: (N, 2) int32 array with [wire_idx, time_idx] per row
-        values: (N,) float32 array with signal values (preserves sign)
+    Returns
+    -------
+    indices : jnp.ndarray
+        Array of shape (N, 2) with [wire_idx, time_idx] per row.
+    values : jnp.ndarray
+        Array of shape (N,) with signal values (preserves sign).
     """
     NUM_BUCKETS_T = (num_time_steps + B2 - 1) // B2
 
@@ -90,13 +113,21 @@ def sparse_to_dense(indices, values, num_wires, num_time_steps):
     """
     Convert sparse (indices, values) format to dense array using .at.add.
 
-    Args:
-        indices: (N, 2) int32 array with [wire_idx, time_idx] per row
-        values: (N,) float32 array with signal values
-        num_wires, num_time_steps: output array dimensions
+    Parameters
+    ----------
+    indices : jnp.ndarray
+        Array of shape (N, 2) with [wire_idx, time_idx] per row.
+    values : jnp.ndarray
+        Array of shape (N,) with signal values.
+    num_wires : int
+        Number of wires in output array.
+    num_time_steps : int
+        Number of time steps in output array.
 
-    Returns:
-        dense: (num_wires, num_time_steps) float32 array
+    Returns
+    -------
+    dense : jnp.ndarray
+        Array of shape (num_wires, num_time_steps) with accumulated values.
     """
     dense = jnp.zeros((num_wires, num_time_steps), dtype=jnp.float32)
 
