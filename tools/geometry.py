@@ -112,6 +112,114 @@ def generate_detector(config_file_path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _calculate_wire_lengths(dims_cm, angles_rad, wire_spacings_cm, index_offsets,
+                            num_wires_actual, min_wire_indices_abs):
+    """
+    Calculate wire lengths for all planes using vectorized numpy operations.
+
+    Parameters
+    ----------
+    dims_cm : dict
+        Detector dimensions in cm with keys 'x', 'y', 'z'.
+    angles_rad : array-like, shape (2, 3)
+        Wire angles in radians for each (side, plane).
+    wire_spacings_cm : array-like, shape (2, 3)
+        Wire spacing in cm for each (side, plane).
+    index_offsets : array-like, shape (2, 3)
+        Wire index offsets for each (side, plane).
+    num_wires_actual : array-like, shape (2, 3)
+        Number of wires for each (side, plane).
+    min_wire_indices_abs : array-like, shape (2, 3)
+        Minimum absolute wire index for each (side, plane).
+
+    Returns
+    -------
+    wire_lengths_m : dict
+        Dictionary mapping (side_idx, plane_idx) -> np.ndarray of wire lengths in meters.
+    """
+    detector_y = dims_cm['y']
+    detector_z = dims_cm['z']
+    half_y = detector_y / 2.0
+    half_z = detector_z / 2.0
+
+    wire_lengths_m = {}
+
+    for side_idx in range(2):
+        for plane_idx in range(3):
+            angle_rad = float(angles_rad[side_idx, plane_idx])
+            num_wires = int(num_wires_actual[side_idx, plane_idx])
+            wire_spacing = float(wire_spacings_cm[side_idx, plane_idx])
+            offset = int(index_offsets[side_idx, plane_idx])
+            min_wire_idx = int(min_wire_indices_abs[side_idx, plane_idx])
+
+            angle_deg = np.degrees(angle_rad)
+
+            if abs(angle_deg) < 0.1:  # Y-plane (angle ~ 0)
+                wire_lengths_m[(side_idx, plane_idx)] = np.full(num_wires, detector_y / 100.0)
+            else:
+                # Angled plane (U/V) - vectorized over all wires
+                cos_theta = np.cos(angle_rad)
+                sin_theta = np.sin(angle_rad)
+
+                wire_indices = np.arange(min_wire_idx, min_wire_idx + num_wires)
+                relative_indices = wire_indices - offset
+                r_values = relative_indices * wire_spacing
+
+                # Parameterize wire as: y(t) = r*sin(θ) + t*cos(θ),
+                #                       z(t) = r*cos(θ) - t*sin(θ)
+                # Find t at each boundary intersection
+                t_y1 = (-half_y - r_values * sin_theta) / cos_theta
+                t_y2 = (+half_y - r_values * sin_theta) / cos_theta
+                t_y_min = np.minimum(t_y1, t_y2)
+                t_y_max = np.maximum(t_y1, t_y2)
+
+                t_z1 = (r_values * cos_theta + half_z) / sin_theta
+                t_z2 = (r_values * cos_theta - half_z) / sin_theta
+                t_z_min = np.minimum(t_z1, t_z2)
+                t_z_max = np.maximum(t_z1, t_z2)
+
+                t_min = np.maximum(t_y_min, t_z_min)
+                t_max = np.minimum(t_y_max, t_z_max)
+
+                lengths_cm = np.maximum(0.0, t_max - t_min)
+                wire_lengths_m[(side_idx, plane_idx)] = lengths_cm / 100.0
+
+    return wire_lengths_m
+
+
+def _calculate_noise_rms(wire_lengths_m, noise_config_path):
+    """
+    Calculate mean noise RMS in ADC for each plane using MicroBooNE noise model.
+
+    Uses Equation 3.6: RMS = sqrt(x^2 + (y + z*L)^2)
+
+    Parameters
+    ----------
+    wire_lengths_m : dict
+        Dictionary mapping (side_idx, plane_idx) -> np.ndarray of wire lengths in meters.
+    noise_config_path : str
+        Path to noise_spectrum.npz containing noise_param_x/y/z.
+
+    Returns
+    -------
+    noise_rms : np.ndarray, shape (2, 3)
+        Mean noise RMS in ADC for each (side, plane).
+    """
+    noise_cfg = np.load(noise_config_path, allow_pickle=True)
+    x = float(noise_cfg['noise_param_x'])
+    y = float(noise_cfg['noise_param_y'])
+    z = float(noise_cfg['noise_param_z'])
+
+    noise_rms = np.zeros((2, 3))
+    for side_idx in range(2):
+        for plane_idx in range(3):
+            lengths = wire_lengths_m[(side_idx, plane_idx)]
+            rms_per_wire = np.sqrt(x**2 + (y + z * lengths)**2)
+            noise_rms[side_idx, plane_idx] = np.mean(rms_per_wire)
+
+    return noise_rms
+
+
 def _precalculate_all_parameters(detector_config: Dict[str, Any]) -> Dict[str, Any]:
     """
     Calculate all derived parameters needed for simulation from the detector config.
@@ -185,6 +293,18 @@ def _precalculate_all_parameters(detector_config: Dict[str, Any]) -> Dict[str, A
 
     # Load electrons per ADC conversion factor (default to MicroBooNE value if not specified)
     params['electrons_per_adc'] = float(detector_config['readout'].get('electrons_per_adc', 182))
+
+    # Wire lengths and noise RMS
+    params['wire_lengths_m'] = _calculate_wire_lengths(
+        dims_cm, params['angles_rad'], params['wire_spacings_cm'],
+        params['index_offsets'], params['num_wires_actual'],
+        params['min_wire_indices_abs'])
+
+    noise_config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'noise_spectrum.npz')
+    if os.path.exists(noise_config_path):
+        params['noise_rms'] = _calculate_noise_rms(params['wire_lengths_m'], noise_config_path)
+    else:
+        params['noise_rms'] = np.zeros((2, 3))
 
     return params
 

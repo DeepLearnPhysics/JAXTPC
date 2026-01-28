@@ -41,6 +41,14 @@ from tools.wires import (
     accumulate_response_signals_sparse_bucketed,
 )
 
+from tools.noise import (
+    add_noise,
+    generate_noise,
+    generate_noise_bucketed,
+    process_response,
+    extract_signal,
+)
+
 __all__ = [
     # Config classes
     'DepositData',
@@ -61,4 +69,10 @@ __all__ = [
     # Sparse utilities
     'sparse_buckets_to_dense',
     'accumulate_response_signals_sparse_bucketed',
+    # Noise
+    'add_noise',
+    'generate_noise',
+    'generate_noise_bucketed',
+    'process_response',
+    'extract_signal',
 ]
