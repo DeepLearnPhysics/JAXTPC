@@ -13,6 +13,7 @@ Contents:
 
 import jax
 import jax.numpy as jnp
+import jax.lax as lax
 from jax import jit, vmap
 from functools import partial
 import numpy as np
@@ -45,6 +46,10 @@ def load_kernel(filename):
         Wire spacing
     dy : float
         Time spacing
+    wire_zero_bin : int
+        Index of wire=0 in kernel (where kernel_x_coords is closest to 0)
+    time_zero_bin : int
+        Index of t=0 in kernel (where kernel_y_coords is closest to 0)
     """
     data = np.load(filename, allow_pickle=True)
 
@@ -59,7 +64,11 @@ def load_kernel(filename):
     dx = kernel_x_coords[1] - kernel_x_coords[0] if len(kernel_x_coords) > 1 else 0.1
     dy = kernel_y_coords[1] - kernel_y_coords[0] if len(kernel_y_coords) > 1 else 0.5
 
-    return kernel, kernel_x_coords, kernel_y_coords, plane, dx, dy
+    # Read zero-bin indices from file, or compute from coordinates as fallback
+    wire_zero_bin = int(data['wire_zero_bin']) if 'wire_zero_bin' in data else int(np.argmin(np.abs(kernel_x_coords)))
+    time_zero_bin = int(data['time_zero_bin']) if 'time_zero_bin' in data else int(np.argmin(np.abs(kernel_y_coords)))
+
+    return kernel, kernel_x_coords, kernel_y_coords, plane, dx, dy, wire_zero_bin, time_zero_bin
 
 
 def calculate_wire_count(kernel_width, wire_spacing=0.1):
@@ -120,8 +129,9 @@ def create_gaussian_kernel(shape, sigma_trans, sigma_long, dx, dy):
     ny, nx = shape
 
     # Create coordinate grids centered at 0
-    x = np.arange(nx) - nx // 2
-    y = np.arange(ny) - ny // 2
+    # Use (n-1)//2 to match convolve2d mode='same' center convention
+    x = np.arange(nx) - (nx - 1) // 2
+    y = np.arange(ny) - (ny - 1) // 2
     X, Y = np.meshgrid(x * dx, y * dy)
 
     # Handle small sigma values
@@ -214,11 +224,12 @@ def create_diffusion_kernel_array(planes=['U', 'V', 'Y'], num_s=16, kernel_dir='
         try:
             # Load original kernel
             filename = f'{kernel_dir}/{plane}_plane_kernel.npz'
-            kernel, x_coords, y_coords, loaded_plane, dx, dy = load_kernel(filename)
+            kernel, x_coords, y_coords, loaded_plane, dx, dy, wire_zero_bin, time_zero_bin = load_kernel(filename)
 
-            # Scale kernel by time_spacing for proper discrete integration
-            # The kernel represents response density; multiplying by dt converts to charge-per-bin
-            kernel = kernel * time_spacing
+            # Scale kernel by dy (kernel time spacing) for proper discrete integration
+            # The kernel represents response density; multiplying by fine dt converts to charge-per-fine-bin
+            # Summing bins_per_sim_time fine bins then gives correct charge per simulation bin
+            kernel = kernel * dy
 
             # Initialize DKernel array
             kernel_shape = kernel.shape
@@ -233,10 +244,12 @@ def create_diffusion_kernel_array(planes=['U', 'V', 'Y'], num_s=16, kernel_dir='
 
                 # Calculate sigmas based on physics: sigma = sigma_max * sqrt(s)
                 # Since sigma ~ sqrt(drift_time) and s ~ drift_time, then sigma(s) = sigma_max * sqrt(s)
-                # These are in UNITLESS grid coordinates (not physical units)
+                # sigma_trans is in wire pitches (matches kernel x-axis units)
+                # sigma_long must be in μs (matches kernel y-axis units),
+                #   so convert from sim-time-bin units by multiplying by time_spacing
                 if max_sigma_trans_unitless is not None and max_sigma_long_unitless is not None:
-                    sigma_trans = max_sigma_trans_unitless * np.sqrt(s)  # unitless
-                    sigma_long = max_sigma_long_unitless * np.sqrt(s)    # unitless
+                    sigma_trans = max_sigma_trans_unitless * np.sqrt(s)                  # wire pitches
+                    sigma_long = max_sigma_long_unitless * np.sqrt(s) * time_spacing    # μs
                 else:
                     # Fallback to old hardcoded values if not provided
                     sigma_trans = 0.7 * s + 1e-3
@@ -246,7 +259,7 @@ def create_diffusion_kernel_array(planes=['U', 'V', 'Y'], num_s=16, kernel_dir='
                 convolved, _ = convolve_with_gaussian(kernel, sigma_trans, sigma_long, dx, dy)
                 DKernel = DKernel.at[i].set(convolved)
 
-            DKernels[plane] = (DKernel, linear_s, kernel_shape, x_coords, y_coords)
+            DKernels[plane] = (DKernel, linear_s, kernel_shape, x_coords, y_coords, dx, dy, wire_zero_bin, time_zero_bin)
 
         except FileNotFoundError:
             print(f"Warning: Could not find kernel file for {plane} plane")
@@ -259,13 +272,17 @@ def create_diffusion_kernel_array(planes=['U', 'V', 'Y'], num_s=16, kernel_dir='
 # RUNTIME INTERPOLATION (JIT-compiled)
 # ============================================================================
 
-@partial(jit, static_argnums=(4, 5, 6, 7))  # wire_stride, wire_spacing, time_spacing, num_wires are static
+@partial(jit, static_argnums=(4, 5, 6, 7, 8, 9))  # wire_stride, wire_spacing, kernel_time_spacing, sim_time_spacing, num_wires, num_sim_time_bins are static
 def interpolate_diffusion_kernel(DKernel, s_observed, w_offset, t_offset,
-                               wire_stride, wire_spacing, time_spacing, num_wires):
+                               wire_stride, wire_spacing,
+                               kernel_time_spacing, sim_time_spacing,
+                               num_wires, num_sim_time_bins):
     """
     Interpolate the diffusion kernel at given s, w, t offsets.
 
     This is the core runtime function for efficient kernel interpolation.
+    Supports high-resolution kernels (e.g., 0.1 μs) with different simulation
+    time resolution (e.g., 0.5 μs).
 
     Parameters
     ----------
@@ -277,21 +294,23 @@ def interpolate_diffusion_kernel(DKernel, s_observed, w_offset, t_offset,
         Wire offset in [0, 1.0) - wire offset in units of wire_spacing
     t_offset : float
         Time offset in [0, 1.0) - fractional position within simulation time bin.
-        Since kernel and simulation use the same time resolution (0.5 μs),
-        this fractional position is used directly for interpolation.
     wire_stride : int
         Static wire stride (10 for 0.1 spacing to 1.0 spacing)
     wire_spacing : float
         Static wire spacing (0.1)
-    time_spacing : float
-        Static time spacing (0.5)
+    kernel_time_spacing : float
+        Static kernel time spacing (e.g., 0.1 μs for high-res)
+    sim_time_spacing : float
+        Static simulation time spacing (e.g., 0.5 μs)
     num_wires : int
         Static number of wire positions expected
+    num_sim_time_bins : int
+        Static number of output time bins (in simulation resolution)
 
     Returns
     -------
     interpolated_values : jnp.ndarray
-        Interpolated kernel values with shape (num_wires, kernel_height-1)
+        Interpolated kernel values with shape (num_wires, num_sim_time_bins)
     """
     num_s, kernel_height, kernel_width = DKernel.shape
 
@@ -323,8 +342,16 @@ def interpolate_diffusion_kernel(DKernel, s_observed, w_offset, t_offset,
 
     wire_base_positions = wire_positions * bins_per_wire + center_w
 
+    # 3. Time integration setup - sum fine kernel bins into simulation time bins
+    # Calculate how many kernel bins per simulation time bin
+    bins_per_sim_time = int(round(sim_time_spacing / kernel_time_spacing))  # e.g., 5 for 0.5/0.1
+    slice_len = num_sim_time_bins * bins_per_sim_time  # total fine bins to read
+
+    # Integer fine-bin offset from t_offset
+    t_base_bin = jnp.floor(t_offset * bins_per_sim_time).astype(int)
+
     # Initialize output array
-    output_values = jnp.zeros((num_wires, kernel_height - 1))
+    output_values = jnp.zeros((num_wires, num_sim_time_bins))
 
     # Process each wire position
     for wire_idx in range(num_wires):
@@ -342,18 +369,22 @@ def interpolate_diffusion_kernel(DKernel, s_observed, w_offset, t_offset,
         values_s_interp_right = (1 - s_alpha) * values_s_n_right + s_alpha * values_s_n_plus_1_right
         values_w_interp = (1 - w_alpha) * values_s_interp_left + w_alpha * values_s_interp_right
 
-        # Time interpolation: t_offset is already fractional bin position [0, 1)
-        # No conversion needed since kernel and simulation have same time resolution
-        t_alpha = t_offset
-        interpolated_values = (1 - t_alpha) * values_w_interp[:-1] + t_alpha * values_w_interp[1:]
-        output_values = output_values.at[wire_idx, :].set(interpolated_values)
+        # Time integration: dynamic_slice + reshape + sum
+        # Extracts slice_len contiguous fine bins starting at t_base_bin,
+        # reshapes into (num_sim_time_bins, bins_per_sim_time), and sums
+        # to produce one integrated value per simulation time bin.
+        chunk = lax.dynamic_slice(values_w_interp, (t_base_bin,), (slice_len,))
+        integrated = chunk.reshape(num_sim_time_bins, bins_per_sim_time).sum(axis=1)
+        output_values = output_values.at[wire_idx, :].set(integrated)
 
     return output_values
 
 
-@partial(jit, static_argnums=(4, 5, 6, 7))  # wire_stride, wire_spacing, time_spacing, num_wires are static
+@partial(jit, static_argnums=(4, 5, 6, 7, 8, 9))  # wire_stride, wire_spacing, kernel_time_spacing, sim_time_spacing, num_wires, num_sim_time_bins are static
 def interpolate_diffusion_kernel_batch(DKernel, s_observed_batch, w_offset_batch, t_offset_batch,
-                                     wire_stride, wire_spacing, time_spacing, num_wires):
+                                     wire_stride, wire_spacing,
+                                     kernel_time_spacing, sim_time_spacing,
+                                     num_wires, num_sim_time_bins):
     """
     Batch interpolation using vmap for multiple sets of parameters.
 
@@ -373,20 +404,25 @@ def interpolate_diffusion_kernel_batch(DKernel, s_observed_batch, w_offset_batch
         Static wire stride
     wire_spacing : float
         Static wire spacing
-    time_spacing : float
-        Static time spacing
+    kernel_time_spacing : float
+        Static kernel time spacing (e.g., 0.1 μs for high-res)
+    sim_time_spacing : float
+        Static simulation time spacing (e.g., 0.5 μs)
     num_wires : int
         Static number of wires
+    num_sim_time_bins : int
+        Static number of output time bins (in simulation resolution)
 
     Returns
     -------
     batch_results : jnp.ndarray
-        Batch results with shape (N, num_wires, kernel_height-1)
+        Batch results with shape (N, num_wires, num_sim_time_bins)
     """
     # Vmap over the batch dimension (first axis)
     vmapped_interpolate = vmap(
         lambda s, w, t: interpolate_diffusion_kernel(
-            DKernel, s, w, t, wire_stride, wire_spacing, time_spacing, num_wires
+            DKernel, s, w, t, wire_stride, wire_spacing,
+            kernel_time_spacing, sim_time_spacing, num_wires, num_sim_time_bins
         ),
         in_axes=(0, 0, 0),  # Vmap over first axis of s, w, t
         out_axes=0          # Output has batch dimension first
@@ -414,7 +450,7 @@ def load_response_kernels(response_path="tools/responses/", num_s=16,
     wire_spacing : float
         Wire spacing in cm.
     time_spacing : float
-        Time spacing in microseconds.
+        Simulation time spacing in microseconds.
     max_sigma_trans_unitless : float, optional
         Maximum transverse diffusion sigma in unitless grid coordinates.
     max_sigma_long_unitless : float, optional
@@ -423,7 +459,16 @@ def load_response_kernels(response_path="tools/responses/", num_s=16,
     Returns
     -------
     dict
-        Dictionary mapping plane names to kernel data.
+        Dictionary mapping plane names to kernel data including:
+        - DKernel: diffusion kernel array
+        - num_wires: number of output wires
+        - kernel_height: number of output time bins (in simulation resolution)
+        - wire_spacing: wire spacing
+        - time_spacing: simulation time spacing
+        - wire_stride: bins per wire
+        - kernel_time_spacing: fine kernel time spacing
+        - wire_zero_bin: where wire=0 is in output wires
+        - time_zero_bin: where t=0 is in output (simulation time bins)
     """
     planes = ['U', 'V', 'Y']
 
@@ -441,24 +486,44 @@ def load_response_kernels(response_path="tools/responses/", num_s=16,
     # Extract kernel info for each plane
     response_kernels = {}
     for plane in DKernels:
-        DKernel, linear_s, kernel_shape, x_coords, y_coords = DKernels[plane]
+        DKernel, linear_s, kernel_shape, x_coords, y_coords, kernel_dx, kernel_dy, wire_zero_bin, time_zero_bin = DKernels[plane]
         num_wires = calculate_wire_count(kernel_shape[1], wire_spacing)
-        kernel_height = kernel_shape[0] - 1  # Output height after interpolation
+        bins_per_wire = int(1.0 / wire_spacing)  # e.g., 10 for 0.1 spacing
+
+        # Compute num_sim_time_bins accounting for offset headroom
+        # dynamic_slice needs: t_base_bin + num_sim_time_bins * bps <= kernel_height
+        # t_base_bin can be at most (bps - 1), so:
+        bins_per_sim_time = int(round(time_spacing / kernel_dy))
+        kernel_height_fine = kernel_shape[0]
+        num_sim_time_bins = (kernel_height_fine - bins_per_sim_time + 1) // bins_per_sim_time
+
+        # Convert kernel time_zero_bin to simulation time bins
+        # time_zero_bin is in kernel bins, scale to simulation resolution
+        time_zero_bin_sim = int(round(time_zero_bin * kernel_dy / time_spacing))
+
+        # Calculate wire_zero_bin in output wire units
+        # wire_zero_bin is in kernel bins, convert to output wire position
+        wire_zero_bin_out = wire_zero_bin // bins_per_wire
 
         response_kernels[plane] = {
             'DKernel': DKernel,
             'num_wires': num_wires,
-            'kernel_height': kernel_height,
+            'kernel_height': num_sim_time_bins,      # Now in simulation time bins
             'wire_spacing': wire_spacing,
-            'time_spacing': time_spacing,
-            'wire_stride': int(1.0 / wire_spacing)  # 10 for 0.1 spacing
+            'time_spacing': time_spacing,            # Simulation time spacing
+            'wire_stride': bins_per_wire,            # 10 for 0.1 spacing
+            'kernel_time_spacing': kernel_dy,        # Fine kernel time spacing (e.g., 0.1 μs)
+            'wire_zero_bin': wire_zero_bin_out,      # Where wire=0 is in output wires
+            'time_zero_bin': time_zero_bin_sim,      # Where t=0 is in output (sim bins)
         }
 
     return response_kernels
 
 
 def apply_diffusion_response(DKernel, s_values, wire_offsets, time_offsets,
-                           wire_stride, wire_spacing, time_spacing, num_wires):
+                           wire_stride, wire_spacing,
+                           kernel_time_spacing, sim_time_spacing,
+                           num_wires, num_sim_time_bins):
     """
     Apply diffusion response using pre-computed kernels.
 
@@ -471,25 +536,31 @@ def apply_diffusion_response(DKernel, s_values, wire_offsets, time_offsets,
     wire_offsets : jnp.ndarray
         Array of wire offsets in [0, 1) for each segment.
     time_offsets : jnp.ndarray
-        Array of time offsets in [0, 0.5) for each segment.
+        Array of time offsets in [0, 1) for each segment.
     wire_stride : int
         Wire stride (static parameter).
     wire_spacing : float
         Wire spacing (static parameter).
-    time_spacing : float
-        Time spacing (static parameter).
+    kernel_time_spacing : float
+        Fine kernel time spacing (e.g., 0.1 μs for high-res).
+    sim_time_spacing : float
+        Simulation time spacing (e.g., 0.5 μs).
     num_wires : int
         Number of wires in kernel (static parameter).
+    num_sim_time_bins : int
+        Number of output time bins in simulation resolution.
 
     Returns
     -------
     jnp.ndarray
-        Response contributions with shape (N, num_wires, kernel_height).
+        Response contributions with shape (N, num_wires, num_sim_time_bins).
     """
     # Apply batch interpolation
     contributions = interpolate_diffusion_kernel_batch(
         DKernel, s_values, wire_offsets, time_offsets,
-        wire_stride, wire_spacing, time_spacing, num_wires
+        wire_stride, wire_spacing,
+        kernel_time_spacing, sim_time_spacing,
+        num_wires, num_sim_time_bins
     )
 
     return contributions
