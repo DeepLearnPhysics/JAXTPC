@@ -82,8 +82,8 @@ from tools.recombination import calculate_modified_box_charge, extract_recombina
 
 # Default padding tiers - array sizes that trigger JIT recompilation
 # Using fixed tiers limits the number of JIT versions cached
-PADDING_TIERS = (50_000, 200_000)
-
+# PADDING_TIERS = (50_000, 300_000)
+PADDING_TIERS = (100_000,)
 
 def pick_padding_tier(n_hits, tiers=PADDING_TIERS):
     """
@@ -412,12 +412,13 @@ class DetectorSimulator:
             sparse_output = self.sparse_output
 
             def accumulate_fn(wire_idx, time_idx, intensities, contributions,
-                              num_wires_plane, num_time_steps, kernel_num_wires, kernel_height):
+                              num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
+                              wire_zero_bin, time_zero_bin):
                 # Use sparse bucketing with two-phase algorithm
                 buckets, num_active, compact_to_key = accumulate_response_signals_sparse_bucketed(
                     wire_idx, time_idx, intensities, contributions,
                     num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
-                    max_buckets
+                    max_buckets, wire_zero_bin, time_zero_bin
                 )
 
                 # Convert from electrons to ADC
@@ -437,10 +438,12 @@ class DetectorSimulator:
 
         else:
             def accumulate_fn(wire_idx, time_idx, intensities, contributions,
-                              num_wires_plane, num_time_steps, kernel_num_wires, kernel_height):
+                              num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
+                              wire_zero_bin, time_zero_bin):
                 signal = accumulate_response_signals(
                     wire_idx, time_idx, intensities, contributions,
-                    num_wires_plane, num_time_steps, kernel_num_wires, kernel_height
+                    num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
+                    wire_zero_bin, time_zero_bin
                 )
                 # Convert from electrons to ADC
                 return signal / electrons_per_adc
@@ -665,21 +668,27 @@ class DetectorSimulator:
                     plane_kernel = response_kernels[plane_type]
                     DKernel = plane_kernel['DKernel']
                     kernel_num_wires = plane_kernel['num_wires']
-                    kernel_height = plane_kernel['kernel_height']
+                    kernel_height = plane_kernel['kernel_height']      # Now in simulation time bins
                     kernel_wire_stride = plane_kernel['wire_stride']
                     kernel_wire_spacing = plane_kernel['wire_spacing']
-                    kernel_time_spacing = plane_kernel['time_spacing']
+                    kernel_time_spacing_fine = plane_kernel['kernel_time_spacing']  # Fine kernel spacing (e.g., 0.1 μs)
+                    sim_time_spacing = plane_kernel['time_spacing']    # Simulation time spacing (e.g., 0.5 μs)
+                    wire_zero_bin = plane_kernel['wire_zero_bin']      # Where wire=0 is in output wires
+                    time_zero_bin = plane_kernel['time_zero_bin']      # Where t=0 is in output (sim bins)
 
                     # Get kernel contributions
                     kernel_contributions = apply_diffusion_response(
                         DKernel, s_values, wire_offsets, time_offsets,
-                        kernel_wire_stride, kernel_wire_spacing, kernel_time_spacing, kernel_num_wires
+                        kernel_wire_stride, kernel_wire_spacing,
+                        kernel_time_spacing_fine, sim_time_spacing,    # Fine and simulation time spacing
+                        kernel_num_wires, kernel_height                # kernel_height is now num_sim_time_bins
                     )
 
                     # Accumulate response signals (output is in ADC)
                     response_signal = accumulate_fn(
                         wire_indices_rel_kernel, time_indices_kernel, intensities, kernel_contributions,
-                        num_wires_plane, num_time_steps, kernel_num_wires, kernel_height
+                        num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
+                        wire_zero_bin, time_zero_bin
                     )
 
                     # Store results
@@ -767,6 +776,7 @@ class DetectorSimulator:
             track_result['hits_by_track'] = track_result['hits_by_track'][:num_hits]
             track_result['labeled_hits'] = track_result['labeled_hits'][:num_labeled]
             track_result['track_boundaries'] = track_result['track_boundaries'][:num_tracks]
+            track_result['track_ids'] = track_result['track_ids'][:num_tracks]
 
         # Post-simulation validation
         self._validate_post_simulation(track_hits, response_signals)

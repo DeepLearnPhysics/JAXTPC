@@ -327,7 +327,7 @@ def visualize_interpolation_steps(DKernels, plane='Y', s_observed=0.3, w_offset=
         print(f"Plane {plane} not available")
         return None
 
-    DKernel, linear_s, kernel_shape, x_coords, y_coords = DKernels[plane]
+    DKernel, linear_s, kernel_shape, x_coords, y_coords, dx, dy, wire_zero_bin, time_zero_bin = DKernels[plane]
     kernel_height, kernel_width = kernel_shape
     num_s = len(linear_s)
 

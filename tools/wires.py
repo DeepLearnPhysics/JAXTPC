@@ -454,8 +454,8 @@ def prepare_deposit_with_diffusion(
     wire_distances_cm = closest_wire_distance + relative_indices * wire_spacing_cm  # Shape: (2*K_wire+1,)
 
     # 3. Apply charge scaling and attenuation
-    charge_scaled = charge * angular_scaling_factor
-    attenuated_charge = charge_scaled * attenuation_factor
+    # charge_scaled = charge * angular_scaling_factor
+    attenuated_charge = charge * attenuation_factor
 
     # 4. Calculate diffusion response array ((2*K_wire+1) x (2*K_time+1))
     # Reshape for broadcasting
@@ -615,9 +615,11 @@ def prepare_deposit_for_response(
     return wire_index_rel, wire_offset, time_index, time_offset, intensity
 
 
-@partial(jax.jit, static_argnames=('num_wires', 'num_time_steps', 'kernel_num_wires', 'kernel_height'))
+@partial(jax.jit, static_argnames=('num_wires', 'num_time_steps', 'kernel_num_wires', 'kernel_height',
+                                    'wire_zero_bin', 'time_zero_bin'))
 def accumulate_response_signals(wire_indices, time_indices, intensities, contributions,
-                                num_wires, num_time_steps, kernel_num_wires, kernel_height):
+                                num_wires, num_time_steps, kernel_num_wires, kernel_height,
+                                wire_zero_bin, time_zero_bin):
     """
     Fill signals array from kernel contributions for multiple segments.
 
@@ -642,6 +644,13 @@ def accumulate_response_signals(wire_indices, time_indices, intensities, contrib
         Number of wires in kernel (static).
     kernel_height : int
         Number of time bins in kernel (static).
+    wire_zero_bin : int
+        Index where wire=0 is in the kernel (static). For symmetric kernels,
+        this is kernel_num_wires // 2.
+    time_zero_bin : int
+        Index where t=0 is in the kernel (static). For symmetric kernels,
+        this is kernel_height // 2. For asymmetric kernels (e.g., more
+        negative time extent), this reflects where t=0 actually is.
 
     Returns
     -------
@@ -651,13 +660,11 @@ def accumulate_response_signals(wire_indices, time_indices, intensities, contrib
     # Initialize output array
     signals = jnp.zeros((num_wires, num_time_steps))
 
-    # Calculate wire offset to center kernel on wire_indices
-    wire_offset = kernel_num_wires // 2
-
-    # Calculate time offset to center kernel on time_indices
-    # Kernel time coords span -31.5 to +31.5 μs (centered at t=0 = arrival time)
-    # So kernel center (index kernel_height//2) should align with arrival time
-    time_offset_center = kernel_height // 2
+    # Use explicit center bins from kernel loading
+    # For symmetric kernels: wire_zero_bin = kernel_num_wires // 2, time_zero_bin = kernel_height // 2
+    # For asymmetric kernels: these reflect where wire=0 and t=0 actually are
+    wire_offset = wire_zero_bin
+    time_offset_center = time_zero_bin
 
     # Create kernel index offsets (reused for all segments)
     kernel_wire_offsets = jnp.arange(kernel_num_wires)  # shape: (kernel_num_wires,)
@@ -707,9 +714,11 @@ def accumulate_response_signals(wire_indices, time_indices, intensities, contrib
 # SPARSE BUCKETED ACCUMULATION (for very large detectors)
 # ============================================================================
 
-@partial(jax.jit, static_argnames=('B1', 'B2', 'num_wires', 'num_time_steps', 'max_buckets'))
+@partial(jax.jit, static_argnames=('B1', 'B2', 'num_wires', 'num_time_steps', 'max_buckets',
+                                    'wire_zero_bin', 'time_zero_bin'))
 def build_bucket_mapping(wire_indices, time_indices,
-                         B1, B2, num_wires, num_time_steps, max_buckets):
+                         B1, B2, num_wires, num_time_steps, max_buckets,
+                         wire_zero_bin, time_zero_bin):
     """
     Build point_to_compact mapping for sparse bucketing.
 
@@ -725,6 +734,8 @@ def build_bucket_mapping(wire_indices, time_indices,
         num_wires: Total wires (X dimension)
         num_time_steps: Total time steps (Y dimension)
         max_buckets: Maximum active buckets to allocate
+        wire_zero_bin: Where wire=0 is in output wires (static)
+        time_zero_bin: Where t=0 is in output simulation time bins (static)
 
     Returns:
         point_to_compact: (N, 4) int32 - maps (segment, quadrant) to compact index
@@ -736,14 +747,11 @@ def build_bucket_mapping(wire_indices, time_indices,
     # Floor division causes collisions when dimensions don't divide evenly
     NUM_BUCKETS_T = (num_time_steps + B2 - 1) // B2
 
-    # Wire offset: kernel_num_wires // 2, and B1 = 2 * kernel_num_wires
-    # So kernel_num_wires = B1 // 2, and wire_offset = B1 // 4
-    wire_offset = B1 // 4
-
-    # Home bucket for each segment, based on kernel START position (not center)
-    # This must match scatter_contributions_to_buckets which uses (wire_indices - wire_offset)
-    home_bw = (wire_indices - wire_offset) // B1  # (N,)
-    home_bt = time_indices // B2  # (N,)
+    # Use explicit center bins (passed as parameters)
+    # This makes the calculation consistent with scatter_contributions_to_buckets
+    # FIX: Previously home_bt did not use time offset, causing wrong bucket selection
+    home_bw = (wire_indices - wire_zero_bin) // B1  # (N,)
+    home_bt = (time_indices - time_zero_bin) // B2  # (N,)  # FIXED: Now uses time offset
 
     # 4 potential buckets per segment (quadrants)
     # Quadrant layout:
@@ -794,10 +802,12 @@ def build_bucket_mapping(wire_indices, time_indices,
     return point_to_compact, num_active, compact_to_key
 
 
-@partial(jax.jit, static_argnames=('max_buckets', 'kernel_num_wires', 'kernel_height', 'B1', 'B2'))
+@partial(jax.jit, static_argnames=('max_buckets', 'kernel_num_wires', 'kernel_height', 'B1', 'B2',
+                                    'wire_zero_bin', 'time_zero_bin'))
 def scatter_contributions_to_buckets(
     wire_indices, time_indices, intensities, contributions,
-    point_to_compact, max_buckets, kernel_num_wires, kernel_height, B1, B2
+    point_to_compact, max_buckets, kernel_num_wires, kernel_height, B1, B2,
+    wire_zero_bin, time_zero_bin
 ):
     """
     Scatter (N, kernel_num_wires, kernel_height) contributions to sparse buckets.
@@ -816,13 +826,15 @@ def scatter_contributions_to_buckets(
         kernel_height: Number of time bins in kernel (static)
         B1: Bucket size in wire direction (static)
         B2: Bucket size in time direction (static)
+        wire_zero_bin: Where wire=0 is in output wires (static)
+        time_zero_bin: Where t=0 is in output simulation time bins (static)
 
     Returns:
         (max_buckets, B1, B2) array of sparse bucket contributions
     """
     N = wire_indices.shape[0]
-    wire_offset = kernel_num_wires // 2
-    time_offset_center = kernel_height // 2  # Center kernel on arrival time
+    wire_offset = wire_zero_bin
+    time_offset_center = time_zero_bin
 
     # Scale contributions by intensity
     scaled = contributions * intensities[:, None, None]
@@ -867,10 +879,12 @@ def scatter_contributions_to_buckets(
     return output
 
 
-@partial(jax.jit, static_argnames=('max_buckets', 'kernel_num_wires', 'kernel_height', 'B1', 'B2', 'batch_size'))
+@partial(jax.jit, static_argnames=('max_buckets', 'kernel_num_wires', 'kernel_height', 'B1', 'B2',
+                                    'wire_zero_bin', 'time_zero_bin', 'batch_size'))
 def scatter_contributions_to_buckets_batched(
     wire_indices, time_indices, intensities, contributions,
     point_to_compact, max_buckets, kernel_num_wires, kernel_height, B1, B2,
+    wire_zero_bin, time_zero_bin,
     batch_size=1000
 ):
     """
@@ -891,14 +905,16 @@ def scatter_contributions_to_buckets_batched(
         kernel_height: Number of time bins in kernel (static)
         B1: Bucket size in wire direction (static)
         B2: Bucket size in time direction (static)
+        wire_zero_bin: Where wire=0 is in output wires (static)
+        time_zero_bin: Where t=0 is in output simulation time bins (static)
         batch_size: Number of segments to process per batch (static)
 
     Returns:
         (max_buckets, B1, B2) array of sparse bucket contributions
     """
     N = wire_indices.shape[0]
-    wire_offset = kernel_num_wires // 2
-    time_offset_center = kernel_height // 2  # Center kernel on arrival time
+    wire_offset = wire_zero_bin
+    time_offset_center = time_zero_bin
 
     # Pad to multiple of batch_size
     n_batches = (N + batch_size - 1) // batch_size
@@ -979,11 +995,12 @@ def scatter_contributions_to_buckets_batched(
 
 
 @partial(jax.jit, static_argnames=('num_wires', 'num_time_steps', 'kernel_num_wires',
-                                    'kernel_height', 'max_buckets', 'batch_size'))
+                                    'kernel_height', 'max_buckets',
+                                    'wire_zero_bin', 'time_zero_bin', 'batch_size'))
 def accumulate_response_signals_sparse_bucketed(
     wire_indices, time_indices, intensities, contributions,
     num_wires, num_time_steps, kernel_num_wires, kernel_height,
-    max_buckets, batch_size=1000
+    max_buckets, wire_zero_bin, time_zero_bin, batch_size=1000
 ):
     """
     Sparse bucketed accumulation using the two-phase approach.
@@ -1004,6 +1021,8 @@ def accumulate_response_signals_sparse_bucketed(
         kernel_num_wires: Number of wires in kernel
         kernel_height: Number of time bins in kernel
         max_buckets: Maximum number of active buckets to allocate
+        wire_zero_bin: Where wire=0 is in output wires (static)
+        time_zero_bin: Where t=0 is in output simulation time bins (static)
         batch_size: Batch size for scatter. Recommended: 500-2000.
 
     Returns:
@@ -1017,13 +1036,15 @@ def accumulate_response_signals_sparse_bucketed(
 
     # Phase 1: Build mapping
     point_to_compact, num_active, compact_to_key = build_bucket_mapping(
-        wire_indices, time_indices, B1, B2, num_wires, num_time_steps, max_buckets
+        wire_indices, time_indices, B1, B2, num_wires, num_time_steps, max_buckets,
+        wire_zero_bin, time_zero_bin
     )
 
     # Phase 2: Batched scatter to sparse buckets
     buckets = scatter_contributions_to_buckets_batched(
         wire_indices, time_indices, intensities, contributions,
         point_to_compact, max_buckets, kernel_num_wires, kernel_height, B1, B2,
+        wire_zero_bin, time_zero_bin,
         batch_size=batch_size
     )
 
