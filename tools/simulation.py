@@ -75,6 +75,14 @@ from tools.geometry import generate_detector
 from tools.loader import load_particle_step_data
 from tools.recombination import calculate_modified_box_charge, extract_recombination_params
 
+# Noise generation (for JIT-integrated noise)
+from tools.noise import (
+    _noise_core,
+    _generate_noise_for_buckets,
+    _get_noise_spectrum_shape,
+    _NOISE_X, _NOISE_Y, _NOISE_Z
+)
+
 
 # =============================================================================
 # PADDING TIER SYSTEM
@@ -152,7 +160,8 @@ class DetectorSimulator:
         diffusion_params=None,
         padding_tiers=PADDING_TIERS,
         use_bucketed=False,
-        max_active_buckets=1000
+        max_active_buckets=1000,
+        include_noise=False
     ):
         print("--- Creating DetectorSimulator (V2 - Per-Side Padding) ---")
 
@@ -228,6 +237,38 @@ class DetectorSimulator:
             max_sigma_long_unitless=self.diffusion_params.max_sigma_long_unitless
         )
 
+        # Pre-compute noise parameters for JIT integration
+        self.include_noise = include_noise
+        if include_noise:
+            num_time_steps = int(detector_config['num_time_steps'])
+            wire_lengths_m = detector_config['wire_lengths_m']
+
+            # Spectrum for dense mode (full time resolution)
+            self._noise_spectrum_dense = jnp.array(_get_noise_spectrum_shape(num_time_steps))
+
+            # Spectrum and bucket sizes for bucketed mode (B2 resolution per plane)
+            self._noise_spectrum_bucketed = {}
+            self._bucket_dims = {}  # Store (B1, B2) per plane type
+            for plane_type in ['U', 'V', 'Y']:
+                B1 = 2 * self.response_kernels[plane_type]['num_wires']
+                B2 = 2 * self.response_kernels[plane_type]['kernel_height']
+                self._bucket_dims[plane_type] = (B1, B2)
+                self._noise_spectrum_bucketed[plane_type] = jnp.array(_get_noise_spectrum_shape(B2))
+
+            # Wire lengths as JAX arrays (for indexing per bucket)
+            self._wire_lengths_jax = {
+                (s, p): jnp.array(wire_lengths_m[(s, p)], dtype=jnp.float32)
+                for s in range(2) for p in range(3)
+            }
+
+            # Pre-computed series RMS for dense mode
+            self._noise_series_rms = {
+                (s, p): jnp.array(_NOISE_Y + _NOISE_Z * wire_lengths_m[(s, p)], dtype=jnp.float32)
+                for s in range(2) for p in range(3)
+            }
+
+            self._noise_white_rms = _NOISE_X
+
         # Extract static arrays for JIT
         self._prepare_static_args()
 
@@ -238,6 +279,8 @@ class DetectorSimulator:
               f"K_wire={self.diffusion_params.K_wire}, K_time={self.diffusion_params.K_time}")
         if use_bucketed:
             print(f"   Using BUCKETED accumulation (B=2*kernel, max_buckets={max_active_buckets})")
+        if include_noise:
+            print(f"   Noise integration: ENABLED (added inside JIT)")
         print("--- DetectorSimulator Ready ---")
 
     def _prepare_static_args(self):
@@ -448,6 +491,76 @@ class DetectorSimulator:
                 # Convert from electrons to ADC
                 return signal / electrons_per_adc
 
+        # Define noise function based on mode
+        if self.include_noise:
+            if self.use_bucketed:
+                wire_lengths_jax = self._wire_lengths_jax
+                spectrum_bucketed = self._noise_spectrum_bucketed
+                bucket_dims = self._bucket_dims
+                max_buckets = self.max_active_buckets
+                noise_white_rms = self._noise_white_rms
+
+                # Create separate noise functions for each plane type to preserve static B1/B2
+                def make_noise_fn_bucketed(plane_type):
+                    B1, B2 = bucket_dims[plane_type]
+                    spectrum = spectrum_bucketed[plane_type]
+
+                    def noise_fn_plane(key, signal_tuple, side_idx, plane_idx, num_wires_plane, num_time_steps_plane):
+                        buckets, num_active, compact_to_key, _, _ = signal_tuple
+
+                        # Map buckets to wire ranges
+                        NUM_BUCKETS_T = (num_time_steps_plane + B2 - 1) // B2
+                        wire_starts = (compact_to_key // NUM_BUCKETS_T) * B1
+                        wire_indices = wire_starts[:, None] + jnp.arange(B1)
+                        wire_indices = jnp.clip(wire_indices, 0, num_wires_plane - 1)
+
+                        # Get series RMS using actual wire lengths
+                        lengths = wire_lengths_jax[(side_idx, plane_idx)]
+                        bucket_series_rms = _NOISE_Y + _NOISE_Z * lengths[wire_indices]
+
+                        # Generate noise for all buckets
+                        noise = _generate_noise_for_buckets(
+                            key, max_buckets, B1, B2, spectrum, bucket_series_rms, noise_white_rms
+                        )
+
+                        # Only add noise to active buckets
+                        active_mask = jnp.arange(max_buckets) < num_active
+                        noise = noise * active_mask[:, None, None]
+
+                        return (buckets + noise, num_active, compact_to_key, B1, B2)
+                    return noise_fn_plane
+
+                # Create dict of noise functions per plane type
+                # plane_names[side_idx][plane_idx] gives 'U', 'V', or 'Y'
+                noise_fns_bucketed = {
+                    (s, p): make_noise_fn_bucketed(plane_names[s][p])
+                    for s in range(2) for p in range(3)
+                }
+
+                def noise_fn(key, signal_tuple, side_idx, plane_idx, num_wires_plane, num_time_steps_plane):
+                    # side_idx and plane_idx are concrete during JIT tracing (loop is unrolled)
+                    return noise_fns_bucketed[(side_idx, plane_idx)](
+                        key, signal_tuple, side_idx, plane_idx, num_wires_plane, num_time_steps_plane
+                    )
+
+            else:  # Dense mode
+                spectrum_dense = self._noise_spectrum_dense
+                noise_series_rms = self._noise_series_rms
+                noise_white_rms = self._noise_white_rms
+
+                def noise_fn(key, signal, side_idx, plane_idx, num_wires_plane, num_time_steps_plane):
+                    series_rms = noise_series_rms[(side_idx, plane_idx)]
+                    noise = _noise_core(key, num_wires_plane, num_time_steps_plane, spectrum_dense, series_rms, noise_white_rms)
+                    return signal + noise
+
+        else:  # No noise - identity functions
+            if self.use_bucketed:
+                def noise_fn(key, signal_tuple, side_idx, plane_idx, num_wires_plane, num_time_steps_plane):
+                    return signal_tuple
+            else:
+                def noise_fn(key, signal, side_idx, plane_idx, num_wires_plane, num_time_steps_plane):
+                    return signal
+
         @partial(jax.jit, static_argnames=(
             'max_hits_east', 'max_hits_west',  # Per-side padding sizes
             'max_wire_indices_tuple', 'min_wire_indices_tuple',
@@ -461,6 +574,8 @@ class DetectorSimulator:
             # West side inputs (side 1, x >= 0)
             west_positions_mm, west_de, west_dx, west_valid_mask,
             west_theta, west_phi, west_track_ids,
+            # Noise key
+            noise_key,
             # Static args
             max_hits_east, max_hits_west,
             max_wire_indices_tuple, min_wire_indices_tuple,
@@ -691,6 +806,11 @@ class DetectorSimulator:
                         wire_zero_bin, time_zero_bin
                     )
 
+                    # Apply noise (uses pre-split key for this plane)
+                    plane_keys = jax.random.split(noise_key, 6)
+                    plane_key = plane_keys[side_idx * 3 + plane_idx]
+                    response_signal = noise_fn(plane_key, response_signal, side_idx, plane_idx, num_wires_plane, num_time_steps)
+
                     # Store results
                     response_signals_list.append(response_signal)
                     track_hits_list.append(track_hit_result)
@@ -700,11 +820,11 @@ class DetectorSimulator:
         # Store raw JIT function (static args bound at call time based on tier)
         self._calculator_jit_raw = _calculate_signals_jit
 
-    def __call__(self, deposit_data: DepositData):
+    def __call__(self, deposit_data: DepositData, key=None):
         """Process deposits through both paths."""
-        return self.process_event(deposit_data)
+        return self.process_event(deposit_data, key=key)
 
-    def process_event(self, deposit_data: DepositData):
+    def process_event(self, deposit_data: DepositData, key=None):
         """
         Process a single event through both simulation paths.
 
@@ -715,6 +835,8 @@ class DetectorSimulator:
         deposit_data : DepositData
             Input data containing positions, charges, and track IDs.
             Can be any size - will be split and padded to tiers internally.
+        key : jax.Array, optional
+            JAX PRNGKey for noise generation. Default is PRNGKey(0).
 
         Returns
         -------
@@ -734,6 +856,9 @@ class DetectorSimulator:
         max_hits_east = east_data.positions_mm.shape[0]
         max_hits_west = west_data.positions_mm.shape[0]
 
+        # Noise key (used even when noise is disabled - identity function ignores it)
+        noise_key = key if key is not None else jax.random.PRNGKey(0)
+
         # Call JIT-compiled calculator
         response_tuple, track_hits_tuple = self._calculator_jit_raw(
             # East data
@@ -742,6 +867,8 @@ class DetectorSimulator:
             # West data
             west_data.positions_mm, west_data.de, west_data.dx, west_data.valid_mask,
             west_data.theta, west_data.phi, west_data.track_ids,
+            # Noise key
+            noise_key,
             # Static args
             max_hits_east=max_hits_east,
             max_hits_west=max_hits_west,
@@ -815,6 +942,7 @@ class DetectorSimulator:
             dummy_east.theta, dummy_east.phi, dummy_east.track_ids,
             dummy_west.positions_mm, dummy_west.de, dummy_west.dx, dummy_west.valid_mask,
             dummy_west.theta, dummy_west.phi, dummy_west.track_ids,
+            jax.random.PRNGKey(0),  # noise_key (dummy for warmup)
             max_hits_east=min_tier,
             max_hits_west=min_tier,
             max_wire_indices_tuple=self._max_indices_tuple,
