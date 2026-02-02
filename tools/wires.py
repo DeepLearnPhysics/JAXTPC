@@ -56,19 +56,12 @@ def compute_wire_distances(
     # Calculate r_prime (the wire coordinate) for all positions
     r_prime = P_y_cm * sin_theta + P_z_cm * cos_theta  # Shape: (n_hits,)
 
-    # Calculate index and distance to closest wire
-    idx_rel_floor = jnp.floor(r_prime / (wire_spacing_cm + 1e-9) - 1e-9)  # Shape: (n_hits,)
-    idx_rel_ceil = jnp.ceil(r_prime / (wire_spacing_cm + 1e-9) + 1e-9)    # Shape: (n_hits,)
+    # Calculate index and distance to closest wire using round()
+    # This correctly handles all cases including r_prime exactly on a wire
+    closest_idx_rel = jnp.round(r_prime / wire_spacing_cm)  # Shape: (n_hits,)
+    closest_wire_distances = r_prime - closest_idx_rel * wire_spacing_cm  # Shape: (n_hits,)
 
-    dist_floor = r_prime - idx_rel_floor * wire_spacing_cm  # Shape: (n_hits,)
-    dist_ceil = r_prime - idx_rel_ceil * wire_spacing_cm    # Shape: (n_hits,)
-
-    is_floor_closer = jnp.abs(dist_floor) <= jnp.abs(dist_ceil)  # Shape: (n_hits,)
-
-    closest_idx_rel = jnp.where(is_floor_closer, idx_rel_floor, idx_rel_ceil)  # Shape: (n_hits,)
-    closest_wire_distances = jnp.where(is_floor_closer, dist_floor, dist_ceil)  # Shape: (n_hits,)
-
-    closest_indices_abs = (closest_idx_rel.astype(jnp.int32) + index_offset)   # Shape: (n_hits,)
+    closest_indices_abs = closest_idx_rel.astype(jnp.int32) + index_offset   # Shape: (n_hits,)
 
     return closest_indices_abs, closest_wire_distances
 
@@ -451,7 +444,7 @@ def prepare_deposit_with_diffusion(
     # 2. Calculate wire indices and distances (using K as half-width)
     relative_indices = jnp.arange(-K_wire, K_wire + 1)  # 2K+1 values
     wire_indices = closest_index_abs + relative_indices  # Shape: (2*K_wire+1,)
-    wire_distances_cm = closest_wire_distance + relative_indices * wire_spacing_cm  # Shape: (2*K_wire+1,)
+    wire_distances_cm = closest_wire_distance - relative_indices * wire_spacing_cm  # Shape: (2*K_wire+1,)
 
     # 3. Apply charge scaling and attenuation
     # charge_scaled = charge * angular_scaling_factor

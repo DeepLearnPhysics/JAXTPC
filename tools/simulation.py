@@ -783,20 +783,16 @@ class DetectorSimulator:
                     plane_kernel = response_kernels[plane_type]
                     DKernel = plane_kernel['DKernel']
                     kernel_num_wires = plane_kernel['num_wires']
-                    kernel_height = plane_kernel['kernel_height']      # Now in simulation time bins
+                    kernel_height = plane_kernel['kernel_height']      # kernel_height - 1 due to interpolation
                     kernel_wire_stride = plane_kernel['wire_stride']
                     kernel_wire_spacing = plane_kernel['wire_spacing']
-                    kernel_time_spacing_fine = plane_kernel['kernel_time_spacing']  # Fine kernel spacing (e.g., 0.1 μs)
-                    sim_time_spacing = plane_kernel['time_spacing']    # Simulation time spacing (e.g., 0.5 μs)
                     wire_zero_bin = plane_kernel['wire_zero_bin']      # Where wire=0 is in output wires
-                    time_zero_bin = plane_kernel['time_zero_bin']      # Where t=0 is in output (sim bins)
+                    time_zero_bin = plane_kernel['time_zero_bin']      # Where t=0 is in output time bins
 
-                    # Get kernel contributions
+                    # Get kernel contributions using linear interpolation
                     kernel_contributions = apply_diffusion_response(
                         DKernel, s_values, wire_offsets, time_offsets,
-                        kernel_wire_stride, kernel_wire_spacing,
-                        kernel_time_spacing_fine, sim_time_spacing,    # Fine and simulation time spacing
-                        kernel_num_wires, kernel_height                # kernel_height is now num_sim_time_bins
+                        kernel_wire_stride, kernel_wire_spacing, kernel_num_wires
                     )
 
                     # Accumulate response signals (output is in ADC)
