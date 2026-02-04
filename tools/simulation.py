@@ -464,9 +464,6 @@ class DetectorSimulator:
                     max_buckets, wire_zero_bin, time_zero_bin
                 )
 
-                # Convert from electrons to ADC
-                buckets = buckets / electrons_per_adc
-
                 if sparse_output:
                     B1 = 2 * kernel_num_wires
                     B2 = 2 * kernel_height
@@ -488,8 +485,7 @@ class DetectorSimulator:
                     num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
                     wire_zero_bin, time_zero_bin
                 )
-                # Convert from electrons to ADC
-                return signal / electrons_per_adc
+                return signal
 
         # Define noise function based on mode
         if self.include_noise:
