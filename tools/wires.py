@@ -586,7 +586,7 @@ def prepare_deposit_for_response(
     time_offset = (drift_time_us / time_step_size_us) - time_index
 
     # Calculate wire offset (fractional part of wire position)
-    wire_offset = jnp.abs(closest_wire_distance) / wire_spacing_cm
+    wire_offset = closest_wire_distance / wire_spacing_cm
 
     # Apply charge scaling and attenuation
     intensity = charge * attenuation_factor

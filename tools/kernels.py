@@ -330,7 +330,9 @@ def interpolate_diffusion_kernel(DKernel, s_observed, w_offset, t_offset,
         half_wires = num_wires // 2
         wire_positions = jnp.arange(-half_wires, half_wires + 1)  # -6 to 6 for num_wires=13
 
-    wire_base_positions = wire_positions * bins_per_wire + center_w
+    # Compute bin positions so that bin = center_w + (w_offset - position) * bins_per_wire
+    # This correctly handles signed w_offset for proper neighbor response
+    wire_base_positions = center_w - wire_positions * bins_per_wire
 
     # 3. Time interpolation - linear interpolation between adjacent time bins
     t_alpha = t_offset  # Already in [0, 1)
