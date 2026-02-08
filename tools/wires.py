@@ -528,9 +528,10 @@ def accumulate_signals(indices_and_values, num_wires, num_time_steps):
     wire_signals = jnp.zeros((num_wires, num_time_steps))
 
     # Fill array using scatter_add
+    # mode='drop' discards out-of-bounds indices instead of wrapping around
     wire_signals = wire_signals.at[
         wire_indices, time_indices
-    ].add(signal_values)
+    ].add(signal_values, mode='drop')
 
     return wire_signals
 
@@ -675,6 +676,13 @@ def accumulate_response_signals(wire_indices, time_indices, intensities, contrib
     # Shape: (N, kernel_num_wires, kernel_height)
     scaled_contributions = contributions * intensities[:, None, None]
 
+    # Zero out contributions where indices fall outside the output array.
+    # JAX treats negative indices as Python-style (e.g. -1 → last element),
+    # so we must mask them here rather than relying on mode='drop'.
+    wire_valid = (wire_positions >= 0) & (wire_positions < num_wires)       # (N, kernel_num_wires)
+    time_valid = (time_positions >= 0) & (time_positions < num_time_steps)  # (N, kernel_height)
+    scaled_contributions = scaled_contributions * (wire_valid[:, :, None] & time_valid[:, None, :])
+
     # Create flattened indices for scatter operation
     # Flatten wire positions: (N * kernel_num_wires,)
     flat_wire_indices = wire_positions.reshape(-1)
@@ -796,11 +804,13 @@ def build_bucket_mapping(wire_indices, time_indices,
 
 
 @partial(jax.jit, static_argnames=('max_buckets', 'kernel_num_wires', 'kernel_height', 'B1', 'B2',
-                                    'wire_zero_bin', 'time_zero_bin'))
+                                    'wire_zero_bin', 'time_zero_bin',
+                                    'num_wires', 'num_time_steps'))
 def scatter_contributions_to_buckets(
     wire_indices, time_indices, intensities, contributions,
     point_to_compact, max_buckets, kernel_num_wires, kernel_height, B1, B2,
-    wire_zero_bin, time_zero_bin
+    wire_zero_bin, time_zero_bin,
+    num_wires=None, num_time_steps=None
 ):
     """
     Scatter (N, kernel_num_wires, kernel_height) contributions to sparse buckets.
@@ -841,6 +851,11 @@ def scatter_contributions_to_buckets(
     gw = (wire_indices[:, None, None] - wire_offset + kw_idx).astype(jnp.int32)
     gt = (time_indices[:, None, None] - time_offset_center + kt_idx).astype(jnp.int32)
 
+    # Zero contributions outside detector bounds
+    if num_wires is not None and num_time_steps is not None:
+        valid = (gw >= 0) & (gw < num_wires) & (gt >= 0) & (gt < num_time_steps)
+        scaled = scaled * valid
+
     # Compute which quadrant each kernel element falls into
     # Home bucket based on kernel start position
     home_bw = (wire_indices[:, None, None] - wire_offset) // B1
@@ -873,12 +888,13 @@ def scatter_contributions_to_buckets(
 
 
 @partial(jax.jit, static_argnames=('max_buckets', 'kernel_num_wires', 'kernel_height', 'B1', 'B2',
-                                    'wire_zero_bin', 'time_zero_bin', 'batch_size'))
+                                    'wire_zero_bin', 'time_zero_bin', 'batch_size',
+                                    'num_wires', 'num_time_steps'))
 def scatter_contributions_to_buckets_batched(
     wire_indices, time_indices, intensities, contributions,
     point_to_compact, max_buckets, kernel_num_wires, kernel_height, B1, B2,
     wire_zero_bin, time_zero_bin,
-    batch_size=1000
+    batch_size=1000, num_wires=None, num_time_steps=None
 ):
     """
     Batched scatter to reduce memory from O(N × K1 × K2) to O(batch_size × K1 × K2).
@@ -944,6 +960,11 @@ def scatter_contributions_to_buckets_batched(
         # Centered on wire and time indices
         gw = (bw[:, None, None] - wire_offset + kw_idx[None, :, None]).astype(jnp.int32)
         gt = (bt[:, None, None] - time_offset_center + kt_idx[None, None, :]).astype(jnp.int32)
+
+        # Zero contributions outside detector bounds
+        if num_wires is not None and num_time_steps is not None:
+            valid_bounds = (gw >= 0) & (gw < num_wires) & (gt >= 0) & (gt < num_time_steps)
+            scaled = scaled * valid_bounds
 
         # Home bucket
         home_bw = (bw[:, None, None] - wire_offset) // B1
@@ -1038,7 +1059,7 @@ def accumulate_response_signals_sparse_bucketed(
         wire_indices, time_indices, intensities, contributions,
         point_to_compact, max_buckets, kernel_num_wires, kernel_height, B1, B2,
         wire_zero_bin, time_zero_bin,
-        batch_size=batch_size
+        batch_size=batch_size, num_wires=num_wires, num_time_steps=num_time_steps
     )
 
     return buckets, num_active, compact_to_key
@@ -1080,7 +1101,7 @@ def sparse_buckets_to_dense(buckets, compact_to_key, num_active,
         valid = i < num_active
         bucket_data = jnp.where(valid, buckets[i], 0.0)
 
-        output = output.at[w_indices, t_indices].add(bucket_data)
+        output = output.at[w_indices, t_indices].add(bucket_data, mode='drop')
         return output
 
     output = jnp.zeros((num_wires, num_time_steps), dtype=jnp.float32)
