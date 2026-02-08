@@ -1,8 +1,7 @@
 """
 Wire Response Processing Module
 
-This module provides tools for extracting wire responses from images,
-creating diffusion kernels, and performing efficient runtime interpolation.
+This module provides tools for wire response kernels and visualization.
 """
 
 # Core runtime functions - what most users need
@@ -13,12 +12,11 @@ from tools.kernels import (
     calculate_wire_count
 )
 
-# Extraction function - only needed for initial setup
-from .response_extraction import process_single_plane
-
 # Visualization functions
-from .response_visualization_utils import (
+from .visualization import (
+    actual_to_paper_log10,
     visualize_kernel,
+    visualize_diffusion_progression,
     visualize_interpolation_steps,
     create_parameter_sweep_gif
 )
@@ -26,22 +24,16 @@ from .response_visualization_utils import (
 # Version
 __version__ = '1.0.0'
 
-# Note: The extract_and_create_kernels function has been removed.
-# Use extract_responses_from_images.py for one-time extraction,
-# then use create_diffusion_kernel_array to load and process.
-
-
 __all__ = [
     # Core runtime functions
     'create_diffusion_kernel_array',
     'interpolate_diffusion_kernel_batch',
     'calculate_wire_count',
-    
-    # Extraction (one-time use)
-    'process_single_plane',
-    
+
     # Visualization
+    'actual_to_paper_log10',
     'visualize_kernel',
+    'visualize_diffusion_progression',
     'visualize_interpolation_steps',
     'create_parameter_sweep_gif'
 ]
