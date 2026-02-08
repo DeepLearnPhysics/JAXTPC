@@ -225,11 +225,6 @@ def create_diffusion_kernel_array(planes=['U', 'V', 'Y'], num_s=16, kernel_dir='
             filename = f'{kernel_dir}/{plane}_plane_kernel.npz'
             kernel, x_coords, y_coords, loaded_plane, dx, dy, wire_zero_bin, time_zero_bin = load_kernel(filename)
 
-            # Scale kernel by dy (kernel time spacing) for proper discrete integration
-            # The kernel represents response density; multiplying by fine dt converts to charge-per-fine-bin
-            # Summing bins_per_sim_time fine bins then gives correct charge per simulation bin
-            kernel = kernel * dy
-
             # Initialize DKernel array
             kernel_shape = kernel.shape
             DKernel = jnp.zeros((num_s, *kernel_shape))
