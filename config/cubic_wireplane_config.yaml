@@ -24,7 +24,7 @@ wire_planes:
           angle: -60.0  # degrees
           wire_spacing: 0.3  # cm
           distance_from_anode: 0.3  # cm (middle plane)
-          bias_voltage: -200.0  # V
+          bias_voltage: 0.0  # V
         - plane_id: 2
           type: collection
           angle: 0.0  # degrees
@@ -46,7 +46,7 @@ wire_planes:
           angle: -60.0  # degrees
           wire_spacing: 0.3  # cm
           distance_from_anode: 0.3  # cm (middle plane)
-          bias_voltage: -200.0  # V
+          bias_voltage: 0.0  # V
         - plane_id: 5
           type: collection
           angle: 0.0  # degrees
@@ -60,15 +60,20 @@ readout:
 
 simulation:
   drift:
-    velocity: 1.6  # mm/μs
+    velocity: 1.1  # mm/μs
     longitudinal_diffusion: 6.2  # cm²/s
     transverse_diffusion: 12.0  # cm²/s
     electron_lifetime: 10.0  # ms
   charge_recombination:
-    model: modified_box
+    model: emb  # Options: 'modified_box' (ArgoNeuT), 'emb' (ICARUS)
     recomb_parameters:
-      alpha: 0.93  # dimensionless (ArgoNeuT 2013)
-      beta: 0.212  # (kV/cm)(g/cm²)/MeV (ArgoNeuT 2013)
+      # Standard Modified Box (ArgoNeuT 2013, JINST 8 P08005)
+      alpha: 0.93   # dimensionless
+      beta: 0.212   # (kV/cm)(g/cm²)/MeV
+      # Ellipsoid Modified Box (ICARUS 2024, arXiv:2407.12969)
+      alpha_emb: 0.904      # dimensionless
+      beta_90: 0.204        # (kV/cm)(g/cm²)/MeV (at phi=90 deg)
+      R_anisotropy: 1.25    # ellipsoid anisotropy parameter
 
 medium:
   type: liquid_argon
@@ -79,4 +84,4 @@ medium:
   pressure: 1.0  # atm
 
 electric_field:
-  field_strength: 500.0  # V/cm
+  field_strength: 273.0  # V/cm
