@@ -1,23 +1,21 @@
 """
-Detector simulation module with dual output paths and per-side padding.
+Detector simulation module for LArTPC with per-side padding.
 
-This module provides the DetectorSimulator class that runs TWO parallel physics
-simulation paths simultaneously:
+Provides the DetectorSimulator class with two output paths:
 
-Response Path:
+Response Path (always active):
     Generates detector response signals using pre-computed kernels
     convolved with diffusion. Output: response_signals
 
-Hit Path:
+Hit Path (optional, controlled by include_track_hits):
     Calculates diffused charge without response convolution.
     Tracks which particle contributed to each location.
     Output: track_hits
 
-V2 Changes:
+Features:
     - Per-side padding with tier system (east/west split before JIT)
     - Automatic data splitting and padding inside process_event
-    - Pre-simulation and post-simulation validation
-    - No more manual padding in notebooks
+    - Optional noise, electronics response, and track labeling
 """
 
 import jax
@@ -59,9 +57,7 @@ from tools.wires import (
     sparse_buckets_to_dense,
 
     # Hit path functions (with K_wire x K_time diffusion)
-    compute_gaussian_diffusion,
     prepare_deposit_with_diffusion,
-    accumulate_signals
 )
 
 # Response kernel system (for response path)
@@ -73,7 +69,7 @@ from tools.track_hits import group_hits_by_track, label_hits
 # Core modules
 from tools.geometry import generate_detector
 from tools.loader import load_particle_step_data
-from tools.recombination import calculate_modified_box_charge, extract_recombination_params
+from tools.recombination import create_recombination_fn
 
 # Noise generation (for JIT-integrated noise)
 from tools.noise import (
@@ -88,10 +84,9 @@ from tools.noise import (
 # PADDING TIER SYSTEM
 # =============================================================================
 
-# Default padding tiers - array sizes that trigger JIT recompilation
-# Using fixed tiers limits the number of JIT versions cached
-# PADDING_TIERS = (50_000, 300_000)
-PADDING_TIERS = (100_000,)
+# Default padding tiers - array sizes that trigger JIT recompilation.
+# Using fixed tiers limits the number of JIT versions cached.
+PADDING_TIERS = (100_000, 200_000)
 
 def pick_padding_tier(n_hits, tiers=PADDING_TIERS):
     """
@@ -122,17 +117,16 @@ def pick_padding_tier(n_hits, tiers=PADDING_TIERS):
 
 class DetectorSimulator:
     """
-    LArTPC detector simulation with dual output paths and per-side padding.
+    LArTPC detector simulation with per-side padding.
 
     Produces:
-    - response_signals: Full detector simulation with response kernels
-    - track_hits: Track labeling information for analysis
+    - response_signals: Full detector simulation with response kernels (always)
+    - track_hits: Track labeling information for analysis (optional)
 
-    V2 Features:
+    Features:
     - Automatic splitting of data by detector side (east x<0, west x>=0)
     - Per-side padding using tier system to minimize JIT recompilations
-    - Built-in pre/post simulation validation
-    - No manual padding required from notebooks
+    - Optional noise, electronics response, and track labeling
 
     Parameters
     ----------
@@ -142,14 +136,33 @@ class DetectorSimulator:
         Path to response kernel files.
     track_config : TrackHitsConfig, optional
         Configuration for track labeling. If None, uses defaults.
+        Ignored when include_track_hits=False.
     diffusion_params : DiffusionParams, optional
         Diffusion parameters. If None, computed from config.
     padding_tiers : tuple of int, optional
-        Available padding tier sizes. Default: (50_000, 150_000, 350_000, 750_000)
+        Available padding tier sizes. Default: (100_000,).
     use_bucketed : bool
         If True, use sparse bucketed accumulation for very large detectors.
     max_active_buckets : int
         Max active buckets for sparse mode. Default 1000.
+    include_noise : bool
+        If True, add intrinsic noise inside JIT. Default False.
+    include_electronics : bool
+        If True, apply electronics response convolution. Default False.
+    include_track_hits : bool
+        If True, run the hit path for track labeling. Default True.
+    recombination_model : str, optional
+        Charge recombination model to use. Options:
+
+        - ``'modified_box'`` : Modified Box model (ArgoNeuT 2013, arXiv:1306.1712).
+          Angle-independent. Default params: α=0.93, β=0.212.
+        - ``'emb'`` : Ellipsoid Modified Box model (ICARUS 2024, arXiv:2407.12969).
+          Angle-dependent via track-to-drift-field angle φ.
+          Default params: α=0.904, β_90=0.204, R=1.25.
+
+        If None, reads from ``simulation.charge_recombination.model`` in the
+        detector config, falling back to ``'modified_box'`` if not specified.
+        See ``tools.recombination`` for full model documentation.
     """
 
     def __init__(
@@ -161,9 +174,14 @@ class DetectorSimulator:
         padding_tiers=PADDING_TIERS,
         use_bucketed=False,
         max_active_buckets=1000,
-        include_noise=False
+        include_noise=False,
+        include_electronics=False,
+        include_track_hits=True,
+        electronics_chunk_size=None,
+        electronics_threshold=0.0,
+        recombination_model=None,
     ):
-        print("--- Creating DetectorSimulator (V2 - Per-Side Padding) ---")
+        print("--- Creating DetectorSimulator ---")
 
         # Store config
         self.detector_config = detector_config
@@ -175,8 +193,10 @@ class DetectorSimulator:
         # Store ADC conversion factor (response output is in electrons)
         self.electrons_per_adc = detector_config['electrons_per_adc']
 
-        # Extract recombination parameters (for use inside JIT)
-        self.recomb_params = extract_recombination_params(detector_config)
+        # Create recombination function (captured by JIT closure)
+        self.recomb_fn, self.recomb_model = create_recombination_fn(
+            detector_config, model=recombination_model
+        )
 
         # Extract parameter bundles
         print("   Extracting parameters...")
@@ -207,24 +227,30 @@ class DetectorSimulator:
         else:
             self.diffusion_params = diffusion_params
 
-        # Create or use provided track config
-        if track_config is None:
-            max_wires = max(
-                np.max(detector_config['max_wire_indices_abs']) -
-                np.min(detector_config['min_wire_indices_abs']) + 1,
-                2000
-            )
-            self.track_config = create_track_hits_config(
-                threshold=1.0,
-                max_tracks=10000,
-                max_keys=500000
-            )
-            self._max_wires = int(max_wires)
-            self._max_time = self.time_params.num_steps
+        # Track labeling configuration
+        self.include_track_hits = include_track_hits
+        if include_track_hits:
+            if track_config is None:
+                max_wires = max(
+                    np.max(detector_config['max_wire_indices_abs']) -
+                    np.min(detector_config['min_wire_indices_abs']) + 1,
+                    2000
+                )
+                self.track_config = create_track_hits_config(
+                    threshold=1.0,
+                    max_tracks=10000,
+                    max_keys=500000
+                )
+                self._max_wires = int(max_wires)
+                self._max_time = self.time_params.num_steps
+            else:
+                self.track_config = track_config
+                self._max_wires = 2000
+                self._max_time = self.time_params.num_steps
         else:
-            self.track_config = track_config
-            self._max_wires = 2000  # Default
-            self._max_time = self.time_params.num_steps
+            self.track_config = None
+            self._max_wires = None
+            self._max_time = None
 
         # Load response kernels
         print("   Loading response kernels...")
@@ -269,18 +295,66 @@ class DetectorSimulator:
 
             self._noise_white_rms = _NOISE_X
 
+        # Pre-compute electronics response parameters
+        self.include_electronics = include_electronics
+        self.electronics_threshold = electronics_threshold
+
+        if include_electronics:
+            from tools.electronics import load_electronics_response, compute_fft_size
+
+            _TAU_US = 1000.0
+            _N_TAU = 3.0
+
+            self.electronics_kernels = load_electronics_response(
+                time_step_us=float(self.time_params.step_size_us),
+                tau_us=_TAU_US, n_tau=_N_TAU
+            )
+
+            R = len(self.electronics_kernels['U'])
+            num_time = int(detector_config['num_time_steps'])
+            self._electronics_fft_size = compute_fft_size(num_time, R)
+
+            if electronics_chunk_size is None:
+                self.electronics_chunk_size = int(np.max(detector_config['num_wires_actual']))
+            else:
+                self.electronics_chunk_size = electronics_chunk_size
+
+            # Ensure _bucket_dims available for bucketed+electronics even without noise
+            if use_bucketed and not hasattr(self, '_bucket_dims'):
+                self._bucket_dims = {}
+                for plane_type in ['U', 'V', 'Y']:
+                    B1 = 2 * self.response_kernels[plane_type]['num_wires']
+                    B2 = 2 * self.response_kernels[plane_type]['kernel_height']
+                    self._bucket_dims[plane_type] = (B1, B2)
+
+        # Output format flag
+        if use_bucketed and include_electronics:
+            self._output_format = 'wire_sparse'
+        elif use_bucketed:
+            self._output_format = 'bucketed'
+        else:
+            self._output_format = 'dense'
+
         # Extract static arrays for JIT
         self._prepare_static_args()
 
         # Build the JIT-compiled calculator
         self._build_calculator()
 
+        print(f"   Recombination model: {self.recomb_model}")
         print(f"   Config: tiers={padding_tiers}, num_s={self.diffusion_params.num_s}, "
               f"K_wire={self.diffusion_params.K_wire}, K_time={self.diffusion_params.K_time}")
         if use_bucketed:
             print(f"   Using BUCKETED accumulation (B=2*kernel, max_buckets={max_active_buckets})")
         if include_noise:
             print(f"   Noise integration: ENABLED (added inside JIT)")
+        if include_electronics:
+            print(f"   Electronics response: ENABLED (FFT size={self._electronics_fft_size}, "
+                  f"chunk={self.electronics_chunk_size}, output={self._output_format})")
+        if include_track_hits:
+            print(f"   Track labeling: ENABLED")
+        else:
+            print(f"   Track labeling: DISABLED")
         print("--- DetectorSimulator Ready ---")
 
     def _prepare_static_args(self):
@@ -395,7 +469,7 @@ class DetectorSimulator:
 
     def _validate_pre_simulation(self, counts):
         """Check inputs before running simulation."""
-        if self.track_config.max_tracks < counts['n_tracks']:
+        if self.include_track_hits and self.track_config.max_tracks < counts['n_tracks']:
             print(f"ERROR: max_tracks ({self.track_config.max_tracks:,}) < unique tracks ({counts['n_tracks']:,}). Tracks may be lost!")
 
     def _validate_post_simulation(self, track_hits, response_signals):
@@ -405,11 +479,25 @@ class DetectorSimulator:
             if actual_hits >= self.track_config.max_keys:
                 print(f"ERROR: Plane {plane_key}: num_hits ({actual_hits:,}) >= max_keys ({self.track_config.max_keys:,}). Data truncated!")
 
-        if self.use_bucketed:
+        if self._output_format == 'bucketed':
             for plane_key, resp in response_signals.items():
                 buckets, num_active, compact_to_key, B1, B2 = resp
                 if int(num_active) >= self.max_active_buckets:
                     print(f"ERROR: Plane {plane_key}: num_active ({int(num_active):,}) >= max_active_buckets ({self.max_active_buckets:,}). Data truncated!")
+
+        elif self._output_format == 'wire_sparse':
+            for plane_key, resp in response_signals.items():
+                _, _, n_active_wires = resp
+                if int(n_active_wires) >= self.electronics_chunk_size:
+                    print(f"WARNING: Plane {plane_key}: active wires ({int(n_active_wires):,}) >= "
+                          f"electronics_chunk_size ({self.electronics_chunk_size:,}).")
+
+        elif self._output_format == 'dense' and self.include_electronics:
+            for plane_key, resp in response_signals.items():
+                n_active = int(jnp.sum(jnp.any(resp != 0, axis=1)))
+                if n_active > self.electronics_chunk_size:
+                    print(f"WARNING: Plane {plane_key}: active wires ({n_active:,}) > "
+                          f"electronics_chunk_size ({self.electronics_chunk_size:,}).")
 
     def _build_calculator(self):
         """Build the JIT-compiled signal calculator."""
@@ -432,13 +520,15 @@ class DetectorSimulator:
 
         plane_names = self.plane_names
         response_kernels = self.response_kernels
-        track_threshold = self.track_config.threshold
         electrons_per_adc = self.electrons_per_adc
+        include_track_hits_flag = self.include_track_hits
 
-        max_tracks = self.track_config.max_tracks
-        max_wires = self._max_wires
-        max_time = self._max_time
-        max_keys = self.track_config.max_keys
+        if include_track_hits_flag:
+            track_threshold = self.track_config.threshold
+            max_tracks = self.track_config.max_tracks
+            max_wires = self._max_wires
+            max_time = self._max_time
+            max_keys = self.track_config.max_keys
 
         # Static tuples
         index_offsets_tuple = self._index_offsets_tuple
@@ -446,8 +536,8 @@ class DetectorSimulator:
         min_indices_tuple = self._min_indices_tuple
         num_wires_tuple = self._num_wires_tuple
 
-        # Recombination parameters (captured in closure)
-        recomb_params = self.recomb_params
+        # Recombination function (captured in closure)
+        recomb_fn = self.recomb_fn
 
         # Choose accumulation function based on mode
         if self.use_bucketed:
@@ -487,9 +577,96 @@ class DetectorSimulator:
                 )
                 return signal
 
+        # Define electronics response function based on mode
+        if self.include_electronics:
+            from tools.electronics import (
+                electronics_response_core, electronics_convolve_active,
+                buckets_to_active_wires
+            )
+            e_kernels = {t: jnp.array(self.electronics_kernels[t]) for t in ['U', 'V', 'Y']}
+            e_chunk = self.electronics_chunk_size
+            e_fft = self._electronics_fft_size
+            e_threshold = self.electronics_threshold
+
+            if self.use_bucketed:
+                max_buckets_e = self.max_active_buckets
+
+                def make_elec_fn_bucketed(plane_type):
+                    kernel = e_kernels[plane_type]
+                    B1, B2 = self._bucket_dims[plane_type]
+
+                    def fn(signal_tuple, num_wires_plane, num_time_steps_plane):
+                        buckets, num_active, compact_to_key, _, _ = signal_tuple
+                        active_signals, wire_indices, n_active_w = buckets_to_active_wires(
+                            buckets, num_active, compact_to_key,
+                            B1, B2, num_wires_plane, num_time_steps_plane,
+                            e_chunk, max_buckets_e
+                        )
+                        active_signals = electronics_convolve_active(
+                            active_signals, kernel, n_active_w,
+                            e_chunk, e_fft, num_time_steps_plane
+                        )
+                        return (active_signals, wire_indices, n_active_w)
+                    return fn
+
+                elec_fns = {
+                    (s, p): make_elec_fn_bucketed(plane_names[s][p])
+                    for s in range(2) for p in range(3)
+                }
+
+                def electronics_fn(sig, side_idx, plane_idx, nw, nt):
+                    return elec_fns[(side_idx, plane_idx)](sig, nw, nt)
+            else:
+                def make_elec_fn_dense(plane_type):
+                    kernel = e_kernels[plane_type]
+
+                    def fn(signal, nw, nt):
+                        return electronics_response_core(signal, kernel, e_threshold, e_chunk, e_fft, nt)
+                    return fn
+
+                elec_fns = {
+                    (s, p): make_elec_fn_dense(plane_names[s][p])
+                    for s in range(2) for p in range(3)
+                }
+
+                def electronics_fn(sig, side_idx, plane_idx, nw, nt):
+                    return elec_fns[(side_idx, plane_idx)](sig, nw, nt)
+        else:
+            def electronics_fn(sig, side_idx, plane_idx, nw, nt):
+                return sig
+
         # Define noise function based on mode
         if self.include_noise:
-            if self.use_bucketed:
+            if self.use_bucketed and self.include_electronics:
+                # Wire-sparse noise: reuse _noise_core on active wire rows
+                spectrum_dense = self._noise_spectrum_dense
+                wire_lengths_jax = self._wire_lengths_jax
+                noise_white_rms = self._noise_white_rms
+                e_chunk_noise = self.electronics_chunk_size
+
+                def make_noise_fn_wire_sparse(side_idx, plane_idx):
+                    lengths = wire_lengths_jax[(side_idx, plane_idx)]
+
+                    def fn(key, signal_tuple, si, pi, nw, nt):
+                        active_signals, wire_indices, n_active = signal_tuple
+                        active_series_rms = _NOISE_Y + _NOISE_Z * lengths[wire_indices]
+                        noise = _noise_core(key, e_chunk_noise, nt, spectrum_dense,
+                                            active_series_rms, noise_white_rms)
+                        valid = jnp.arange(e_chunk_noise) < n_active
+                        return (active_signals + noise * valid[:, None], wire_indices, n_active)
+                    return fn
+
+                noise_fns_ws = {
+                    (s, p): make_noise_fn_wire_sparse(s, p)
+                    for s in range(2) for p in range(3)
+                }
+
+                def noise_fn(key, sig, side_idx, plane_idx, num_wires_plane, num_time_steps_plane):
+                    return noise_fns_ws[(side_idx, plane_idx)](
+                        key, sig, side_idx, plane_idx, num_wires_plane, num_time_steps_plane
+                    )
+
+            elif self.use_bucketed:
                 wire_lengths_jax = self._wire_lengths_jax
                 spectrum_bucketed = self._noise_spectrum_bucketed
                 bucket_dims = self._bucket_dims
@@ -527,14 +704,12 @@ class DetectorSimulator:
                     return noise_fn_plane
 
                 # Create dict of noise functions per plane type
-                # plane_names[side_idx][plane_idx] gives 'U', 'V', or 'Y'
                 noise_fns_bucketed = {
                     (s, p): make_noise_fn_bucketed(plane_names[s][p])
                     for s in range(2) for p in range(3)
                 }
 
                 def noise_fn(key, signal_tuple, side_idx, plane_idx, num_wires_plane, num_time_steps_plane):
-                    # side_idx and plane_idx are concrete during JIT tracing (loop is unrolled)
                     return noise_fns_bucketed[(side_idx, plane_idx)](
                         key, signal_tuple, side_idx, plane_idx, num_wires_plane, num_time_steps_plane
                     )
@@ -550,12 +725,95 @@ class DetectorSimulator:
                     return signal + noise
 
         else:  # No noise - identity functions
-            if self.use_bucketed:
+            if self.use_bucketed and self.include_electronics:
+                def noise_fn(key, sig, side_idx, plane_idx, num_wires_plane, num_time_steps_plane):
+                    return sig  # wire-sparse tuple passthrough
+            elif self.use_bucketed:
                 def noise_fn(key, signal_tuple, side_idx, plane_idx, num_wires_plane, num_time_steps_plane):
                     return signal_tuple
             else:
                 def noise_fn(key, signal, side_idx, plane_idx, num_wires_plane, num_time_steps_plane):
                     return signal
+
+        # Define track hits function based on mode
+        if include_track_hits_flag:
+            def track_hits_fn(track_hits_list,
+                              charges, drift_time_us, drift_distance_cm,
+                              closest_wire_idx, closest_wire_distances,
+                              attenuation_factors, valid_mask, track_ids,
+                              theta, phi, angle_rad,
+                              spacing_cm, min_idx_abs, num_wires_plane):
+                theta_xz, theta_y = compute_deposit_wire_angles_vmap(
+                    theta, phi, angle_rad
+                )
+                angular_scaling_factor = compute_angular_scaling_vmap(theta_xz, theta_y)
+
+                prepare_deposit_vmap_hit = jax.vmap(
+                    prepare_deposit_with_diffusion,
+                    in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None,
+                            None, None, None, None, None, None),
+                )
+
+                hit_deposit_data = prepare_deposit_vmap_hit(
+                    charges, drift_time_us, drift_distance_cm,
+                    closest_wire_idx, closest_wire_distances,
+                    attenuation_factors, theta_xz, theta_y,
+                    angular_scaling_factor, valid_mask,
+                    K_wire, K_time, spacing_cm, time_step_size_us,
+                    diffusion_long_cm2_us, diffusion_trans_cm2_us,
+                    velocity_cm_us, min_idx_abs, num_wires_plane,
+                    num_time_steps
+                )
+
+                wire_indices_rel, time_indices, signal_values = hit_deposit_data
+                wire_indices_abs = wire_indices_rel + min_idx_abs
+
+                K_total = (2 * K_wire + 1) * (2 * K_time + 1)
+                track_ids_expanded = jnp.repeat(track_ids[:, jnp.newaxis], K_total, axis=1)
+
+                wire_indices_flat = wire_indices_abs.flatten()
+                time_indices_flat = time_indices.flatten()
+                track_ids_flat = track_ids_expanded.flatten()
+                charges_flat = signal_values.flatten()
+
+                wire_time_indices = jnp.stack([
+                    wire_indices_flat,
+                    time_indices_flat
+                ], axis=1)
+
+                (hits_by_track, num_hits,
+                 track_boundaries, num_tracks,
+                 track_ids_arr) = group_hits_by_track(
+                    wire_time_indices, track_ids_flat, charges_flat,
+                    min_charge_threshold=track_threshold,
+                    max_tracks=max_tracks, max_wires=max_wires,
+                    max_time=max_time, max_keys=max_keys
+                )
+
+                num_stored = jnp.minimum(num_hits, max_keys)
+                labeled_hits, num_labeled = label_hits(
+                    hits_by_track, num_stored, track_ids_arr,
+                    track_boundaries, num_tracks,
+                    max_keys=max_keys, max_time=max_time
+                )
+
+                track_hits_list.append({
+                    'labeled_hits': labeled_hits,
+                    'num_labeled': num_labeled,
+                    'hits_by_track': hits_by_track,
+                    'track_boundaries': track_boundaries,
+                    'num_hits': num_hits,
+                    'num_tracks': num_tracks,
+                    'track_ids': track_ids_arr,
+                })
+        else:
+            def track_hits_fn(track_hits_list,
+                              charges, drift_time_us, drift_distance_cm,
+                              closest_wire_idx, closest_wire_distances,
+                              attenuation_factors, valid_mask, track_ids,
+                              theta, phi, angle_rad,
+                              spacing_cm, min_idx_abs, num_wires_plane):
+                pass
 
         @partial(jax.jit, static_argnames=(
             'max_hits_east', 'max_hits_west',  # Per-side padding sizes
@@ -603,9 +861,16 @@ class DetectorSimulator:
                     phi = west_phi
                     track_ids = west_track_ids
 
-                # Apply charge recombination (Modified Box model)
-                # This converts energy deposits (de, dx) to collected electrons
-                charges = calculate_modified_box_charge(de, dx, recomb_params)
+                # Convert dx from mm to cm (HDF5 data stores lengths in mm)
+                dx_cm = dx / 10.0
+
+                # Compute angle between track direction and drift field (x-axis)
+                # for angular-dependent recombination models (EMB)
+                dx_dir = jnp.sin(theta) * jnp.cos(phi)
+                phi_drift = jnp.arccos(jnp.clip(jnp.abs(dx_dir), 0.0, 1.0))
+
+                # Apply charge recombination
+                charges = recomb_fn(de, dx_cm, phi_drift)
 
                 # Convert positions to cm
                 positions_cm = positions_mm / 10.0
@@ -654,99 +919,15 @@ class DetectorSimulator:
                         max_idx_abs, offset
                     )
 
-                    # Calculate angles
-                    theta_xz, theta_y = compute_deposit_wire_angles_vmap(
-                        theta, phi, angle_rad
+                    # Track labeling (no-op when disabled)
+                    track_hits_fn(
+                        track_hits_list,
+                        charges, drift_time_us, drift_distance_cm,
+                        closest_wire_idx, closest_wire_distances,
+                        attenuation_factors, valid_mask, track_ids,
+                        theta, phi, angle_rad,
+                        spacing_cm, min_idx_abs, num_wires_plane
                     )
-
-                    # --- HIT PATH ---
-                    # Angular scaling factor
-                    angular_scaling_factor = compute_angular_scaling_vmap(theta_xz, theta_y)
-
-                    # Process deposits with diffusion
-                    prepare_deposit_vmap_hit = jax.vmap(
-                        prepare_deposit_with_diffusion,
-                        in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None,
-                                None, None, None, None, None, None),
-                    )
-
-                    hit_deposit_data = prepare_deposit_vmap_hit(
-                        charges,  # No more side_charges - data already split
-                        drift_time_us,
-                        drift_distance_cm,
-                        closest_wire_idx,
-                        closest_wire_distances,
-                        attenuation_factors,
-                        theta_xz,
-                        theta_y,
-                        angular_scaling_factor,
-                        valid_mask,  # No more valid_side_mask - data already split
-                        K_wire,
-                        K_time,
-                        spacing_cm,
-                        time_step_size_us,
-                        diffusion_long_cm2_us,
-                        diffusion_trans_cm2_us,
-                        velocity_cm_us,
-                        min_idx_abs,
-                        num_wires_plane,
-                        num_time_steps
-                    )
-
-                    # Track labeling
-                    wire_indices_rel, time_indices, signal_values = hit_deposit_data
-
-                    # Convert relative wire indices back to absolute
-                    wire_indices_abs = wire_indices_rel + min_idx_abs
-
-                    # Expand track IDs to match the deposit data structure
-                    K_total = (2 * K_wire + 1) * (2 * K_time + 1)
-                    track_ids_expanded = jnp.repeat(track_ids[:, jnp.newaxis], K_total, axis=1)
-
-                    # Flatten arrays for track labeling
-                    wire_indices_flat = wire_indices_abs.flatten()
-                    time_indices_flat = time_indices.flatten()
-                    track_ids_flat = track_ids_expanded.flatten()
-                    charges_flat = signal_values.flatten()
-
-                    # Create wire_time_indices array
-                    wire_time_indices = jnp.stack([
-                        wire_indices_flat,
-                        time_indices_flat
-                    ], axis=1)
-
-                    # Group hits by track
-                    (hits_by_track, num_hits,
-                     track_boundaries, num_tracks,
-                     track_ids_arr) = group_hits_by_track(
-                        wire_time_indices,
-                        track_ids_flat,
-                        charges_flat,
-                        min_charge_threshold=track_threshold,
-                        max_tracks=max_tracks,
-                        max_wires=max_wires,
-                        max_time=max_time,
-                        max_keys=max_keys
-                    )
-
-                    # Label hits (dominant track per wire,time)
-                    num_stored = jnp.minimum(num_hits, max_keys)
-                    labeled_hits, num_labeled = label_hits(
-                        hits_by_track, num_stored,
-                        track_ids_arr,
-                        track_boundaries, num_tracks,
-                        max_keys=max_keys, max_time=max_time
-                    )
-
-                    track_hit_result = {
-                        'labeled_hits': labeled_hits,
-                        'num_labeled': num_labeled,
-                        'hits_by_track': hits_by_track,
-                        'track_boundaries': track_boundaries,
-                        'num_hits': num_hits,
-                        'num_tracks': num_tracks,
-                        'track_ids': track_ids_arr,
-                    }
 
                     # --- RESPONSE PATH ---
                     # Calculate s parameter for diffusion
@@ -798,14 +979,18 @@ class DetectorSimulator:
                         wire_zero_bin, time_zero_bin
                     )
 
+                    # Apply electronics response convolution
+                    response_signal = electronics_fn(
+                        response_signal, side_idx, plane_idx,
+                        num_wires_plane, num_time_steps
+                    )
+
                     # Apply noise (uses pre-split key for this plane)
                     plane_keys = jax.random.split(noise_key, 6)
                     plane_key = plane_keys[side_idx * 3 + plane_idx]
                     response_signal = noise_fn(plane_key, response_signal, side_idx, plane_idx, num_wires_plane, num_time_steps)
 
-                    # Store results
                     response_signals_list.append(response_signal)
-                    track_hits_list.append(track_hit_result)
 
             return tuple(response_signals_list), tuple(track_hits_list)
 
@@ -868,10 +1053,10 @@ class DetectorSimulator:
             min_wire_indices_tuple=self._min_indices_tuple,
             index_offsets_tuple=self._index_offsets_tuple,
             num_wires_tuple=self._num_wires_tuple,
-            max_tracks=self.track_config.max_tracks,
-            max_wires=self._max_wires,
-            max_time=self._max_time,
-            max_keys=self.track_config.max_keys
+            max_tracks=self.track_config.max_tracks if self.include_track_hits else 1,
+            max_wires=self._max_wires if self.include_track_hits else 1,
+            max_time=self._max_time if self.include_track_hits else 1,
+            max_keys=self.track_config.max_keys if self.include_track_hits else 1
         )
 
         # Convert tuples to dictionaries
@@ -882,25 +1067,49 @@ class DetectorSimulator:
         for side_idx in range(2):
             for plane_idx in range(3):
                 response_signals[(side_idx, plane_idx)] = response_tuple[idx]
-                track_hits[(side_idx, plane_idx)] = track_hits_tuple[idx]
+                if self.include_track_hits:
+                    track_hits[(side_idx, plane_idx)] = track_hits_tuple[idx]
                 idx += 1
 
-        # Post-process track hits with proper boundary extraction
+        # Return raw results — call finalize_track_hits() after freeing
+        # response_signals from GPU to avoid device memory pressure.
+        return response_signals, track_hits
+
+    def finalize_track_hits(self, track_hits):
+        """
+        Post-process track hits: extract valid portions and validate.
+
+        Call this after moving response_signals off GPU (e.g. via np.asarray)
+        to avoid device memory pressure from the int() sync calls.
+
+        Parameters
+        ----------
+        track_hits : dict
+            Raw track hits from process_event().
+
+        Returns
+        -------
+        track_hits : dict
+            Track hits with arrays sliced to valid lengths.
+        """
         for plane_key, track_result in track_hits.items():
             num_hits = track_result['num_hits']
             num_labeled = track_result['num_labeled']
             num_tracks = track_result['num_tracks']
 
-            # Extract valid portions
             track_result['hits_by_track'] = track_result['hits_by_track'][:num_hits]
             track_result['labeled_hits'] = track_result['labeled_hits'][:num_labeled]
             track_result['track_boundaries'] = track_result['track_boundaries'][:num_tracks]
             track_result['track_ids'] = track_result['track_ids'][:num_tracks]
 
-        # Post-simulation validation
-        self._validate_post_simulation(track_hits, response_signals)
+        # Validate after slicing (int() calls already happened above)
+        if self.track_config is not None:
+            for plane_key, th in track_hits.items():
+                actual_hits = int(th['num_hits'])
+                if actual_hits >= self.track_config.max_keys:
+                    print(f"ERROR: Plane {plane_key}: num_hits ({actual_hits:,}) >= max_keys ({self.track_config.max_keys:,}). Data truncated!")
 
-        return response_signals, track_hits
+        return track_hits
 
     def warm_up(self):
         """Trigger JIT compilation with dummy data for smallest tier."""
@@ -941,10 +1150,10 @@ class DetectorSimulator:
             min_wire_indices_tuple=self._min_indices_tuple,
             index_offsets_tuple=self._index_offsets_tuple,
             num_wires_tuple=self._num_wires_tuple,
-            max_tracks=self.track_config.max_tracks,
-            max_wires=self._max_wires,
-            max_time=self._max_time,
-            max_keys=self.track_config.max_keys
+            max_tracks=self.track_config.max_tracks if self.include_track_hits else 1,
+            max_wires=self._max_wires if self.include_track_hits else 1,
+            max_time=self._max_time if self.include_track_hits else 1,
+            max_keys=self.track_config.max_keys if self.include_track_hits else 1
         )
         print(f"JIT compilation finished (tier {min_tier:,}). Other tiers compile on first use.")
 
@@ -957,7 +1166,8 @@ def run_simulation(config_path, data_path, event_idx=0,
                    num_s=16,
                    response_path="tools/responses/",
                    track_threshold=1.0,
-                   padding_tiers=PADDING_TIERS):
+                   padding_tiers=PADDING_TIERS,
+                   include_track_hits=True):
     """
     Run the detector simulation for a specific event.
 
@@ -980,6 +1190,8 @@ def run_simulation(config_path, data_path, event_idx=0,
         Minimum charge threshold for track labeling, by default 1.0.
     padding_tiers : tuple of int, optional
         Available padding tier sizes.
+    include_track_hits : bool, optional
+        If True, run the hit path for track labeling. Default True.
 
     Returns
     -------
@@ -991,7 +1203,7 @@ def run_simulation(config_path, data_path, event_idx=0,
         The simulator instance (for reuse with additional events).
     """
     print("="*60)
-    print(" LArTPC Detector Simulation (V2 - Per-Side Padding)")
+    print(" LArTPC Detector Simulation")
     print("="*60)
     print(f"Config: {config_path}, Data: {data_path} (Event {event_idx})")
 
@@ -1018,7 +1230,7 @@ def run_simulation(config_path, data_path, event_idx=0,
     )
 
     # Create track config
-    track_config = create_track_hits_config(threshold=track_threshold)
+    track_config = create_track_hits_config(threshold=track_threshold) if include_track_hits else None
 
     # Create simulator
     try:
@@ -1027,7 +1239,8 @@ def run_simulation(config_path, data_path, event_idx=0,
             response_path=response_path,
             track_config=track_config,
             diffusion_params=diffusion_params,
-            padding_tiers=padding_tiers
+            padding_tiers=padding_tiers,
+            include_track_hits=include_track_hits
         )
         simulator.warm_up()
     except Exception as e:
@@ -1084,11 +1297,12 @@ def run_simulation(config_path, data_path, event_idx=0,
                     jax.block_until_ready(arr)
 
         print("\nSimulation complete.")
-        print("Track labeling results:")
-        for plane_key, results in track_hits.items():
-            num_labeled = results['num_labeled']
-            num_hits = results['num_hits']
-            print(f"  Plane {plane_key}: {num_labeled} labeled hits, {num_hits} total hits")
+        if track_hits:
+            print("Track labeling results:")
+            for plane_key, results in track_hits.items():
+                num_labeled = results['num_labeled']
+                num_hits = results['num_hits']
+                print(f"  Plane {plane_key}: {num_labeled} labeled hits, {num_hits} total hits")
 
         return response_signals, track_hits, simulator
 
