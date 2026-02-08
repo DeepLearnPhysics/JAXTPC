@@ -14,7 +14,7 @@ class DepositData(NamedTuple):
     """Padded input data from particle simulation steps."""
     positions_mm: jnp.ndarray    # (N_pad, 3) - hit positions
     de: jnp.ndarray              # (N_pad,) - energy deposits in MeV
-    dx: jnp.ndarray              # (N_pad,) - step lengths in cm
+    dx: jnp.ndarray              # (N_pad,) - step lengths in mm (converted to cm in simulation)
     valid_mask: jnp.ndarray      # (N_pad,) - True for real hits
     theta: jnp.ndarray           # (N_pad,) - polar angle of step direction
     phi: jnp.ndarray             # (N_pad,) - azimuthal angle of step direction
