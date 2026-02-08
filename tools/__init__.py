@@ -1,8 +1,7 @@
 """
-JAXTPC Refactored Tools Package
+JAXTPC Tools Package
 
-This package contains the refactored simulation tools for LArTPC detector simulation.
-See REFACTORING_PLAN.md for details on the changes from the original tools package.
+Simulation tools for LArTPC detector simulation.
 
 Main entry points:
 - DetectorSimulator: Main simulation class
@@ -14,7 +13,7 @@ Configuration classes:
 - TimeParams: Time discretization parameters
 - PlaneGeometry: Wire plane geometry
 - DiffusionParams: Diffusion parameters
-- TrackHitsConfig: Track labeling configuration
+- TrackHitsConfig: Track labeling configuration (optional, for include_track_hits=True)
 """
 
 from tools.config import (
