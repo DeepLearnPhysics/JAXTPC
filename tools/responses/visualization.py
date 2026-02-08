@@ -11,7 +11,6 @@ import shutil
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
-from .response_extraction import PLANE_CONFIGS
 from tools.kernels import calculate_wire_count
 
 
@@ -78,8 +77,6 @@ def visualize_kernel(kernel, kernel_x_coords, kernel_y_coords, plane='U', figsiz
     ax : matplotlib.axes.Axes
         Axes object
     """
-    config = PLANE_CONFIGS[plane]
-
     fig, ax = plt.subplots(figsize=figsize)
 
     # Create continuous colormap
@@ -88,16 +85,20 @@ def visualize_kernel(kernel, kernel_x_coords, kernel_y_coords, plane='U', figsiz
     # Convert kernel to log10 scale for display
     kernel_log10 = actual_to_paper_log10(kernel)
 
+    # Symmetric vmax from data
+    vmax = np.max(np.abs(kernel_log10))
+
     # Plot kernel
     im = ax.imshow(kernel_log10, aspect='auto',
                    extent=[kernel_x_coords[0], kernel_x_coords[-1],
                           kernel_y_coords[0], kernel_y_coords[-1]],
-                   cmap=cmap, origin='lower')
+                   cmap=cmap, origin='lower',
+                   vmin=-vmax, vmax=vmax)
 
     # Set axis properties
     ax.set_xlabel('Wire Number', fontsize=12)
     ax.set_ylabel('Time [μs]', fontsize=12)
-    ax.set_title(f'{config["title"]} - Extracted Kernel ({kernel.shape[0]}x{kernel.shape[1]})',
+    ax.set_title(f'{plane} Plane - Kernel ({kernel.shape[0]}x{kernel.shape[1]})',
                  fontsize=14, pad=15)
 
     # Add grid
@@ -337,7 +338,7 @@ def visualize_interpolation_steps(DKernels, plane='Y', s_observed=0.3, w_offset=
     s_idx = min(s_idx, num_s - 2)
     s_alpha = s_continuous - s_idx
 
-    center_w = kernel_width // 2
+    center_w = wire_zero_bin
     bins_per_wire = int(1.0 / wire_spacing)
     w_bin_offset = w_offset * bins_per_wire
     w_base_bin = int(np.floor(w_bin_offset))
@@ -472,20 +473,21 @@ def visualize_interpolation_steps(DKernels, plane='Y', s_observed=0.3, w_offset=
     axes[1, 0].grid(True, alpha=0.3)
 
     # Bottom right: Full S-interpolated plane with colored lines
-    config = PLANE_CONFIGS[plane]
     cmap = plt.cm.RdBu_r
-    vmin, vmax = config['value_range']
 
     # Perform S interpolation on the full planes
     full_s_interp = (1 - s_alpha) * DKernel[s_idx] + s_alpha * DKernel[s_idx + 1]
-    
+
     # Convert to log10 for display
     full_s_interp_log10 = actual_to_paper_log10(full_s_interp)
+
+    # Symmetric vmax from data
+    vmax = np.max(np.abs(full_s_interp_log10))
 
     # Plot the interpolated plane
     im = axes[1, 1].imshow(full_s_interp_log10.T, aspect='auto',
                           extent=[y_coords[0], y_coords[-1], x_coords[0], x_coords[-1]],
-                          cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
+                          cmap=cmap, origin='lower', vmin=-vmax, vmax=vmax)
 
     # Add colored lines at the actual wire positions
     for i, (wire_idx, wire_label) in enumerate(zip(wire_indices_to_show, wire_labels)):
