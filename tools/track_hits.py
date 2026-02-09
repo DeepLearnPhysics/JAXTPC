@@ -61,12 +61,12 @@ def group_hits_by_track(wire_time_indices, track_ids, charge_deposits,
     """
     N = wire_time_indices.shape[0]
 
-    # Step 1: Sort by (track, wire, time)
-    composite_key = (track_ids.astype(jnp.int32) * (max_wires * max_time) +
-                     wire_time_indices[:, 0].astype(jnp.int32) * max_time +
+    # Step 1: Sort by (track, wire, time) via two-pass stable sort (int32)
+    # Single composite key overflows int32 when max_wires*max_time*max_tracks > 2^31
+    wire_time_key = (wire_time_indices[:, 0].astype(jnp.int32) * max_time +
                      wire_time_indices[:, 1].astype(jnp.int32))
-
-    sorted_keys, sort_indices = jax.lax.sort_key_val(composite_key, jnp.arange(N))
+    _, idx = jax.lax.sort_key_val(wire_time_key, jnp.arange(N, dtype=jnp.int32))
+    _, sort_indices = jax.lax.sort_key_val(track_ids[idx], idx)
 
     sorted_wires = wire_time_indices[sort_indices, 0]
     sorted_times = wire_time_indices[sort_indices, 1]
@@ -74,8 +74,13 @@ def group_hits_by_track(wire_time_indices, track_ids, charge_deposits,
     sorted_charges = charge_deposits[sort_indices]
 
     # Step 2: Find boundaries and aggregate
+    # Boundary when track or (wire,time) changes — avoids int32 overflow in composite key
+    sorted_wt = sorted_wires.astype(jnp.int32) * max_time + sorted_times.astype(jnp.int32)
     key_boundaries = jnp.ones(N, dtype=bool)
-    key_boundaries = key_boundaries.at[1:].set(sorted_keys[1:] != sorted_keys[:-1])
+    key_boundaries = key_boundaries.at[1:].set(
+        (sorted_tracks[1:] != sorted_tracks[:-1]) |
+        (sorted_wt[1:] != sorted_wt[:-1])
+    )
 
     segment_ids = jnp.cumsum(key_boundaries) - 1
     summed_charges = jax.ops.segment_sum(sorted_charges, segment_ids, num_segments=N)
