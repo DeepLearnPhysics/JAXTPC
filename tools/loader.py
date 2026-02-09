@@ -325,20 +325,20 @@ def load_particle_step_data(file_path, event_idx=0, verbose=False) -> DepositDat
     with ParticleStepExtractor(file_path, verbose=verbose) as extractor:
         step_data = extractor.extract_step_arrays(event_idx)
 
-    # Get positions and determine array size
-    positions_mm = jnp.asarray(
-        step_data.get('position', jnp.empty((0, 3))), dtype=jnp.float32
+    # Get positions and determine array size (numpy — no XLA compilation)
+    positions_mm = np.asarray(
+        step_data.get('position', np.empty((0, 3))), dtype=np.float32
     )
     n = positions_mm.shape[0]
 
     return DepositData(
         positions_mm=positions_mm,
-        de=jnp.asarray(step_data.get('de', jnp.zeros((n,))), dtype=jnp.float32),
-        dx=jnp.asarray(step_data.get('dx', jnp.zeros((n,))), dtype=jnp.float32),
-        valid_mask=jnp.ones(n, dtype=bool),
-        theta=jnp.asarray(step_data.get('theta', jnp.zeros((n,))), dtype=jnp.float32),
-        phi=jnp.asarray(step_data.get('phi', jnp.zeros((n,))), dtype=jnp.float32),
-        track_ids=jnp.asarray(step_data.get('track_id', jnp.ones((n,))), dtype=jnp.int32),
+        de=np.asarray(step_data.get('de', np.zeros((n,))), dtype=np.float32),
+        dx=np.asarray(step_data.get('dx', np.zeros((n,))), dtype=np.float32),
+        valid_mask=np.ones(n, dtype=bool),
+        theta=np.asarray(step_data.get('theta', np.zeros((n,))), dtype=np.float32),
+        phi=np.asarray(step_data.get('phi', np.zeros((n,))), dtype=np.float32),
+        track_ids=np.asarray(step_data.get('track_id', np.ones((n,))), dtype=np.int32),
     )
 
 

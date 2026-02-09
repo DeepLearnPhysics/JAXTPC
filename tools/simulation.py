@@ -374,6 +374,10 @@ class DetectorSimulator:
         """
         Split deposit data by side and pad to appropriate tiers.
 
+        All operations use numpy to avoid XLA recompilation on variable-length
+        intermediates. The final padded arrays are converted to JAX at the end
+        (fixed tier shape → no recompilation).
+
         Parameters
         ----------
         deposit_data : DepositData
@@ -388,22 +392,22 @@ class DetectorSimulator:
         counts : dict
             Actual counts: n_east, n_west, n_tracks.
         """
-        positions_mm = deposit_data.positions_mm
-        de = deposit_data.de
-        dx = deposit_data.dx
-        valid_mask = deposit_data.valid_mask
-        theta = deposit_data.theta
-        phi = deposit_data.phi
-        track_ids = deposit_data.track_ids
+        positions_mm = np.asarray(deposit_data.positions_mm)
+        de = np.asarray(deposit_data.de)
+        dx = np.asarray(deposit_data.dx)
+        valid_mask = np.asarray(deposit_data.valid_mask)
+        theta = np.asarray(deposit_data.theta)
+        phi = np.asarray(deposit_data.phi)
+        track_ids = np.asarray(deposit_data.track_ids)
 
         # Only consider valid entries
         x_mm = positions_mm[:, 0]
         east_mask = valid_mask & (x_mm < 0)
         west_mask = valid_mask & (x_mm >= 0)
 
-        n_east = int(jnp.sum(east_mask))
-        n_west = int(jnp.sum(west_mask))
-        n_tracks = int(len(jnp.unique(track_ids[valid_mask])))
+        n_east = int(np.sum(east_mask))
+        n_west = int(np.sum(west_mask))
+        n_tracks = int(len(np.unique(track_ids[valid_mask])))
 
         # Pick tiers
         east_tier = pick_padding_tier(n_east, self.padding_tiers)
@@ -412,7 +416,7 @@ class DetectorSimulator:
         print(f"   East side: {n_east:,} hits -> tier {east_tier:,}")
         print(f"   West side: {n_west:,} hits -> tier {west_tier:,}")
 
-        # Extract and pad each side
+        # Extract and pad each side (numpy), convert to JAX at the end
         east_data = self._extract_and_pad(
             positions_mm, de, dx, theta, phi, track_ids,
             east_mask, n_east, east_tier
@@ -427,8 +431,12 @@ class DetectorSimulator:
 
     def _extract_and_pad(self, positions_mm, de, dx, theta, phi, track_ids,
                          mask, n_valid, pad_size):
-        """Extract masked data and pad to target size."""
-        # Extract valid entries
+        """Extract masked data and pad to target size.
+
+        All operations in numpy. Returns DepositData with JAX arrays
+        at the fixed tier shape (no XLA recompilation).
+        """
+        # Extract valid entries (numpy — variable length, no compilation)
         pos = positions_mm[mask]
         de_arr = de[mask]
         dx_arr = dx[mask]
@@ -436,20 +444,20 @@ class DetectorSimulator:
         ph = phi[mask]
         tid = track_ids[mask]
 
-        # Pad to tier size
+        # Pad to tier size (numpy)
         pad_width = pad_size - n_valid
 
         if pad_width > 0:
-            valid_out = jnp.arange(pad_size) < n_valid
-            pos = jnp.pad(pos, ((0, pad_width), (0, 0)), constant_values=0.0)
-            de_arr = jnp.pad(de_arr, (0, pad_width), constant_values=0.0)
-            dx_arr = jnp.pad(dx_arr, (0, pad_width), constant_values=0.0)
-            th = jnp.pad(th, (0, pad_width), constant_values=0.0)
-            ph = jnp.pad(ph, (0, pad_width), constant_values=0.0)
-            tid = jnp.pad(tid, (0, pad_width), constant_values=0)
+            valid_out = np.arange(pad_size) < n_valid
+            pos = np.pad(pos, ((0, pad_width), (0, 0)), constant_values=0.0)
+            de_arr = np.pad(de_arr, (0, pad_width), constant_values=0.0)
+            dx_arr = np.pad(dx_arr, (0, pad_width), constant_values=0.0)
+            th = np.pad(th, (0, pad_width), constant_values=0.0)
+            ph = np.pad(ph, (0, pad_width), constant_values=0.0)
+            tid = np.pad(tid, (0, pad_width), constant_values=0)
         else:
             # Truncate if needed (shouldn't happen if tier picked correctly)
-            valid_out = jnp.ones(pad_size, dtype=bool)
+            valid_out = np.ones(pad_size, dtype=bool)
             pos = pos[:pad_size]
             de_arr = de_arr[:pad_size]
             dx_arr = dx_arr[:pad_size]
@@ -457,14 +465,15 @@ class DetectorSimulator:
             ph = ph[:pad_size]
             tid = tid[:pad_size]
 
+        # Convert to JAX at fixed tier shape (no recompilation)
         return DepositData(
-            positions_mm=pos,
-            de=de_arr,
-            dx=dx_arr,
-            valid_mask=valid_out,
-            theta=th,
-            phi=ph,
-            track_ids=tid
+            positions_mm=jnp.asarray(pos),
+            de=jnp.asarray(de_arr),
+            dx=jnp.asarray(dx_arr),
+            valid_mask=jnp.asarray(valid_out),
+            theta=jnp.asarray(th),
+            phi=jnp.asarray(ph),
+            track_ids=jnp.asarray(tid),
         )
 
     def _validate_pre_simulation(self, counts):
@@ -1252,7 +1261,7 @@ def run_simulation(config_path, data_path, event_idx=0,
     try:
         print(f"\n--- Processing Event {event_idx} ---")
         step_data = load_particle_step_data(data_path, event_idx)
-        event_positions_mm = jnp.asarray(step_data.get('position', jnp.empty((0, 3))), dtype=jnp.float32)
+        event_positions_mm = np.asarray(step_data.get('position', np.empty((0, 3))), dtype=np.float32)
 
         n_hits = event_positions_mm.shape[0]
         print(f"Loaded {n_hits:,} steps from event {event_idx}.")
@@ -1262,23 +1271,22 @@ def run_simulation(config_path, data_path, event_idx=0,
             return {}, {}, simulator
 
         # Extract de and dx (recombination is now done inside the simulator)
-        event_de = jnp.asarray(step_data.get('de', jnp.zeros((n_hits,))), dtype=jnp.float32)
-        event_dx = jnp.asarray(step_data.get('dx', jnp.zeros((n_hits,))), dtype=jnp.float32)
+        event_de = np.asarray(step_data.get('de', np.zeros((n_hits,))), dtype=np.float32)
+        event_dx = np.asarray(step_data.get('dx', np.zeros((n_hits,))), dtype=np.float32)
 
         # Extract angles and track IDs
-        event_theta = jnp.asarray(step_data.get('theta', jnp.zeros((n_hits,))), dtype=jnp.float32)
-        event_phi = jnp.asarray(step_data.get('phi', jnp.zeros((n_hits,))), dtype=jnp.float32)
-        event_track_ids = jnp.asarray(step_data.get('track_id', jnp.ones((n_hits,))), dtype=jnp.int32)
+        event_theta = np.asarray(step_data.get('theta', np.zeros((n_hits,))), dtype=np.float32)
+        event_phi = np.asarray(step_data.get('phi', np.zeros((n_hits,))), dtype=np.float32)
+        event_track_ids = np.asarray(step_data.get('track_id', np.ones((n_hits,))), dtype=np.int32)
 
-        print(f"Unique tracks: {len(jnp.unique(event_track_ids)):,}")
+        print(f"Unique tracks: {len(np.unique(event_track_ids)):,}")
 
-        # Create deposit data (no manual padding needed!)
-        # Recombination (de/dx -> electrons) is now done inside the simulator
+        # Create deposit data as numpy (split_and_pad handles numpy->JAX conversion)
         deposit_data = DepositData(
             positions_mm=event_positions_mm,
             de=event_de,
             dx=event_dx,
-            valid_mask=jnp.ones(n_hits, dtype=bool),
+            valid_mask=np.ones(n_hits, dtype=bool),
             theta=event_theta,
             phi=event_phi,
             track_ids=event_track_ids
