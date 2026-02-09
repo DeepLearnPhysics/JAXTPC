@@ -64,9 +64,11 @@ class DiffusionParams(NamedTuple):
 
 class TrackHitsConfig(NamedTuple):
     """Configuration for track hit labeling."""
-    threshold: float      # Minimum charge to keep
-    max_tracks: int       # Max tracks for array pre-allocation
-    max_keys: int         # Max unique (track, wire, time) combinations
+    threshold: float        # Minimum charge to keep
+    max_tracks: int         # Max tracks for array pre-allocation
+    max_keys: int           # Max unique (track, wire, time) combinations
+    hits_chunk_size: int    # Deposits per fori_loop chunk (must divide padding tiers)
+    inter_thresh: float     # Intermediate pruning threshold per merge iteration
 
 
 def create_diffusion_params(
@@ -192,7 +194,9 @@ def create_plane_geometry(
 def create_track_hits_config(
     threshold: float = 1.0,
     max_tracks: int = 10000,
-    max_keys: int = 1000000
+    max_keys: int = 1000000,
+    hits_chunk_size: int = 25000,
+    inter_thresh: float = 1.0,
 ) -> TrackHitsConfig:
     """
     Create TrackHitsConfig with specified parameters.
@@ -205,6 +209,11 @@ def create_track_hits_config(
         Maximum number of tracks for array pre-allocation, by default 10000.
     max_keys : int, optional
         Maximum number of unique (track, wire, time) combinations, by default 1000000.
+    hits_chunk_size : int, optional
+        Number of deposits per fori_loop iteration, by default 25000.
+        Must evenly divide all padding tiers (e.g. 100000, 200000).
+    inter_thresh : float, optional
+        Intermediate pruning threshold applied each merge iteration, by default 1.0.
 
     Returns
     -------
@@ -215,4 +224,6 @@ def create_track_hits_config(
         threshold=threshold,
         max_tracks=max_tracks,
         max_keys=max_keys,
+        hits_chunk_size=hits_chunk_size,
+        inter_thresh=inter_thresh,
     )

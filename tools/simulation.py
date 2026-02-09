@@ -64,7 +64,7 @@ from tools.wires import (
 from tools.kernels import load_response_kernels, apply_diffusion_response
 
 # Track labeling system (for hit path)
-from tools.track_hits import group_hits_by_track, label_hits
+from tools.track_hits import group_hits_by_track, label_hits, merge_chunk_hits, label_merged_hits
 
 # Core modules
 from tools.geometry import generate_detector
@@ -534,10 +534,12 @@ class DetectorSimulator:
 
         if include_track_hits_flag:
             track_threshold = self.track_config.threshold
+            track_inter_thresh = self.track_config.inter_thresh
             max_tracks = self.track_config.max_tracks
             max_wires = self._max_wires
             max_time = self._max_time
             max_keys = self.track_config.max_keys
+            hits_chunk_size = self.track_config.hits_chunk_size
 
         # Static tuples
         index_offsets_tuple = self._index_offsets_tuple
@@ -751,11 +753,21 @@ class DetectorSimulator:
                               closest_wire_idx, closest_wire_distances,
                               attenuation_factors, valid_mask, track_ids,
                               theta, phi, angle_rad,
-                              spacing_cm, min_idx_abs, num_wires_plane):
+                              spacing_cm, min_idx_abs, num_wires_plane,
+                              n_actual):
                 theta_xz, theta_y = compute_deposit_wire_angles_vmap(
                     theta, phi, angle_rad
                 )
                 angular_scaling_factor = compute_angular_scaling_vmap(theta_xz, theta_y)
+
+                SENTINEL_PK = jnp.int32(2**30)
+                K_total = (2 * K_wire + 1) * (2 * K_time + 1)
+                exp_size = hits_chunk_size * K_total
+                max_safe_chunks = charges.shape[0] // hits_chunk_size
+                num_chunks = jnp.minimum(
+                    (n_actual + hits_chunk_size - 1) // hits_chunk_size,
+                    max_safe_chunks
+                )
 
                 prepare_deposit_vmap_hit = jax.vmap(
                     prepare_deposit_with_diffusion,
@@ -763,65 +775,83 @@ class DetectorSimulator:
                             None, None, None, None, None, None),
                 )
 
-                hit_deposit_data = prepare_deposit_vmap_hit(
-                    charges, drift_time_us, drift_distance_cm,
-                    closest_wire_idx, closest_wire_distances,
-                    attenuation_factors, theta_xz, theta_y,
-                    angular_scaling_factor, valid_mask,
-                    K_wire, K_time, spacing_cm, time_step_size_us,
-                    diffusion_long_cm2_us, diffusion_trans_cm2_us,
-                    velocity_cm_us, min_idx_abs, num_wires_plane,
-                    num_time_steps
+                def body(i, state):
+                    s_pk, s_tr, s_ch, s_count = state
+                    start = i * hits_chunk_size
+
+                    # Slice chunk from pre-computed arrays
+                    c_charges = jax.lax.dynamic_slice(charges, (start,), (hits_chunk_size,))
+                    c_drift_time = jax.lax.dynamic_slice(drift_time_us, (start,), (hits_chunk_size,))
+                    c_drift_dist = jax.lax.dynamic_slice(drift_distance_cm, (start,), (hits_chunk_size,))
+                    c_wire_idx = jax.lax.dynamic_slice(closest_wire_idx, (start,), (hits_chunk_size,))
+                    c_wire_dist = jax.lax.dynamic_slice(closest_wire_distances, (start,), (hits_chunk_size,))
+                    c_atten = jax.lax.dynamic_slice(attenuation_factors, (start,), (hits_chunk_size,))
+                    c_theta_xz = jax.lax.dynamic_slice(theta_xz, (start,), (hits_chunk_size,))
+                    c_theta_y = jax.lax.dynamic_slice(theta_y, (start,), (hits_chunk_size,))
+                    c_ang_scale = jax.lax.dynamic_slice(angular_scaling_factor, (start,), (hits_chunk_size,))
+                    c_valid = jax.lax.dynamic_slice(valid_mask, (start,), (hits_chunk_size,))
+                    c_tids = jax.lax.dynamic_slice(track_ids, (start,), (hits_chunk_size,))
+
+                    # Diffusion expansion via vmap
+                    wire_rel, time_idx, sig_val = prepare_deposit_vmap_hit(
+                        c_charges, c_drift_time, c_drift_dist,
+                        c_wire_idx, c_wire_dist, c_atten,
+                        c_theta_xz, c_theta_y, c_ang_scale, c_valid,
+                        K_wire, K_time, spacing_cm, time_step_size_us,
+                        diffusion_long_cm2_us, diffusion_trans_cm2_us,
+                        velocity_cm_us, min_idx_abs, num_wires_plane,
+                        num_time_steps
+                    )
+
+                    # Flatten + encode pixel_key
+                    wire_abs = wire_rel + min_idx_abs
+                    tid_exp = jnp.repeat(c_tids[:, jnp.newaxis], K_total, axis=1)
+
+                    w_flat = wire_abs.reshape(exp_size).astype(jnp.int32)
+                    t_flat = time_idx.reshape(exp_size).astype(jnp.int32)
+                    tr_flat = tid_exp.reshape(exp_size).astype(jnp.int32)
+                    ch_flat = sig_val.reshape(exp_size)
+
+                    chunk_pk = w_flat * max_time + t_flat
+                    chunk_valid = ch_flat > 0.0
+                    chunk_pk = jnp.where(chunk_valid, chunk_pk, SENTINEL_PK)
+                    chunk_tr = jnp.where(chunk_valid, tr_flat, jnp.int32(0))
+                    chunk_ch = jnp.where(chunk_valid, ch_flat, 0.0).astype(jnp.float32)
+
+                    # Merge with running state
+                    new_pk, new_tr, new_ch, new_count = merge_chunk_hits(
+                        s_pk, s_tr, s_ch,
+                        chunk_pk, chunk_tr, chunk_ch,
+                        track_inter_thresh
+                    )
+
+                    return (new_pk, new_tr, new_ch, new_count)
+
+                init_state = (
+                    jnp.full(max_keys, SENTINEL_PK, dtype=jnp.int32),
+                    jnp.zeros(max_keys, dtype=jnp.int32),
+                    jnp.zeros(max_keys, dtype=jnp.float32),
+                    jnp.int32(0),
                 )
 
-                wire_indices_rel, time_indices, signal_values = hit_deposit_data
-                wire_indices_abs = wire_indices_rel + min_idx_abs
-
-                K_total = (2 * K_wire + 1) * (2 * K_time + 1)
-                track_ids_expanded = jnp.repeat(track_ids[:, jnp.newaxis], K_total, axis=1)
-
-                wire_indices_flat = wire_indices_abs.flatten()
-                time_indices_flat = time_indices.flatten()
-                track_ids_flat = track_ids_expanded.flatten()
-                charges_flat = signal_values.flatten()
-
-                wire_time_indices = jnp.stack([
-                    wire_indices_flat,
-                    time_indices_flat
-                ], axis=1)
-
-                (hits_by_track, num_hits,
-                 track_boundaries, num_tracks,
-                 track_ids_arr) = group_hits_by_track(
-                    wire_time_indices, track_ids_flat, charges_flat,
-                    min_charge_threshold=track_threshold,
-                    max_tracks=max_tracks, max_wires=max_wires,
-                    max_time=max_time, max_keys=max_keys
+                final_pk, final_tr, final_ch, final_count = jax.lax.fori_loop(
+                    0, num_chunks, body, init_state
                 )
 
-                num_stored = jnp.minimum(num_hits, max_keys)
-                labeled_hits, num_labeled = label_hits(
-                    hits_by_track, num_stored, track_ids_arr,
-                    track_boundaries, num_tracks,
-                    max_keys=max_keys, max_time=max_time
+                result = label_merged_hits(
+                    final_pk, final_tr, final_ch, final_count,
+                    track_threshold, max_time
                 )
 
-                track_hits_list.append({
-                    'labeled_hits': labeled_hits,
-                    'num_labeled': num_labeled,
-                    'hits_by_track': hits_by_track,
-                    'track_boundaries': track_boundaries,
-                    'num_hits': num_hits,
-                    'num_tracks': num_tracks,
-                    'track_ids': track_ids_arr,
-                })
+                track_hits_list.append(result)
         else:
             def track_hits_fn(track_hits_list,
                               charges, drift_time_us, drift_distance_cm,
                               closest_wire_idx, closest_wire_distances,
                               attenuation_factors, valid_mask, track_ids,
                               theta, phi, angle_rad,
-                              spacing_cm, min_idx_abs, num_wires_plane):
+                              spacing_cm, min_idx_abs, num_wires_plane,
+                              n_actual):
                 pass
 
         @partial(jax.jit, static_argnames=(
@@ -839,6 +869,8 @@ class DetectorSimulator:
             west_theta, west_phi, west_track_ids,
             # Noise key
             noise_key,
+            # Actual deposit counts (traced, not static)
+            n_east, n_west,
             # Static args
             max_hits_east, max_hits_west,
             max_wire_indices_tuple, min_wire_indices_tuple,
@@ -861,6 +893,7 @@ class DetectorSimulator:
                     theta = east_theta
                     phi = east_phi
                     track_ids = east_track_ids
+                    n_actual = n_east
                 else:  # West (x >= 0)
                     positions_mm = west_positions_mm
                     de = west_de
@@ -869,6 +902,7 @@ class DetectorSimulator:
                     theta = west_theta
                     phi = west_phi
                     track_ids = west_track_ids
+                    n_actual = n_west
 
                 # Convert dx from mm to cm (HDF5 data stores lengths in mm)
                 dx_cm = dx / 10.0
@@ -935,7 +969,8 @@ class DetectorSimulator:
                         closest_wire_idx, closest_wire_distances,
                         attenuation_factors, valid_mask, track_ids,
                         theta, phi, angle_rad,
-                        spacing_cm, min_idx_abs, num_wires_plane
+                        spacing_cm, min_idx_abs, num_wires_plane,
+                        n_actual
                     )
 
                     # --- RESPONSE PATH ---
@@ -1042,6 +1077,20 @@ class DetectorSimulator:
         max_hits_east = east_data.positions_mm.shape[0]
         max_hits_west = west_data.positions_mm.shape[0]
 
+        # Validate that actual deposits fit within chunk-aligned tier capacity
+        if self.include_track_hits:
+            chunk = self.track_config.hits_chunk_size
+            for label, n, tier in [('East', counts['n_east'], max_hits_east),
+                                   ('West', counts['n_west'], max_hits_west)]:
+                capacity = (tier // chunk) * chunk
+                if n > capacity:
+                    raise ValueError(
+                        f"{label}: {n:,} deposits exceed chunk-aligned tier "
+                        f"capacity {capacity:,} (tier={tier:,}, "
+                        f"hits_chunk_size={chunk:,}). Use a larger tier or "
+                        f"a hits_chunk_size that divides the tier."
+                    )
+
         # Noise key (used even when noise is disabled - identity function ignores it)
         noise_key = key if key is not None else jax.random.PRNGKey(0)
 
@@ -1055,6 +1104,9 @@ class DetectorSimulator:
             west_data.theta, west_data.phi, west_data.track_ids,
             # Noise key
             noise_key,
+            # Actual deposit counts (traced)
+            n_east=counts['n_east'],
+            n_west=counts['n_west'],
             # Static args
             max_hits_east=max_hits_east,
             max_hits_west=max_hits_west,
@@ -1104,12 +1156,9 @@ class DetectorSimulator:
         for plane_key, track_result in track_hits.items():
             num_hits = track_result['num_hits']
             num_labeled = track_result['num_labeled']
-            num_tracks = track_result['num_tracks']
 
             track_result['hits_by_track'] = track_result['hits_by_track'][:num_hits]
             track_result['labeled_hits'] = track_result['labeled_hits'][:num_labeled]
-            track_result['track_boundaries'] = track_result['track_boundaries'][:num_tracks]
-            track_result['track_ids'] = track_result['track_ids'][:num_tracks]
 
         # Validate after slicing (int() calls already happened above)
         if self.track_config is not None:
@@ -1153,6 +1202,8 @@ class DetectorSimulator:
             dummy_west.positions_mm, dummy_west.de, dummy_west.dx, dummy_west.valid_mask,
             dummy_west.theta, dummy_west.phi, dummy_west.track_ids,
             jax.random.PRNGKey(0),  # noise_key (dummy for warmup)
+            n_east=0,
+            n_west=0,
             max_hits_east=min_tier,
             max_hits_west=min_tier,
             max_wire_indices_tuple=self._max_indices_tuple,

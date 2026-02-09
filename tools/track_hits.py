@@ -217,6 +217,177 @@ def label_hits(hits_by_track, num_stored, track_ids_at_boundaries,
     return labeled_hits, num_labeled
 
 
+def merge_chunk_hits(state_pk, state_tr, state_ch,
+                     chunk_pk, chunk_tr, chunk_ch,
+                     inter_thresh):
+    """
+    Merge a chunk of expanded hits into running state via sort-aggregate-compact.
+
+    Uses two-pass stable sort (int32) to achieve (pixel_key, track) ordering,
+    then segment_sum to aggregate charges, followed by compaction.
+
+    Called from within JIT context (not separately decorated).
+
+    Parameters
+    ----------
+    state_pk : jnp.ndarray, shape (max_keys,), int32
+        Running pixel keys (wire * max_time + time). Sentinels = 2^30.
+    state_tr : jnp.ndarray, shape (max_keys,), int32
+        Running track IDs.
+    state_ch : jnp.ndarray, shape (max_keys,), float32
+        Running charges.
+    chunk_pk : jnp.ndarray, shape (exp_size,), int32
+        New chunk pixel keys.
+    chunk_tr : jnp.ndarray, shape (exp_size,), int32
+        New chunk track IDs.
+    chunk_ch : jnp.ndarray, shape (exp_size,), float32
+        New chunk charges.
+    inter_thresh : float
+        Intermediate pruning threshold.
+
+    Returns
+    -------
+    new_pk, new_tr, new_ch : jnp.ndarray, shape (max_keys,)
+        Compacted state arrays.
+    count : jnp.int32
+        Number of valid entries in compacted state.
+    """
+    SENTINEL_PK = jnp.int32(2**30)
+    max_keys = state_pk.shape[0]
+    merge_size = max_keys + chunk_pk.shape[0]
+
+    all_pk = jnp.concatenate([state_pk, chunk_pk])
+    all_tr = jnp.concatenate([state_tr, chunk_tr])
+    all_ch = jnp.concatenate([state_ch, chunk_ch])
+
+    # Two-pass stable sort: by track (secondary), then pixel_key (primary)
+    _, idx = jax.lax.sort_key_val(all_tr, jnp.arange(merge_size, dtype=jnp.int32))
+    _, sidx = jax.lax.sort_key_val(all_pk[idx], idx)
+    sorted_pk = all_pk[sidx]
+    sorted_tr = all_tr[sidx]
+    sorted_ch = all_ch[sidx]
+
+    # Boundary: new segment where pixel_key or track changes
+    boundaries = jnp.ones(merge_size, dtype=bool).at[1:].set(
+        (sorted_pk[1:] != sorted_pk[:-1]) |
+        (sorted_tr[1:] != sorted_tr[:-1])
+    )
+    seg_ids = jnp.cumsum(boundaries) - 1
+    summed = jax.ops.segment_sum(sorted_ch, seg_ids, num_segments=merge_size)
+    agg = summed[seg_ids]
+
+    # Filter: segment ends, exclude sentinels, apply intermediate threshold
+    seg_ends = jnp.roll(boundaries, -1).at[-1].set(True)
+    valid_entry = seg_ends & (sorted_pk < SENTINEL_PK) & (agg > inter_thresh)
+
+    # Compact into max_keys
+    compact_idx = jnp.where(valid_entry, size=max_keys, fill_value=0)[0]
+    count = jnp.sum(valid_entry).astype(jnp.int32)
+    vmask = jnp.arange(max_keys) < count
+
+    new_pk = jnp.where(vmask, sorted_pk[compact_idx], SENTINEL_PK)
+    new_tr = jnp.where(vmask, sorted_tr[compact_idx], jnp.int32(0))
+    new_ch = jnp.where(vmask, agg[compact_idx], 0.0).astype(jnp.float32)
+
+    return new_pk, new_tr, new_ch, count
+
+
+def label_merged_hits(state_pk, state_tr, state_ch, state_count,
+                      threshold, max_time):
+    """
+    Find dominant track per pixel from merged state.
+
+    State is already sorted by (pixel_key, track) from the merge loop.
+    Applies final threshold, then uses segment_max to find the track
+    with highest charge at each (wire, time) pixel.
+
+    Called from within JIT context (not separately decorated).
+
+    Parameters
+    ----------
+    state_pk : jnp.ndarray, shape (max_keys,), int32
+        Final pixel keys (wire * max_time + time).
+    state_tr : jnp.ndarray, shape (max_keys,), int32
+        Final track IDs.
+    state_ch : jnp.ndarray, shape (max_keys,), float32
+        Final charges per (pixel, track).
+    state_count : jnp.int32
+        Number of valid entries.
+    threshold : float
+        Final charge threshold.
+    max_time : int
+        Time dimension for decoding pixel_key.
+
+    Returns
+    -------
+    dict with:
+        labeled_hits : jnp.ndarray, shape (max_keys, 4)
+            [track_id, wire, time, charge] per unique pixel.
+        num_labeled : int
+            Number of labeled pixels.
+        hits_by_track : jnp.ndarray, shape (max_keys, 3)
+            [wire, time, charge] per valid (pixel, track) entry.
+        num_hits : int
+            Number of valid entries after threshold.
+    """
+    max_keys = state_pk.shape[0]
+
+    # Decode pixel_key
+    state_wires = state_pk // max_time
+    state_times = state_pk % max_time
+
+    # Apply final threshold
+    is_valid = (jnp.arange(max_keys) < state_count) & (state_ch > threshold)
+    num_valid = jnp.sum(is_valid)
+    valid_idx = jnp.where(is_valid, size=max_keys, fill_value=0)[0]
+    vmask = jnp.arange(max_keys) < num_valid
+
+    c_wires = jnp.where(vmask, state_wires[valid_idx], 0)
+    c_times = jnp.where(vmask, state_times[valid_idx], 0)
+    c_tracks = jnp.where(vmask, state_tr[valid_idx], 0)
+    c_charges = jnp.where(vmask, state_ch[valid_idx], 0.0)
+
+    hits_by_track = jnp.stack([c_wires, c_times, c_charges], axis=1).astype(jnp.float32)
+
+    # Find pixel boundaries (different wire or time)
+    pixel_boundary = jnp.ones(max_keys, dtype=bool).at[1:].set(
+        ((c_wires[1:] != c_wires[:-1]) | (c_times[1:] != c_times[:-1]))
+        & (jnp.arange(1, max_keys) < num_valid)
+    )
+    pixel_ids = jnp.cumsum(pixel_boundary) - 1
+
+    # Find max charge per pixel
+    charges_for_max = jnp.where(vmask, c_charges, -1e30)
+    max_per_pixel = jax.ops.segment_max(
+        charges_for_max, pixel_ids, num_segments=max_keys)
+    max_for_entry = max_per_pixel[pixel_ids]
+
+    # First entry matching max (tie-break by position)
+    is_winner = vmask & (c_charges >= max_for_entry) & (max_for_entry > -1e29)
+    winner_indices = jnp.where(is_winner, jnp.arange(max_keys), max_keys)
+    first_winner = jax.ops.segment_min(
+        winner_indices, pixel_ids, num_segments=max_keys)
+
+    num_pixels = jnp.sum(pixel_boundary & vmask)
+    pixel_range = jnp.arange(max_keys)
+    valid_pixel = pixel_range < num_pixels
+    widx = jnp.where(valid_pixel, first_winner[pixel_range], 0)
+
+    labeled_hits = jnp.stack([
+        jnp.where(valid_pixel, c_tracks[widx], 0),
+        jnp.where(valid_pixel, c_wires[widx], 0),
+        jnp.where(valid_pixel, c_times[widx], 0),
+        jnp.where(valid_pixel, c_charges[widx], 0),
+    ], axis=1).astype(jnp.float32)
+
+    return {
+        'labeled_hits': labeled_hits,
+        'num_labeled': num_pixels,
+        'hits_by_track': hits_by_track,
+        'num_hits': num_valid,
+    }
+
+
 def sparse_hits_to_dense(track_hit_result, num_wires, num_time_steps, min_wire_idx=0):
     """
     Convert sparse track hits to dense 2D array.
