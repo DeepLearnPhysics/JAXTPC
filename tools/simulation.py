@@ -1,5 +1,5 @@
 """
-Detector simulation module for LArTPC with per-side padding.
+Detector simulation module for LArTPC with fixed-size padding.
 
 Provides the DetectorSimulator class with two output paths:
 
@@ -13,7 +13,8 @@ Hit Path (optional, controlled by include_track_hits):
     Output: track_hits
 
 Features:
-    - Per-side padding with tier system (east/west split before JIT)
+    - Fixed total_pad per side (single JIT compilation, no recompilation)
+    - Batched response path via fori_loop (bounded peak memory)
     - Automatic data splitting and padding inside process_event
     - Optional noise, electronics response, and track labeling
 """
@@ -54,6 +55,8 @@ from tools.wires import (
 
     # Bucketed accumulation (sparse)
     accumulate_response_signals_sparse_bucketed,
+    build_bucket_mapping,
+    scatter_contributions_to_buckets_batched,
     sparse_buckets_to_dense,
 
     # Hit path functions (with K_wire x K_time diffusion)
@@ -81,43 +84,12 @@ from tools.noise import (
 
 
 # =============================================================================
-# PADDING TIER SYSTEM
-# =============================================================================
-
-# Default padding tiers - array sizes that trigger JIT recompilation.
-# Using fixed tiers limits the number of JIT versions cached.
-PADDING_TIERS = (100_000, 200_000)
-
-def pick_padding_tier(n_hits, tiers=PADDING_TIERS):
-    """
-    Pick the smallest tier that fits the data.
-
-    Parameters
-    ----------
-    n_hits : int
-        Actual number of hits to fit.
-    tiers : tuple of int
-        Available tier sizes.
-
-    Returns
-    -------
-    int
-        Selected tier size.
-    """
-    for tier in tiers:
-        if n_hits <= tier:
-            return tier
-    print(f"ERROR: n_hits ({n_hits:,}) exceeds largest tier ({tiers[-1]:,}). Data will be truncated!")
-    return tiers[-1]
-
-
-# =============================================================================
 # DETECTOR SIMULATOR CLASS
 # =============================================================================
 
 class DetectorSimulator:
     """
-    LArTPC detector simulation with per-side padding.
+    LArTPC detector simulation with fixed-size padding.
 
     Produces:
     - response_signals: Full detector simulation with response kernels (always)
@@ -125,7 +97,8 @@ class DetectorSimulator:
 
     Features:
     - Automatic splitting of data by detector side (east x<0, west x>=0)
-    - Per-side padding using tier system to minimize JIT recompilations
+    - Fixed total_pad per side — single JIT compilation for all events
+    - Batched response path via fori_loop (bounded peak memory)
     - Optional noise, electronics response, and track labeling
 
     Parameters
@@ -139,8 +112,11 @@ class DetectorSimulator:
         Ignored when include_track_hits=False.
     diffusion_params : DiffusionParams, optional
         Diffusion parameters. If None, computed from config.
-    padding_tiers : tuple of int, optional
-        Available padding tier sizes. Default: (100_000,).
+    total_pad : int
+        Fixed pad size per side. Default 200_000.
+    response_chunk_size : int
+        Deposits per fori_loop batch in the response path. Default 50_000.
+        Must divide total_pad evenly.
     use_bucketed : bool
         If True, use sparse bucketed accumulation for very large detectors.
     max_active_buckets : int
@@ -171,7 +147,8 @@ class DetectorSimulator:
         response_path="tools/responses/",
         track_config=None,
         diffusion_params=None,
-        padding_tiers=PADDING_TIERS,
+        total_pad=200_000,
+        response_chunk_size=50_000,
         use_bucketed=False,
         max_active_buckets=1000,
         include_noise=False,
@@ -185,10 +162,18 @@ class DetectorSimulator:
 
         # Store config
         self.detector_config = detector_config
-        self.padding_tiers = padding_tiers
+        self.total_pad = total_pad
+        self.response_chunk_size = response_chunk_size
         self.use_bucketed = use_bucketed
         self.sparse_output = use_bucketed  # sparse_output is True when use_bucketed is True
         self.max_active_buckets = max_active_buckets
+
+        # Validate chunk alignment
+        if total_pad % response_chunk_size != 0:
+            raise ValueError(
+                f"total_pad ({total_pad:,}) must be divisible by "
+                f"response_chunk_size ({response_chunk_size:,})."
+            )
 
         # Store ADC conversion factor (response output is in electrons)
         self.electrons_per_adc = detector_config['electrons_per_adc']
@@ -229,6 +214,15 @@ class DetectorSimulator:
 
         # Track labeling configuration
         self.include_track_hits = include_track_hits
+        if include_track_hits:
+            # Validate hits_chunk_size alignment with total_pad
+            hits_chunk = (track_config.hits_chunk_size if track_config is not None
+                          else create_track_hits_config().hits_chunk_size)
+            if total_pad % hits_chunk != 0:
+                raise ValueError(
+                    f"total_pad ({total_pad:,}) must be divisible by "
+                    f"hits_chunk_size ({hits_chunk:,})."
+                )
         if include_track_hits:
             if track_config is None:
                 max_wires = max(
@@ -342,7 +336,8 @@ class DetectorSimulator:
         self._build_calculator()
 
         print(f"   Recombination model: {self.recomb_model}")
-        print(f"   Config: tiers={padding_tiers}, num_s={self.diffusion_params.num_s}, "
+        print(f"   Config: total_pad={total_pad:,}, response_chunk={response_chunk_size:,}, "
+              f"num_s={self.diffusion_params.num_s}, "
               f"K_wire={self.diffusion_params.K_wire}, K_time={self.diffusion_params.K_time}")
         if use_bucketed:
             print(f"   Using BUCKETED accumulation (B=2*kernel, max_buckets={max_active_buckets})")
@@ -372,11 +367,11 @@ class DetectorSimulator:
 
     def _split_and_pad_data(self, deposit_data: DepositData):
         """
-        Split deposit data by side and pad to appropriate tiers.
+        Split deposit data by side and pad to total_pad.
 
         All operations use numpy to avoid XLA recompilation on variable-length
         intermediates. The final padded arrays are converted to JAX at the end
-        (fixed tier shape → no recompilation).
+        (fixed total_pad shape → single JIT compilation for all events).
 
         Parameters
         ----------
@@ -409,24 +404,27 @@ class DetectorSimulator:
         n_west = int(np.sum(west_mask))
         n_tracks = int(len(np.unique(track_ids[valid_mask])))
 
-        # Pick tiers
-        east_tier = pick_padding_tier(n_east, self.padding_tiers)
-        west_tier = pick_padding_tier(n_west, self.padding_tiers)
+        if n_east > self.total_pad:
+            print(f"ERROR: n_east ({n_east:,}) > total_pad ({self.total_pad:,}). Truncating!")
+        if n_west > self.total_pad:
+            print(f"ERROR: n_west ({n_west:,}) > total_pad ({self.total_pad:,}). Truncating!")
 
-        print(f"   East side: {n_east:,} hits -> tier {east_tier:,}")
-        print(f"   West side: {n_west:,} hits -> tier {west_tier:,}")
+        print(f"   East side: {n_east:,} hits (pad {self.total_pad:,})")
+        print(f"   West side: {n_west:,} hits (pad {self.total_pad:,})")
 
         # Extract and pad each side (numpy), convert to JAX at the end
         east_data = self._extract_and_pad(
             positions_mm, de, dx, theta, phi, track_ids,
-            east_mask, n_east, east_tier
+            east_mask, min(n_east, self.total_pad), self.total_pad
         )
         west_data = self._extract_and_pad(
             positions_mm, de, dx, theta, phi, track_ids,
-            west_mask, n_west, west_tier
+            west_mask, min(n_west, self.total_pad), self.total_pad
         )
 
-        counts = {'n_east': n_east, 'n_west': n_west, 'n_tracks': n_tracks}
+        counts = {'n_east': min(n_east, self.total_pad),
+                  'n_west': min(n_west, self.total_pad),
+                  'n_tracks': n_tracks}
         return east_data, west_data, counts
 
     def _extract_and_pad(self, positions_mm, de, dx, theta, phi, track_ids,
@@ -550,43 +548,12 @@ class DetectorSimulator:
         # Recombination function (captured in closure)
         recomb_fn = self.recomb_fn
 
-        # Choose accumulation function based on mode
-        if self.use_bucketed:
+        # Response path batching parameters (captured in closure)
+        response_chunk_size = self.response_chunk_size
+        use_bucketed = self.use_bucketed
+        sparse_output = self.sparse_output
+        if use_bucketed:
             max_buckets = self.max_active_buckets
-            sparse_output = self.sparse_output
-
-            def accumulate_fn(wire_idx, time_idx, intensities, contributions,
-                              num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
-                              wire_zero_bin, time_zero_bin):
-                # Use sparse bucketing with two-phase algorithm
-                buckets, num_active, compact_to_key = accumulate_response_signals_sparse_bucketed(
-                    wire_idx, time_idx, intensities, contributions,
-                    num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
-                    max_buckets, wire_zero_bin, time_zero_bin
-                )
-
-                if sparse_output:
-                    B1 = 2 * kernel_num_wires
-                    B2 = 2 * kernel_height
-                    return (buckets, num_active, compact_to_key, B1, B2)
-                else:
-                    B1 = 2 * kernel_num_wires
-                    B2 = 2 * kernel_height
-                    return sparse_buckets_to_dense(
-                        buckets, compact_to_key, num_active,
-                        B1, B2, num_wires_plane, num_time_steps, max_buckets
-                    )
-
-        else:
-            def accumulate_fn(wire_idx, time_idx, intensities, contributions,
-                              num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
-                              wire_zero_bin, time_zero_bin):
-                signal = accumulate_response_signals(
-                    wire_idx, time_idx, intensities, contributions,
-                    num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
-                    wire_zero_bin, time_zero_bin
-                )
-                return signal
 
         # Define electronics response function based on mode
         if self.include_electronics:
@@ -855,7 +822,6 @@ class DetectorSimulator:
                 pass
 
         @partial(jax.jit, static_argnames=(
-            'max_hits_east', 'max_hits_west',  # Per-side padding sizes
             'max_wire_indices_tuple', 'min_wire_indices_tuple',
             'index_offsets_tuple', 'num_wires_tuple',
             'max_tracks', 'max_wires', 'max_time', 'max_keys'
@@ -871,8 +837,7 @@ class DetectorSimulator:
             noise_key,
             # Actual deposit counts (traced, not static)
             n_east, n_west,
-            # Static args
-            max_hits_east, max_hits_west,
+            # Static args (geometry only — no per-side sizes)
             max_wire_indices_tuple, min_wire_indices_tuple,
             index_offsets_tuple, num_wires_tuple,
             max_tracks, max_wires, max_time, max_keys
@@ -882,6 +847,12 @@ class DetectorSimulator:
             # Results lists
             response_signals_list = []
             track_hits_list = []
+
+            # vmap for response path (shared across all planes)
+            prepare_deposit_vmap_response = jax.vmap(
+                prepare_deposit_for_response,
+                in_axes=(0, 0, 0, 0, 0, 0, None, None, None, None),
+            )
 
             for side_idx in range(2):
                 # Select data for this side - no masking needed, already split!
@@ -973,55 +944,137 @@ class DetectorSimulator:
                         n_actual
                     )
 
-                    # --- RESPONSE PATH ---
-                    # Calculate s parameter for diffusion
+                    # --- RESPONSE PATH (batched via fori_loop) ---
+                    # Calculate s parameter for diffusion (guard NaN for padded entries)
                     total_travel_distance_cm = detector_half_width_cm
                     s_values = drift_distance_cm / total_travel_distance_cm
                     s_values = jnp.clip(s_values, 0.0, 1.0)
+                    s_values = jnp.where(valid_mask, s_values, 0.0)
 
-                    # Process deposits for response path
-                    prepare_deposit_vmap_response = jax.vmap(
-                        prepare_deposit_for_response,
-                        in_axes=(0, 0, 0, 0, 0, 0, None, None, None, None),
-                    )
-
-                    deposit_data_kernel = prepare_deposit_vmap_response(
-                        charges,  # No more side_charges
-                        drift_time_us,
-                        closest_wire_idx,
-                        closest_wire_distances,
-                        attenuation_factors,
-                        valid_mask,  # No more valid_side_mask
-                        spacing_cm,
-                        time_step_size_us,
-                        min_idx_abs,
-                        num_wires_plane
-                    )
-
-                    wire_indices_rel_kernel, wire_offsets, time_indices_kernel, time_offsets, intensities = deposit_data_kernel
-
-                    # Apply diffusion response kernels
+                    # Response kernel parameters
                     plane_kernel = response_kernels[plane_type]
                     DKernel = plane_kernel['DKernel']
                     kernel_num_wires = plane_kernel['num_wires']
-                    kernel_height = plane_kernel['kernel_height']      # kernel_height - 1 due to interpolation
+                    kernel_height = plane_kernel['kernel_height']
                     kernel_wire_stride = plane_kernel['wire_stride']
                     kernel_wire_spacing = plane_kernel['wire_spacing']
-                    wire_zero_bin = plane_kernel['wire_zero_bin']      # Where wire=0 is in output wires
-                    time_zero_bin = plane_kernel['time_zero_bin']      # Where t=0 is in output time bins
+                    wire_zero_bin = plane_kernel['wire_zero_bin']
+                    time_zero_bin = plane_kernel['time_zero_bin']
 
-                    # Get kernel contributions using linear interpolation
-                    kernel_contributions = apply_diffusion_response(
-                        DKernel, s_values, wire_offsets, time_offsets,
-                        kernel_wire_stride, kernel_wire_spacing, kernel_num_wires
+                    # Batch count for fori_loop (response_chunk_size is Python int from closure)
+                    max_safe_batches = charges.shape[0] // response_chunk_size  # Python int (static)
+                    n_batches = jnp.minimum(
+                        (n_actual + response_chunk_size - 1) // response_chunk_size,
+                        max_safe_batches
                     )
 
-                    # Accumulate response signals (output is in ADC)
-                    response_signal = accumulate_fn(
-                        wire_indices_rel_kernel, time_indices_kernel, intensities, kernel_contributions,
-                        num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
-                        wire_zero_bin, time_zero_bin
-                    )
+                    if use_bucketed:
+                        # --- BUCKETED RESPONSE PATH ---
+                        B1 = 2 * kernel_num_wires
+                        B2 = 2 * kernel_height
+
+                        # Pre-compute wire/time indices for bucket mapping (element-wise, full array)
+                        wire_idx_for_mapping = jnp.where(
+                            valid_mask,
+                            jnp.clip(closest_wire_idx - min_idx_abs, 0, num_wires_plane - 1),
+                            jnp.int32(0)
+                        )
+                        time_idx_for_mapping = jnp.where(
+                            valid_mask,
+                            jnp.clip(
+                                jnp.floor(drift_time_us / time_step_size_us).astype(jnp.int32),
+                                0, num_time_steps - 1
+                            ),
+                            jnp.int32(0)
+                        )
+
+                        # Phase 1: build_bucket_mapping on full array (sort + dedup, no vmap needed)
+                        point_to_compact, num_active, compact_to_key = build_bucket_mapping(
+                            wire_idx_for_mapping, time_idx_for_mapping,
+                            B1, B2, num_wires_plane, num_time_steps, max_buckets,
+                            wire_zero_bin, time_zero_bin
+                        )
+
+                        def response_body_bucketed(i, carry_buckets):
+                            start = i * response_chunk_size
+                            b_charges    = jax.lax.dynamic_slice(charges,                (start,), (response_chunk_size,))
+                            b_drift_time = jax.lax.dynamic_slice(drift_time_us,          (start,), (response_chunk_size,))
+                            b_wire_idx   = jax.lax.dynamic_slice(closest_wire_idx,       (start,), (response_chunk_size,))
+                            b_wire_dist  = jax.lax.dynamic_slice(closest_wire_distances, (start,), (response_chunk_size,))
+                            b_atten      = jax.lax.dynamic_slice(attenuation_factors,    (start,), (response_chunk_size,))
+                            b_valid      = jax.lax.dynamic_slice(valid_mask,             (start,), (response_chunk_size,))
+                            b_s          = jax.lax.dynamic_slice(s_values,               (start,), (response_chunk_size,))
+                            b_ptc        = jax.lax.dynamic_slice(point_to_compact,       (start, 0), (response_chunk_size, 4))
+
+                            deposit_data_b = prepare_deposit_vmap_response(
+                                b_charges, b_drift_time, b_wire_idx, b_wire_dist,
+                                b_atten, b_valid,
+                                spacing_cm, time_step_size_us, min_idx_abs, num_wires_plane
+                            )
+                            wire_idx_rel, wire_offsets_b, time_idx_b, time_offsets_b, intensities_b = deposit_data_b
+
+                            kernel_contributions_b = apply_diffusion_response(
+                                DKernel, b_s, wire_offsets_b, time_offsets_b,
+                                kernel_wire_stride, kernel_wire_spacing, kernel_num_wires
+                            )
+
+                            batch_buckets = scatter_contributions_to_buckets_batched(
+                                wire_idx_rel, time_idx_b, intensities_b, kernel_contributions_b,
+                                b_ptc, max_buckets, kernel_num_wires, kernel_height, B1, B2,
+                                wire_zero_bin, time_zero_bin,
+                                batch_size=response_chunk_size,
+                                num_wires=num_wires_plane, num_time_steps=num_time_steps
+                            )
+                            return carry_buckets + batch_buckets
+
+                        response_buckets = jax.lax.fori_loop(
+                            0, n_batches, response_body_bucketed,
+                            jnp.zeros((max_buckets, B1, B2))
+                        )
+
+                        if sparse_output:
+                            response_signal = (response_buckets, num_active, compact_to_key, B1, B2)
+                        else:
+                            response_signal = sparse_buckets_to_dense(
+                                response_buckets, compact_to_key, num_active,
+                                B1, B2, num_wires_plane, num_time_steps, max_buckets
+                            )
+
+                    else:
+                        # --- DENSE RESPONSE PATH ---
+                        def response_body_dense(i, signal_accum):
+                            start = i * response_chunk_size
+                            b_charges    = jax.lax.dynamic_slice(charges,                (start,), (response_chunk_size,))
+                            b_drift_time = jax.lax.dynamic_slice(drift_time_us,          (start,), (response_chunk_size,))
+                            b_wire_idx   = jax.lax.dynamic_slice(closest_wire_idx,       (start,), (response_chunk_size,))
+                            b_wire_dist  = jax.lax.dynamic_slice(closest_wire_distances, (start,), (response_chunk_size,))
+                            b_atten      = jax.lax.dynamic_slice(attenuation_factors,    (start,), (response_chunk_size,))
+                            b_valid      = jax.lax.dynamic_slice(valid_mask,             (start,), (response_chunk_size,))
+                            b_s          = jax.lax.dynamic_slice(s_values,               (start,), (response_chunk_size,))
+
+                            deposit_data_b = prepare_deposit_vmap_response(
+                                b_charges, b_drift_time, b_wire_idx, b_wire_dist,
+                                b_atten, b_valid,
+                                spacing_cm, time_step_size_us, min_idx_abs, num_wires_plane
+                            )
+                            wire_idx_rel, wire_offsets_b, time_idx_b, time_offsets_b, intensities_b = deposit_data_b
+
+                            kernel_contributions_b = apply_diffusion_response(
+                                DKernel, b_s, wire_offsets_b, time_offsets_b,
+                                kernel_wire_stride, kernel_wire_spacing, kernel_num_wires
+                            )
+
+                            batch_signal = accumulate_response_signals(
+                                wire_idx_rel, time_idx_b, intensities_b, kernel_contributions_b,
+                                num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
+                                wire_zero_bin, time_zero_bin
+                            )
+                            return signal_accum + batch_signal
+
+                        response_signal = jax.lax.fori_loop(
+                            0, n_batches, response_body_dense,
+                            jnp.zeros((num_wires_plane, num_time_steps))
+                        )
 
                     # Apply electronics response convolution
                     response_signal = electronics_fn(
@@ -1038,7 +1091,7 @@ class DetectorSimulator:
 
             return tuple(response_signals_list), tuple(track_hits_list)
 
-        # Store raw JIT function (static args bound at call time based on tier)
+        # Store raw JIT function (single compilation for all events)
         self._calculator_jit_raw = _calculate_signals_jit
 
     def __call__(self, deposit_data: DepositData, key=None):
@@ -1055,7 +1108,7 @@ class DetectorSimulator:
         ----------
         deposit_data : DepositData
             Input data containing positions, charges, and track IDs.
-            Can be any size - will be split and padded to tiers internally.
+            Can be any size - will be split and padded internally.
         key : jax.Array, optional
             JAX PRNGKey for noise generation. Default is PRNGKey(0).
 
@@ -1073,43 +1126,23 @@ class DetectorSimulator:
         # Pre-simulation validation
         self._validate_pre_simulation(counts)
 
-        # Get tier sizes (become static args)
-        max_hits_east = east_data.positions_mm.shape[0]
-        max_hits_west = west_data.positions_mm.shape[0]
-
-        # Validate that actual deposits fit within chunk-aligned tier capacity
-        if self.include_track_hits:
-            chunk = self.track_config.hits_chunk_size
-            for label, n, tier in [('East', counts['n_east'], max_hits_east),
-                                   ('West', counts['n_west'], max_hits_west)]:
-                capacity = (tier // chunk) * chunk
-                if n > capacity:
-                    raise ValueError(
-                        f"{label}: {n:,} deposits exceed chunk-aligned tier "
-                        f"capacity {capacity:,} (tier={tier:,}, "
-                        f"hits_chunk_size={chunk:,}). Use a larger tier or "
-                        f"a hits_chunk_size that divides the tier."
-                    )
-
         # Noise key (used even when noise is disabled - identity function ignores it)
         noise_key = key if key is not None else jax.random.PRNGKey(0)
 
-        # Call JIT-compiled calculator
+        # Call JIT-compiled calculator (single compilation for all events)
         response_tuple, track_hits_tuple = self._calculator_jit_raw(
-            # East data
+            # East data (always shape (total_pad, ...))
             east_data.positions_mm, east_data.de, east_data.dx, east_data.valid_mask,
             east_data.theta, east_data.phi, east_data.track_ids,
-            # West data
+            # West data (always shape (total_pad, ...))
             west_data.positions_mm, west_data.de, west_data.dx, west_data.valid_mask,
             west_data.theta, west_data.phi, west_data.track_ids,
             # Noise key
             noise_key,
-            # Actual deposit counts (traced)
+            # Actual deposit counts (traced — dynamic batch count derived from these)
             n_east=counts['n_east'],
             n_west=counts['n_west'],
-            # Static args
-            max_hits_east=max_hits_east,
-            max_hits_west=max_hits_west,
+            # Static args (geometry only — no per-side sizes)
             max_wire_indices_tuple=self._max_indices_tuple,
             min_wire_indices_tuple=self._min_indices_tuple,
             index_offsets_tuple=self._index_offsets_tuple,
@@ -1170,42 +1203,30 @@ class DetectorSimulator:
         return track_hits
 
     def warm_up(self):
-        """Trigger JIT compilation with dummy data for smallest tier."""
+        """Trigger JIT compilation with dummy data."""
         print("Triggering JIT compilation...")
 
-        # Warm up with smallest tier (fast)
-        min_tier = self.padding_tiers[0]
+        pad = self.total_pad
 
-        dummy_east = DepositData(
-            positions_mm=jnp.zeros((min_tier, 3), dtype=jnp.float32),
-            de=jnp.zeros((min_tier,), dtype=jnp.float32),
-            dx=jnp.zeros((min_tier,), dtype=jnp.float32),
-            valid_mask=jnp.zeros((min_tier,), dtype=bool),
-            theta=jnp.zeros((min_tier,), dtype=jnp.float32),
-            phi=jnp.zeros((min_tier,), dtype=jnp.float32),
-            track_ids=jnp.zeros((min_tier,), dtype=jnp.int32)
-        )
-        dummy_west = DepositData(
-            positions_mm=jnp.zeros((min_tier, 3), dtype=jnp.float32),
-            de=jnp.zeros((min_tier,), dtype=jnp.float32),
-            dx=jnp.zeros((min_tier,), dtype=jnp.float32),
-            valid_mask=jnp.zeros((min_tier,), dtype=bool),
-            theta=jnp.zeros((min_tier,), dtype=jnp.float32),
-            phi=jnp.zeros((min_tier,), dtype=jnp.float32),
-            track_ids=jnp.zeros((min_tier,), dtype=jnp.int32)
+        dummy = DepositData(
+            positions_mm=jnp.zeros((pad, 3), dtype=jnp.float32),
+            de=jnp.zeros((pad,), dtype=jnp.float32),
+            dx=jnp.zeros((pad,), dtype=jnp.float32),
+            valid_mask=jnp.zeros((pad,), dtype=bool),
+            theta=jnp.zeros((pad,), dtype=jnp.float32),
+            phi=jnp.zeros((pad,), dtype=jnp.float32),
+            track_ids=jnp.zeros((pad,), dtype=jnp.int32)
         )
 
         # Call directly to avoid split/pad logic
         _ = self._calculator_jit_raw(
-            dummy_east.positions_mm, dummy_east.de, dummy_east.dx, dummy_east.valid_mask,
-            dummy_east.theta, dummy_east.phi, dummy_east.track_ids,
-            dummy_west.positions_mm, dummy_west.de, dummy_west.dx, dummy_west.valid_mask,
-            dummy_west.theta, dummy_west.phi, dummy_west.track_ids,
-            jax.random.PRNGKey(0),  # noise_key (dummy for warmup)
+            dummy.positions_mm, dummy.de, dummy.dx, dummy.valid_mask,
+            dummy.theta, dummy.phi, dummy.track_ids,
+            dummy.positions_mm, dummy.de, dummy.dx, dummy.valid_mask,
+            dummy.theta, dummy.phi, dummy.track_ids,
+            jax.random.PRNGKey(0),
             n_east=0,
             n_west=0,
-            max_hits_east=min_tier,
-            max_hits_west=min_tier,
             max_wire_indices_tuple=self._max_indices_tuple,
             min_wire_indices_tuple=self._min_indices_tuple,
             index_offsets_tuple=self._index_offsets_tuple,
@@ -1215,7 +1236,7 @@ class DetectorSimulator:
             max_time=self._max_time if self.include_track_hits else 1,
             max_keys=self.track_config.max_keys if self.include_track_hits else 1
         )
-        print(f"JIT compilation finished (tier {min_tier:,}). Other tiers compile on first use.")
+        print(f"JIT compilation finished (total_pad={pad:,}). Single compilation for all events.")
 
 
 # =============================================================================
@@ -1226,13 +1247,13 @@ def run_simulation(config_path, data_path, event_idx=0,
                    num_s=16,
                    response_path="tools/responses/",
                    track_threshold=1.0,
-                   padding_tiers=PADDING_TIERS,
+                   total_pad=200_000,
+                   response_chunk_size=50_000,
                    include_track_hits=True):
     """
     Run the detector simulation for a specific event.
 
     Convenience function that creates a DetectorSimulator and processes one event.
-    Uses automatic per-side padding.
 
     Parameters
     ----------
@@ -1248,8 +1269,10 @@ def run_simulation(config_path, data_path, event_idx=0,
         Path to wire response kernel data.
     track_threshold : float, optional
         Minimum charge threshold for track labeling, by default 1.0.
-    padding_tiers : tuple of int, optional
-        Available padding tier sizes.
+    total_pad : int, optional
+        Fixed pad size per side. Default 200_000.
+    response_chunk_size : int, optional
+        Deposits per fori_loop batch. Default 50_000.
     include_track_hits : bool, optional
         If True, run the hit path for track labeling. Default True.
 
@@ -1299,7 +1322,8 @@ def run_simulation(config_path, data_path, event_idx=0,
             response_path=response_path,
             track_config=track_config,
             diffusion_params=diffusion_params,
-            padding_tiers=padding_tiers,
+            total_pad=total_pad,
+            response_chunk_size=response_chunk_size,
             include_track_hits=include_track_hits
         )
         simulator.warm_up()
