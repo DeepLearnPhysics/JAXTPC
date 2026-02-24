@@ -166,3 +166,90 @@ def list_events(filepath):
         return sorted(
             int(k.split('_')[1]) for k in f.keys() if k.startswith('event_')
         )
+
+
+# =========================================================================
+# Space Charge Effect (SCE) maps I/O
+# =========================================================================
+
+def _save_side(group, efield_map, drift_correction_map, origin_cm, spacing_cm):
+    """Write one TPC side's SCE data into an HDF5 group."""
+    group.create_dataset('efield_map', data=np.asarray(efield_map, dtype=np.float32))
+    group.create_dataset('drift_correction_map',
+                         data=np.asarray(drift_correction_map, dtype=np.float32))
+    group.create_dataset('origin_cm', data=np.asarray(origin_cm, dtype=np.float64))
+    group.create_dataset('spacing_cm', data=np.asarray(spacing_cm, dtype=np.float64))
+
+
+def _load_side(group):
+    """Read one TPC side's SCE data from an HDF5 group."""
+    return {
+        'efield_map': np.array(group['efield_map']),
+        'drift_correction_map': np.array(group['drift_correction_map']),
+        'origin_cm': np.array(group['origin_cm']),
+        'spacing_cm': np.array(group['spacing_cm']),
+    }
+
+
+def save_sce_data(filepath, east_efield, east_corrections, east_origin, east_spacing,
+                  west_efield, west_corrections, west_origin, west_spacing,
+                  metadata=None):
+    """
+    Save per-side space charge effect maps to HDF5.
+
+    File layout::
+
+        east/efield_map              (Nx, Ny, Nz, 3) float32
+        east/drift_correction_map    (Nx, Ny, Nz, 3) float32
+        east/origin_cm               (3,) float64
+        east/spacing_cm              (3,) float64
+        west/efield_map              (Nx, Ny, Nz, 3) float32
+        west/drift_correction_map    (Nx, Ny, Nz, 3) float32
+        west/origin_cm               (3,) float64
+        west/spacing_cm              (3,) float64
+
+    Parameters
+    ----------
+    filepath : str
+        Output HDF5 path.
+    east_efield, west_efield : np.ndarray, shape (Nx, Ny, Nz, 3)
+        E-field maps per side.
+    east_corrections, west_corrections : np.ndarray, shape (Nx, Ny, Nz, 3)
+        Drift correction maps per side.
+    east_origin, west_origin : array-like, shape (3,)
+    east_spacing, west_spacing : array-like, shape (3,)
+    metadata : dict, optional
+        Extra key/value pairs stored as file-level HDF5 attributes.
+    """
+    with h5py.File(filepath, 'w') as f:
+        _save_side(f.create_group('east'),
+                   east_efield, east_corrections, east_origin, east_spacing)
+        _save_side(f.create_group('west'),
+                   west_efield, west_corrections, west_origin, west_spacing)
+
+        if metadata:
+            for k, v in metadata.items():
+                f.attrs[k] = v
+
+
+def load_sce_data(filepath):
+    """
+    Load per-side space charge effect maps from HDF5.
+
+    Parameters
+    ----------
+    filepath : str
+        Path to HDF5 file written by ``save_sce_data``.
+
+    Returns
+    -------
+    dict
+        ``{'east': {...}, 'west': {...}}`` where each side dict contains
+        ``'efield_map'``, ``'drift_correction_map'``, ``'origin_cm'``,
+        ``'spacing_cm'``.
+    """
+    with h5py.File(filepath, 'r') as f:
+        return {
+            'east': _load_side(f['east']),
+            'west': _load_side(f['west']),
+        }

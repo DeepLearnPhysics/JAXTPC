@@ -39,7 +39,8 @@ from tools.config import (
 from tools.drift import (
     compute_drift_to_plane,
     correct_drift_for_plane,
-    compute_lifetime_attenuation
+    compute_lifetime_attenuation,
+    apply_drift_corrections,
 )
 
 # Wire calculation functions
@@ -139,6 +140,15 @@ class DetectorSimulator:
         If None, reads from ``simulation.charge_recombination.model`` in the
         detector config, falling back to ``'modified_box'`` if not specified.
         See ``tools.recombination`` for full model documentation.
+    include_electric_dist : bool
+        If True, load space charge effect (SCE) maps from the default
+        HDF5 file (``sce_jaxtpc.h5`` in the project root) and apply
+        E-field distortions and drift corrections during simulation.
+        Default False.
+    electric_dist_path : str, optional
+        Path to the per-side SCE HDF5 file.  Only used when
+        ``include_electric_dist=True``.  Defaults to ``sce_jaxtpc.h5``
+        in the project root.
     """
 
     def __init__(
@@ -157,6 +167,8 @@ class DetectorSimulator:
         electronics_chunk_size=None,
         electronics_threshold=0.0,
         recombination_model=None,
+        include_electric_dist=False,
+        electric_dist_path=None,
     ):
         print("--- Creating DetectorSimulator ---")
 
@@ -182,6 +194,24 @@ class DetectorSimulator:
         self.recomb_fn, self.recomb_model = create_recombination_fn(
             detector_config, model=recombination_model
         )
+
+        # Space charge effect (electric field distortions)
+        self.include_electric_dist = include_electric_dist
+        if include_electric_dist:
+            from convert_sce_maps import load_sce_interpolation_fns
+            if electric_dist_path is None:
+                electric_dist_path = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)), 'sce_jaxtpc.h5'
+                )
+            print(f"   Loading SCE maps from {electric_dist_path}...")
+            sce_efield_fn, sce_drift_correction_fn = load_sce_interpolation_fns(
+                electric_dist_path
+            )
+            self._sce_efield_fn = sce_efield_fn
+            self._sce_drift_correction_fn = sce_drift_correction_fn
+        else:
+            self._sce_efield_fn = None
+            self._sce_drift_correction_fn = None
 
         # Extract parameter bundles
         print("   Extracting parameters...")
@@ -335,6 +365,15 @@ class DetectorSimulator:
         # Build the JIT-compiled calculator
         self._build_calculator()
 
+        sce_parts = []
+        if self._sce_efield_fn is not None:
+            sce_parts.append("E-field distortions")
+        if self._sce_drift_correction_fn is not None:
+            sce_parts.append("drift corrections")
+        if sce_parts:
+            print(f"   Space charge effects: ENABLED ({', '.join(sce_parts)})")
+        else:
+            print(f"   Space charge effects: DISABLED")
         print(f"   Recombination model: {self.recomb_model}")
         print(f"   Config: total_pad={total_pad:,}, response_chunk={response_chunk_size:,}, "
               f"num_s={self.diffusion_params.num_s}, "
@@ -547,6 +586,52 @@ class DetectorSimulator:
 
         # Recombination function (captured in closure)
         recomb_fn = self.recomb_fn
+        nominal_field_Vcm = float(
+            self.detector_config['electric_field']['field_strength']
+        )
+
+        # Space charge effect functions (Python branch resolves at trace time)
+        _sce_efield_fn = self._sce_efield_fn
+        _sce_drift_correction_fn = self._sce_drift_correction_fn
+
+        if _sce_efield_fn is not None:
+            def sce_recomb_inputs_fn(positions_cm, theta, phi):
+                """Compute phi_drift and |E| from local E-field map."""
+                E_local = _sce_efield_fn(positions_cm)
+                E_mag = jnp.sqrt(jnp.sum(E_local ** 2, axis=-1))
+                E_mag_safe = jnp.maximum(E_mag, 1e-10)
+
+                track_x = jnp.sin(theta) * jnp.cos(phi)
+                track_y = jnp.sin(theta) * jnp.sin(phi)
+                track_z = jnp.cos(theta)
+
+                cos_phi_drift = jnp.abs(
+                    track_x * (E_local[:, 0] / E_mag_safe)
+                    + track_y * (E_local[:, 1] / E_mag_safe)
+                    + track_z * (E_local[:, 2] / E_mag_safe)
+                )
+                phi_drift = jnp.arccos(jnp.clip(cos_phi_drift, 0.0, 1.0))
+                return phi_drift, E_mag
+        else:
+            def sce_recomb_inputs_fn(positions_cm, theta, phi):
+                """Nominal: phi_drift from x-axis, constant E-field."""
+                dx_dir = jnp.sin(theta) * jnp.cos(phi)
+                phi_drift = jnp.arccos(jnp.clip(jnp.abs(dx_dir), 0.0, 1.0))
+                return phi_drift, nominal_field_Vcm
+
+        if _sce_drift_correction_fn is not None:
+            def sce_drift_fn(positions_cm, dist, time_us, yz):
+                """Apply drift corrections from SCE map."""
+                corr = _sce_drift_correction_fn(positions_cm)
+                return apply_drift_corrections(
+                    dist, time_us, yz,
+                    corr[:, 0], corr[:, 1], corr[:, 2],
+                    velocity_cm_us,
+                )
+        else:
+            def sce_drift_fn(positions_cm, dist, time_us, yz):
+                """No-op: return inputs unchanged."""
+                return dist, time_us, yz
 
         # Response path batching parameters (captured in closure)
         response_chunk_size = self.response_chunk_size
@@ -875,30 +960,34 @@ class DetectorSimulator:
                     track_ids = west_track_ids
                     n_actual = n_west
 
-                # Convert dx from mm to cm (HDF5 data stores lengths in mm)
+                # Convert units: mm → cm
+                positions_cm = positions_mm / 10.0
                 dx_cm = dx / 10.0
 
-                # Compute angle between track direction and drift field (x-axis)
-                # for angular-dependent recombination models (EMB)
-                dx_dir = jnp.sin(theta) * jnp.cos(phi)
-                phi_drift = jnp.arccos(jnp.clip(jnp.abs(dx_dir), 0.0, 1.0))
+                # Recombination inputs (SCE-aware or nominal)
+                phi_drift, E_field_Vcm = sce_recomb_inputs_fn(positions_cm, theta, phi)
 
                 # Apply charge recombination
-                charges = recomb_fn(de, dx_cm, phi_drift)
-
-                # Convert positions to cm
-                positions_cm = positions_mm / 10.0
+                charges = recomb_fn(de, dx_cm, phi_drift, E_field_Vcm)
 
                 # Calculate drift for the furthest plane on this side
                 furthest_plane_idx = furthest_plane_indices[side_idx]
                 furthest_plane_dist_cm = all_plane_distances_cm[side_idx, furthest_plane_idx]
 
-                # Drift to furthest plane
+                # Drift to furthest plane (nominal geometry)
                 furthest_drift_distance_cm, furthest_drift_time_us, positions_yz_cm = compute_drift_to_plane(
                     positions_cm,
                     detector_half_width_cm,
                     velocity_cm_us,
                     furthest_plane_dist_cm
+                )
+
+                # Apply SCE drift corrections (identity when disabled)
+                furthest_drift_distance_cm, furthest_drift_time_us, positions_yz_cm = sce_drift_fn(
+                    positions_cm,
+                    furthest_drift_distance_cm,
+                    furthest_drift_time_us,
+                    positions_yz_cm,
                 )
 
                 for plane_idx in range(3):

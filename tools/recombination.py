@@ -54,11 +54,13 @@ Use ``create_recombination_fn()`` to get a model-specific callable::
     from tools.recombination import create_recombination_fn
 
     recomb_fn, model_name = create_recombination_fn(detector_config)
-    charges = recomb_fn(de, dx_cm, phi_drift)
+    charges = recomb_fn(de, dx_cm, phi_drift, e_field_Vcm)
 
 The model is selected from the YAML config key ``simulation.charge_recombination.model``
 or overridden via the ``model`` argument. Both models return a function with the
-same signature ``fn(de, dx_cm, phi_drift) -> charges`` for drop-in interchangeability.
+same signature ``fn(de, dx_cm, phi_drift, e_field_Vcm) -> charges`` for drop-in
+interchangeability.  The ``e_field_Vcm`` parameter accepts either a scalar
+(uniform field) or a per-deposit array (spatially varying field from SCE maps).
 
 Edge Cases
 ----------
@@ -305,8 +307,9 @@ def create_recombination_fn(detector_config, model=None):
     -------
     tuple of (callable, str)
         - **recomb_fn** : function with signature
-          ``fn(de, dx_cm, phi_drift) -> charges``
-          where de (MeV), dx_cm (cm), phi_drift (rad) are JAX arrays and
+          ``fn(de, dx_cm, phi_drift, e_field_Vcm) -> charges``
+          where de (MeV), dx_cm (cm), phi_drift (rad) are JAX arrays,
+          e_field_Vcm (V/cm) is a scalar or per-deposit array, and
           charges is the number of surviving electrons per step.
           For ``'modified_box'``, phi_drift is accepted but ignored.
         - **model_name** : the string name of the selected model.
@@ -319,17 +322,24 @@ def create_recombination_fn(detector_config, model=None):
 
     if model == 'modified_box':
         params = extract_recombination_params(detector_config)
+        _, density, w_value, alpha, beta = params
 
-        def recomb_fn(de, dx_cm, phi_drift):
-            return calculate_modified_box_charge(de, dx_cm, params)
+        def recomb_fn(de, dx_cm, phi_drift, e_field_Vcm):
+            return calculate_modified_box_charge(
+                de, dx_cm, (e_field_Vcm, density, w_value, alpha, beta)
+            )
 
         return recomb_fn, model
 
     elif model == 'emb':
         params = extract_emb_params(detector_config)
+        _, density, w_value, alpha, beta_90, R = params
 
-        def recomb_fn(de, dx_cm, phi_drift):
-            return calculate_emb_charge(de, dx_cm, phi_drift, params)
+        def recomb_fn(de, dx_cm, phi_drift, e_field_Vcm):
+            return calculate_emb_charge(
+                de, dx_cm, phi_drift,
+                (e_field_Vcm, density, w_value, alpha, beta_90, R)
+            )
 
         return recomb_fn, model
 

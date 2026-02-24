@@ -92,6 +92,45 @@ def correct_drift_for_plane(drift_distance_cm, drift_time_us, drift_velocity_cm_
 
 
 @jax.jit
+def apply_drift_corrections(drift_distance_cm, drift_time_us, positions_yz_cm,
+                             delta_x_cm, delta_y_cm, delta_z_cm,
+                             velocity_cm_us):
+    """
+    Apply space charge drift corrections to nominal drift quantities.
+
+    Parameters
+    ----------
+    drift_distance_cm : jnp.ndarray, shape (N,)
+        Nominal drift distances in cm.
+    drift_time_us : jnp.ndarray, shape (N,)
+        Nominal drift times in us.
+    positions_yz_cm : jnp.ndarray, shape (N, 2)
+        Nominal (y, z) positions at wire planes in cm.
+    delta_x_cm : jnp.ndarray, shape (N,)
+        Longitudinal correction in cm (positive = longer apparent drift).
+    delta_y_cm : jnp.ndarray, shape (N,)
+        Transverse y correction in cm.
+    delta_z_cm : jnp.ndarray, shape (N,)
+        Transverse z correction in cm.
+    velocity_cm_us : float
+        Nominal drift velocity in cm/us.
+
+    Returns
+    -------
+    corrected_distance_cm : jnp.ndarray, shape (N,)
+    corrected_time_us : jnp.ndarray, shape (N,)
+    corrected_yz_cm : jnp.ndarray, shape (N, 2)
+    """
+    corrected_distance = jnp.maximum(drift_distance_cm + delta_x_cm, 0.0)
+    corrected_time = jnp.maximum(
+        drift_time_us + delta_x_cm / jnp.maximum(velocity_cm_us, 1e-9),
+        0.0,
+    )
+    corrected_yz = positions_yz_cm + jnp.stack([delta_y_cm, delta_z_cm], axis=-1)
+    return corrected_distance, corrected_time, corrected_yz
+
+
+@jax.jit
 def compute_lifetime_attenuation(drift_distance_cm, drift_velocity_cm_us, electron_lifetime_ms):
     """
     Calculate charge attenuation due to electron lifetime during drift.
