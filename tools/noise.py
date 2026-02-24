@@ -357,6 +357,7 @@ def process_response(response_signals, detector_config, threshold_enc,
         Dictionary mapping (side_idx, plane_idx) -> signal data.
         Dense: jnp.ndarray (num_wires, num_time_steps).
         Bucketed: tuple (buckets, num_active, compact_to_key, B1, B2).
+        Wire-sparse: tuple (active_signals, wire_indices, n_active_wires).
     detector_config : dict
         Detector configuration from generate_detector().
     threshold_enc : float
@@ -383,12 +384,15 @@ def process_response(response_signals, detector_config, threshold_enc,
     threshold_adc = threshold_enc / electrons_per_adc
     num_time_steps = int(detector_config['num_time_steps'])
 
-    # Separate bucketed and dense planes
+    # Separate bucketed, wire-sparse, and dense planes
     bucketed_planes = {}
+    wire_sparse_planes = {}
     dense_planes = {}
     for (si, pi), signal_raw in response_signals.items():
         if isinstance(signal_raw, tuple) and len(signal_raw) == 5:
             bucketed_planes[(si, pi)] = signal_raw
+        elif isinstance(signal_raw, tuple) and len(signal_raw) == 3:
+            wire_sparse_planes[(si, pi)] = signal_raw
         else:
             dense_planes[(si, pi)] = signal_raw
 
@@ -409,9 +413,23 @@ def process_response(response_signals, detector_config, threshold_enc,
 
     for (si, pi), signal_raw in response_signals.items():
         num_wires = int(detector_config['num_wires_actual'][si, pi])
-        is_bucketed = (si, pi) in bucketed_planes
 
-        if is_bucketed:
+        if (si, pi) in wire_sparse_planes:
+            # Wire-sparse 3-tuple from bucketed + electronics
+            active_signals, wire_indices, n_active_wires = signal_raw
+            n = int(n_active_wires)
+
+            # Scatter active wires back to dense
+            dense_signal = np.zeros((num_wires, num_time_steps), dtype=np.float32)
+            wire_idx_np = np.asarray(wire_indices[:n])
+            active_np = np.asarray(active_signals[:n])
+            for i in range(n):
+                dense_signal[int(wire_idx_np[i])] = active_np[i]
+
+            # Noise already applied inside JIT for wire-sparse mode
+            dense_combined = dense_signal
+
+        elif (si, pi) in bucketed_planes:
             buckets, num_active, compact_to_key, B1, B2 = signal_raw
             max_buckets = buckets.shape[0]
 
@@ -430,12 +448,8 @@ def process_response(response_signals, detector_config, threshold_enc,
             else:
                 dense_combined = dense_signal
         else:
-            dense_signal = jnp.asarray(signal_raw)
-
-            if include_noise and (si, pi) in noise_dense:
-                dense_combined = dense_signal + noise_dense[(si, pi)]
-            else:
-                dense_combined = dense_signal
+            dense_signal = np.asarray(signal_raw)
+            dense_combined = dense_signal
 
         # Threshold + partition using numpy (process_response is host-side)
         combined_np = np.asarray(dense_combined)
@@ -457,9 +471,9 @@ def process_response(response_signals, detector_config, threshold_enc,
         signal = surv_sig[has_signal]
 
         result[(si, pi)] = {
-            'indices': jnp.array(indices, dtype=jnp.int32),
-            'values': jnp.array(values, dtype=jnp.float32),
-            'signal': jnp.array(signal, dtype=jnp.float32),
+            'indices': np.asarray(indices, dtype=np.int32),
+            'values': np.asarray(values, dtype=np.float32),
+            'signal': np.asarray(signal, dtype=np.float32),
             'n_signal': n_signal,
             'threshold_adc': float(threshold_adc),
         }
