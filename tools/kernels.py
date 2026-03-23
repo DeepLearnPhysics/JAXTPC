@@ -352,8 +352,8 @@ def interpolate_diffusion_kernel(DKernel, s_observed, w_offset, t_offset,
         values_w_interp = (1 - w_alpha) * values_s_interp_left + w_alpha * values_s_interp_right
 
         # Time interpolation: linear blend between adjacent time bins
-        # This shifts the effective signal position by t_offset bins
-        interpolated = (1 - t_alpha) * values_w_interp[:-1] + t_alpha * values_w_interp[1:]
+        # As t_alpha increases (later arrival), the kernel peak shifts RIGHT (later time)
+        interpolated = t_alpha * values_w_interp[:-1] + (1 - t_alpha) * values_w_interp[1:]
         output_values = output_values.at[wire_idx, :].set(interpolated)
 
     return output_values
@@ -464,8 +464,9 @@ def load_response_kernels(response_path="tools/responses/", num_s=16,
         kernel_height_out = kernel_shape[0] - 1
 
         # time_zero_bin is already in kernel time bins (same as output since kernel is at sim resolution)
-        # Adjust by -1 since interpolation shifts indices
-        time_zero_bin_out = time_zero_bin
+        # Adjust by -1: flipped time interpolation starts from K[1:] at t=0,
+        # so the effective zero bin in the output is one index earlier
+        time_zero_bin_out = time_zero_bin - 1
 
         # Calculate wire_zero_bin in output wire units
         # wire_zero_bin is in kernel bins, convert to output wire position
