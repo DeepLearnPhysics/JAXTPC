@@ -71,6 +71,12 @@ class TrackHitsConfig(NamedTuple):
     inter_thresh: float     # Intermediate pruning threshold per merge iteration
 
 
+class SegmentData(NamedTuple):
+    """Input data for differentiable segment reconstruction."""
+    positions_mm: jnp.ndarray  # (N, 3) - segment positions in mm
+    de: jnp.ndarray            # (N,) - energy deposits in MeV
+
+
 def create_diffusion_params(
     max_sigma_trans_unitless: float,
     max_sigma_long_unitless: float,
@@ -188,6 +194,47 @@ def create_plane_geometry(
         max_wire_idx=int(detector_config['max_wire_indices_abs'][side_idx, plane_idx]),
         num_wires=int(detector_config['num_wires_actual'][side_idx, plane_idx]),
         plane_type=plane_type,
+    )
+
+
+class DigitizationConfig(NamedTuple):
+    """ADC digitization parameters for realistic detector output."""
+    n_bits: int              # ADC resolution (e.g., 12)
+    pedestal_collection: int # Baseline ADC for Y (collection) planes
+    pedestal_induction: int  # Baseline ADC for U/V (induction) planes
+    gain_scale: float        # Gain rescale factor (1.0 = MicroBooNE/SBND)
+
+
+def create_digitization_config(
+    n_bits: int = 12,
+    pedestal_collection: int = 410,
+    pedestal_induction: int = 1843,
+    gain_scale: float = 1.0,
+) -> DigitizationConfig:
+    """
+    Create DigitizationConfig with specified parameters.
+
+    Parameters
+    ----------
+    n_bits : int, optional
+        ADC resolution in bits, by default 12.
+    pedestal_collection : int, optional
+        Baseline ADC value for collection (Y) planes, by default 410.
+    pedestal_induction : int, optional
+        Baseline ADC value for induction (U/V) planes, by default 1843.
+    gain_scale : float, optional
+        Gain rescale factor applied before digitization, by default 1.0.
+
+    Returns
+    -------
+    DigitizationConfig
+        Configured digitization parameters.
+    """
+    return DigitizationConfig(
+        n_bits=n_bits,
+        pedestal_collection=pedestal_collection,
+        pedestal_induction=pedestal_induction,
+        gain_scale=gain_scale,
     )
 
 

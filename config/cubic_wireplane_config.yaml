@@ -57,6 +57,11 @@ wire_planes:
 readout:
   sampling_rate: 2.0  # MHz
   electrons_per_adc: 182  # electrons per ADC count (from MicroBooNE electronics)
+  digitization:
+    n_bits: 12                  # ADC resolution
+    pedestal_collection: 410    # Baseline ADC for Y (collection) planes
+    pedestal_induction: 1843    # Baseline ADC for U/V (induction) planes
+    gain_scale: 1.0             # Gain rescale factor (1.0 = MicroBooNE/SBND calibration)
 
 simulation:
   drift:

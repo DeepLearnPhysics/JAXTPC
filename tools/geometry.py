@@ -294,6 +294,15 @@ def _precalculate_all_parameters(detector_config: Dict[str, Any]) -> Dict[str, A
     # Load electrons per ADC conversion factor (default to MicroBooNE value if not specified)
     params['electrons_per_adc'] = float(detector_config['readout'].get('electrons_per_adc', 182))
 
+    # Parse digitization config
+    dig = detector_config['readout'].get('digitization', {})
+    params['digitization'] = {
+        'n_bits': int(dig.get('n_bits', 12)),
+        'pedestal_collection': int(dig.get('pedestal_collection', 410)),
+        'pedestal_induction': int(dig.get('pedestal_induction', 1843)),
+        'gain_scale': float(dig.get('gain_scale', 1.0)),
+    }
+
     # Wire lengths and noise RMS
     params['wire_lengths_m'] = _calculate_wire_lengths(
         dims_cm, params['angles_rad'], params['wire_spacings_cm'],
