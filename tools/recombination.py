@@ -64,9 +64,13 @@ interchangeability.  The ``e_field_Vcm`` parameter accepts either a scalar
 
 Edge Cases
 ----------
-Both models share the following edge-case handling (matching LArSoft):
-    - dE/dx is clamped to a minimum of 1.0 MeV/cm to prevent the log formula
-      from producing unphysical (negative) survival fractions at very low ionization.
+Both models use a natural extension at low ionization density:
+    - Instead of clamping dE/dx to 1.0 MeV/cm (LArSoft default), the log
+      argument is clamped: R = ln(max(α + ξ, 1)) / ξ.
+    - For α + ξ ≥ 1 (dE/dx above ~0.23 MeV/cm): standard Modified Box result.
+    - For α + ξ < 1 (very low ionization): R = 0, Q = 0 (zero charge).
+    - This is smooth, monotone, and differentiable — suitable for gradient-based
+      optimization while remaining physically sensible (no negative R).
     - dx ≤ 0 returns zero charge (invalid step).
     - Negative dE values are clamped to zero.
 """
@@ -110,8 +114,8 @@ def calculate_modified_box_charge(de, dx, params):
         α = 0.93 (dimensionless)
         β = 0.212 (kV/cm)(g/cm²)/MeV
 
-    Edge case handling (matching LArSoft):
-        - dE/dx is clamped to minimum of 1.0 MeV/cm to prevent formula breakdown
+    Edge case handling:
+        - Natural extension: R = ln(max(α+ξ, 1))/ξ, giving R → 0 at low dE/dx
         - dx <= 0 returns zero charge (no valid step)
 
     References:
@@ -134,19 +138,17 @@ def calculate_modified_box_charge(de, dx, params):
     dx_positive = dx > 0.0
     de_dx_raw = jnp.where(dx_positive, de_safe / jnp.maximum(dx, 1e-10), 0.0)
 
-    # LArSoft clamps dE/dx to minimum of 1.0 MeV/cm
-    # This prevents the Modified Box formula from producing unphysical results
-    # at very low ionization (where the formula gives R < 0)
-    de_dx = jnp.maximum(de_dx_raw, 1.0)
-
-    # Modified Box model: R = ln(alpha + xi) / xi
-    # where xi = beta * dE/dx / (rho * E)
-    # Following LArSoft: Xi = (ModBoxB / density) * dEdx / EField
-    xi = (beta / density) * de_dx / jnp.maximum(field_kVcm, 1e-10)
-
-    # Calculate survival fraction
-    # LArSoft: recomb = log(fModBoxA + Xi) / Xi
-    survival_fraction = jnp.log(alpha + xi) / xi
+    # Natural extension: clamp ln argument instead of dE/dx input.
+    # R = ln(max(α + ξ, 1)) / ξ gives R → 0 smoothly as dE → 0,
+    # instead of the LArSoft dE/dx clamp at 1.0 MeV/cm.
+    xi = (beta / density) * de_dx_raw / jnp.maximum(field_kVcm, 1e-10)
+    ln_arg = jnp.maximum(alpha + xi, 1.0)
+    # Safe denominator: when de=0 there is no ionization, so survival is
+    # irrelevant (initial_charge=0).  Using max(xi, 1e-10) keeps the
+    # backward pass finite — JAX evaluates gradients through both branches
+    # of jnp.where, so the true-branch must not produce NaN at xi=0.
+    safe_xi = jnp.maximum(xi, 1e-10)
+    survival_fraction = jnp.where(xi > 1e-10, jnp.log(ln_arg) / safe_xi, 0.0)
 
     # For dx <= 0, set survival to 0 (no valid step)
     survival_fraction = jnp.where(dx_positive, survival_fraction, 0.0)
@@ -252,9 +254,6 @@ def calculate_emb_charge(de, dx, phi_drift, params):
     dx_positive = dx > 0.0
     de_dx_raw = jnp.where(dx_positive, de_safe / jnp.maximum(dx, 1e-10), 0.0)
 
-    # Clamp dE/dx to minimum of 1.0 MeV/cm (matching LArSoft)
-    de_dx = jnp.maximum(de_dx_raw, 1.0)
-
     # EMB angular correction: effective beta depends on track-to-field angle
     # beta_eff(phi) = beta_90 / sqrt(sin²phi + cos²phi / R²)
     sin_phi = jnp.sin(phi_drift)
@@ -262,9 +261,11 @@ def calculate_emb_charge(de, dx, phi_drift, params):
     angular_factor = jnp.sqrt(sin_phi**2 + cos_phi**2 / (R**2))
     effective_beta = beta_90 / jnp.maximum(angular_factor, 1e-10)
 
-    # Modified Box formula with angular-dependent beta
-    xi = (effective_beta / density) * de_dx / jnp.maximum(field_kVcm, 1e-10)
-    survival_fraction = jnp.log(alpha + xi) / xi
+    # Natural extension: clamp ln argument instead of dE/dx input.
+    xi = (effective_beta / density) * de_dx_raw / jnp.maximum(field_kVcm, 1e-10)
+    ln_arg = jnp.maximum(alpha + xi, 1.0)
+    safe_xi = jnp.maximum(xi, 1e-10)
+    survival_fraction = jnp.where(xi > 1e-10, jnp.log(ln_arg) / safe_xi, 0.0)
 
     # For dx <= 0, set survival to 0 (no valid step)
     survival_fraction = jnp.where(dx_positive, survival_fraction, 0.0)
