@@ -30,9 +30,9 @@ from functools import partial
 # Config classes
 from tools.config import (
     DepositData, DriftParams, TimeParams, PlaneGeometry,
-    DiffusionParams, TrackHitsConfig,
+    DiffusionParams, TrackHitsConfig, SegmentData, DigitizationConfig,
     create_diffusion_params, create_drift_params, create_time_params,
-    create_plane_geometry, create_track_hits_config
+    create_plane_geometry, create_track_hits_config, create_digitization_config
 )
 
 # Core physics modules
@@ -169,8 +169,28 @@ class DetectorSimulator:
         recombination_model=None,
         include_electric_dist=False,
         electric_dist_path=None,
+        include_digitize=False,
+        digitization_config=None,
+        differentiable=False,
+        n_segments=None,
     ):
         print("--- Creating DetectorSimulator ---")
+
+        # Differentiable mode: force compatible flags
+        self.differentiable = differentiable
+        self.n_segments = n_segments
+        if differentiable:
+            if n_segments is None:
+                raise ValueError("differentiable=True requires n_segments to be set")
+            # Set total_pad and response_chunk_size to n_segments internally
+            # (no padding, no fori_loop batching in differentiable mode)
+            total_pad = n_segments
+            response_chunk_size = n_segments
+            use_bucketed = False
+            include_noise = False
+            include_electronics = False
+            include_track_hits = False
+            include_digitize = False
 
         # Store config
         self.detector_config = detector_config
@@ -187,7 +207,7 @@ class DetectorSimulator:
                 f"response_chunk_size ({response_chunk_size:,})."
             )
 
-        # Store ADC conversion factor (response output is in electrons)
+        # ADC conversion factor (used by noise threshold; response kernels already output ADC)
         self.electrons_per_adc = detector_config['electrons_per_adc']
 
         # Create recombination function (captured by JIT closure)
@@ -351,6 +371,22 @@ class DetectorSimulator:
                     B2 = 2 * self.response_kernels[plane_type]['kernel_height']
                     self._bucket_dims[plane_type] = (B1, B2)
 
+        # Digitization config
+        self.include_digitize = include_digitize
+        if include_digitize:
+            if digitization_config is not None:
+                self.digitization_config = digitization_config
+            else:
+                dig = detector_config.get('digitization', {})
+                self.digitization_config = create_digitization_config(
+                    n_bits=int(dig.get('n_bits', 12)),
+                    pedestal_collection=int(dig.get('pedestal_collection', 410)),
+                    pedestal_induction=int(dig.get('pedestal_induction', 1843)),
+                    gain_scale=float(dig.get('gain_scale', 1.0)),
+                )
+        else:
+            self.digitization_config = None
+
         # Output format flag
         if use_bucketed and include_electronics:
             self._output_format = 'wire_sparse'
@@ -385,6 +421,11 @@ class DetectorSimulator:
         if include_electronics:
             print(f"   Electronics response: ENABLED (FFT size={self._electronics_fft_size}, "
                   f"chunk={self.electronics_chunk_size}, output={self._output_format})")
+        if include_digitize:
+            dc = self.digitization_config
+            print(f"   Digitization: ENABLED ({dc.n_bits}-bit, "
+                  f"pedestal Y={dc.pedestal_collection} U/V={dc.pedestal_induction}, "
+                  f"gain={dc.gain_scale})")
         if include_track_hits:
             print(f"   Track labeling: ENABLED")
         else:
@@ -637,6 +678,7 @@ class DetectorSimulator:
         response_chunk_size = self.response_chunk_size
         use_bucketed = self.use_bucketed
         sparse_output = self.sparse_output
+        differentiable_flag = self.differentiable
         if use_bucketed:
             max_buckets = self.max_active_buckets
 
@@ -797,6 +839,73 @@ class DetectorSimulator:
             else:
                 def noise_fn(key, signal, side_idx, plane_idx, num_wires_plane, num_time_steps_plane):
                     return signal
+
+        # Define digitization function based on mode
+        if self.include_digitize:
+            dc = self.digitization_config
+            _dig_gain = float(dc.gain_scale)
+            _dig_adc_max = float((1 << dc.n_bits) - 1)
+            _dig_ped_collection = float(dc.pedestal_collection)
+            _dig_ped_induction = float(dc.pedestal_induction)
+
+            def _digitize_signal(signal, gain_scale, pedestal, adc_max):
+                scaled = signal * gain_scale
+                unsigned = scaled + pedestal
+                unsigned = jnp.round(unsigned)
+                unsigned = jnp.clip(unsigned, 0.0, adc_max)
+                return unsigned - pedestal
+
+            if self.use_bucketed and self.include_electronics:
+                # Wire-sparse: apply to active_signals array in 3-tuple
+                def make_dig_fn_ws(plane_type):
+                    ped = _dig_ped_collection if plane_type == 'Y' else _dig_ped_induction
+                    def fn(signal_tuple):
+                        active_signals, wire_indices, n_active = signal_tuple
+                        return (_digitize_signal(active_signals, _dig_gain, ped, _dig_adc_max),
+                                wire_indices, n_active)
+                    return fn
+
+                dig_fns = {
+                    (s, p): make_dig_fn_ws(plane_names[s][p])
+                    for s in range(2) for p in range(3)
+                }
+                def digitize_fn(sig, side_idx, plane_idx):
+                    return dig_fns[(side_idx, plane_idx)](sig)
+
+            elif self.use_bucketed:
+                # Bucketed: apply to buckets array in 5-tuple
+                def make_dig_fn_bucketed(plane_type):
+                    ped = _dig_ped_collection if plane_type == 'Y' else _dig_ped_induction
+                    def fn(signal_tuple):
+                        buckets, num_active, compact_to_key, b1, b2 = signal_tuple
+                        return (_digitize_signal(buckets, _dig_gain, ped, _dig_adc_max),
+                                num_active, compact_to_key, b1, b2)
+                    return fn
+
+                dig_fns = {
+                    (s, p): make_dig_fn_bucketed(plane_names[s][p])
+                    for s in range(2) for p in range(3)
+                }
+                def digitize_fn(sig, side_idx, plane_idx):
+                    return dig_fns[(side_idx, plane_idx)](sig)
+
+            else:
+                # Dense: apply directly to (W, T) array
+                def make_dig_fn_dense(plane_type):
+                    ped = _dig_ped_collection if plane_type == 'Y' else _dig_ped_induction
+                    def fn(signal):
+                        return _digitize_signal(signal, _dig_gain, ped, _dig_adc_max)
+                    return fn
+
+                dig_fns = {
+                    (s, p): make_dig_fn_dense(plane_names[s][p])
+                    for s in range(2) for p in range(3)
+                }
+                def digitize_fn(sig, side_idx, plane_idx):
+                    return dig_fns[(side_idx, plane_idx)](sig)
+        else:
+            def digitize_fn(sig, side_idx, plane_idx):
+                return sig
 
         # Define track hits function based on mode
         if include_track_hits_flag:
@@ -1050,17 +1159,49 @@ class DetectorSimulator:
                     wire_zero_bin = plane_kernel['wire_zero_bin']
                     time_zero_bin = plane_kernel['time_zero_bin']
 
-                    # Batch count for fori_loop (response_chunk_size is Python int from closure)
-                    max_safe_batches = charges.shape[0] // response_chunk_size  # Python int (static)
-                    n_batches = jnp.minimum(
-                        (n_actual + response_chunk_size - 1) // response_chunk_size,
-                        max_safe_batches
-                    )
+                    if differentiable_flag:
+                        # --- DIFFERENTIABLE PATH (no fori_loop) ---
+                        # Wrapped in jax.remat so only one plane's backward
+                        # intermediates are live at a time (6x memory savings).
+                        @jax.remat
+                        def _plane_response(charges, drift_time_us, closest_wire_idx,
+                                            closest_wire_distances, attenuation_factors,
+                                            valid_mask, s_values):
+                            deposit_data_full = prepare_deposit_vmap_response(
+                                charges, drift_time_us, closest_wire_idx,
+                                closest_wire_distances, attenuation_factors, valid_mask,
+                                spacing_cm, time_step_size_us, min_idx_abs, num_wires_plane
+                            )
+                            wire_idx_rel, wire_offsets, time_idx, time_offsets, intensities = deposit_data_full
 
-                    if use_bucketed:
+                            kernel_contributions = apply_diffusion_response(
+                                DKernel, s_values, wire_offsets, time_offsets,
+                                kernel_wire_stride, kernel_wire_spacing, kernel_num_wires
+                            )
+
+                            return accumulate_response_signals(
+                                wire_idx_rel, time_idx, intensities, kernel_contributions,
+                                num_wires_plane, num_time_steps, kernel_num_wires, kernel_height,
+                                wire_zero_bin, time_zero_bin
+                            )
+
+                        response_signal = _plane_response(
+                            charges, drift_time_us, closest_wire_idx,
+                            closest_wire_distances, attenuation_factors,
+                            valid_mask, s_values
+                        )
+
+                    elif use_bucketed:
                         # --- BUCKETED RESPONSE PATH ---
                         B1 = 2 * kernel_num_wires
                         B2 = 2 * kernel_height
+
+                        # Batch count for fori_loop
+                        max_safe_batches = charges.shape[0] // response_chunk_size
+                        n_batches = jnp.minimum(
+                            (n_actual + response_chunk_size - 1) // response_chunk_size,
+                            max_safe_batches
+                        )
 
                         # Pre-compute wire/time indices for bucket mapping (element-wise, full array)
                         wire_idx_for_mapping = jnp.where(
@@ -1130,7 +1271,13 @@ class DetectorSimulator:
                             )
 
                     else:
-                        # --- DENSE RESPONSE PATH ---
+                        # --- DENSE RESPONSE PATH (batched via fori_loop) ---
+                        max_safe_batches = charges.shape[0] // response_chunk_size
+                        n_batches = jnp.minimum(
+                            (n_actual + response_chunk_size - 1) // response_chunk_size,
+                            max_safe_batches
+                        )
+
                         def response_body_dense(i, signal_accum):
                             start = i * response_chunk_size
                             b_charges    = jax.lax.dynamic_slice(charges,                (start,), (response_chunk_size,))
@@ -1175,6 +1322,9 @@ class DetectorSimulator:
                     plane_keys = jax.random.split(noise_key, 6)
                     plane_key = plane_keys[side_idx * 3 + plane_idx]
                     response_signal = noise_fn(plane_key, response_signal, side_idx, plane_idx, num_wires_plane, num_time_steps)
+
+                    # Apply digitization (quantize + clamp)
+                    response_signal = digitize_fn(response_signal, side_idx, plane_idx)
 
                     response_signals_list.append(response_signal)
 
@@ -1257,6 +1407,87 @@ class DetectorSimulator:
         # Return raw results — call finalize_track_hits() after freeing
         # response_signals from GPU to avoid device memory pressure.
         return response_signals, track_hits
+
+    def build_forward(self, dx_per_de=None, dx_mm=0.5):
+        """Return a differentiable forward function: SegmentData -> tuple of 6 response arrays.
+
+        The returned callable accepts a SegmentData(positions_mm=(N,3), de=(N,))
+        and returns a tuple of 6 arrays (east_U, east_V, east_Y, west_U, west_V, west_Y),
+        each of shape (num_wires, num_time_steps) for the corresponding plane.
+
+        Parameters
+        ----------
+        dx_per_de : array (N,) or None
+            Per-segment ratio dx_truth / dE_truth.  When provided, dx is
+            computed dynamically as ``segments.de * dx_per_de``, preserving
+            each segment's truth dE/dx through recombination regardless of
+            how its learned dE evolves.  When None, falls back to dx_mm.
+        dx_mm : float
+            Fixed segment length in mm for all segments (default 0.5 mm).
+            Only used when dx_per_de is None.
+
+        No padding — arrays are passed at exactly (N, ...) size. The JIT
+        compiles once for a given N and reuses the compilation on subsequent
+        calls with the same N.
+
+        The function is not JIT-compiled — compose ``jax.jit(jax.grad(loss_fn))``
+        yourself to control compilation scope.
+
+        Requires ``differentiable=True`` at construction time.
+        """
+        assert self.differentiable, "build_forward() requires differentiable=True"
+
+        calculator = self._calculator_jit_raw
+        N = self.n_segments
+
+        # Fixed arrays at N size (captured in closure)
+        if dx_per_de is not None:
+            dx_per_de = jnp.asarray(dx_per_de)  # (N,) captured in closure
+            dx_fixed = None
+        else:
+            dx_fixed = jnp.full(N, dx_mm)
+        theta = jnp.zeros(N)                               # Not used by modified_box
+        phi = jnp.zeros(N)                                 # Not used by modified_box
+        track_ids = jnp.zeros(N, dtype=jnp.int32)
+        noise_key = jax.random.PRNGKey(0)                  # Dummy, noise disabled
+        valid = jnp.ones(N, dtype=bool)                    # All entries are real
+
+        # Static geometry args (captured in closure)
+        max_indices = self._max_indices_tuple
+        min_indices = self._min_indices_tuple
+        offsets = self._index_offsets_tuple
+        num_wires = self._num_wires_tuple
+
+        def forward(segments):
+            positions_mm = segments.positions_mm  # (N, 3)
+            de = segments.de                      # (N,)
+
+            # Dynamic dx: preserves per-segment dE/dx from truth
+            if dx_fixed is not None:
+                dx = dx_fixed
+            else:
+                dx = jnp.clip(de * dx_per_de, 0.01, 10.0)  # mm, clamped
+
+            # Side masks directly on the input (no padding)
+            east_valid = valid & (positions_mm[:, 0] < 0)
+            west_valid = valid & (positions_mm[:, 0] >= 0)
+
+            response_tuple, _ = calculator(
+                # East
+                positions_mm, de, dx, east_valid, theta, phi, track_ids,
+                # West
+                positions_mm, de, dx, west_valid, theta, phi, track_ids,
+                noise_key,
+                n_east=N, n_west=N,
+                max_wire_indices_tuple=max_indices,
+                min_wire_indices_tuple=min_indices,
+                index_offsets_tuple=offsets,
+                num_wires_tuple=num_wires,
+                max_tracks=1, max_wires=1, max_time=1, max_keys=1
+            )
+            return response_tuple  # (east_U, east_V, east_Y, west_U, west_V, west_Y)
+
+        return forward
 
     def finalize_track_hits(self, track_hits):
         """
