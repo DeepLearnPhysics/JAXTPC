@@ -68,7 +68,7 @@ from tools.wires import (
 from tools.kernels import load_response_kernels, apply_diffusion_response
 
 # Track labeling system (for hit path)
-from tools.track_hits import group_hits_by_track, label_hits, merge_chunk_hits, label_merged_hits
+from tools.track_hits import group_hits_by_track, label_hits, merge_chunk_hits, label_merged_hits, label_from_groups
 
 # Core modules
 from tools.geometry import generate_detector
@@ -82,6 +82,95 @@ from tools.noise import (
     _get_noise_spectrum_shape,
     _NOISE_X, _NOISE_Y, _NOISE_Z
 )
+
+
+# =============================================================================
+# GROUP ID ASSIGNMENT
+# =============================================================================
+
+def compute_group_ids(positions_mm, track_ids, valid_mask,
+                      group_size=5, gap_threshold_mm=5.0):
+    """
+    Assign group IDs for segment correspondence: N consecutive deposits per track.
+
+    Groups are split on large spatial gaps (neutrons/gammas) to avoid
+    grouping physically distant deposits. Uses vectorized numpy with
+    stable sort to preserve trajectory ordering within each track.
+
+    Parameters
+    ----------
+    positions_mm : np.ndarray, shape (N, 3)
+        Deposit positions in mm.
+    track_ids : np.ndarray, shape (N,), int32
+        Track ID per deposit.
+    valid_mask : np.ndarray, shape (N,), bool
+        True for real deposits.
+    group_size : int
+        Number of consecutive deposits per group.
+    gap_threshold_mm : float
+        Start a new group if consecutive deposits in the same track
+        are farther than this (handles neutrons/gammas).
+
+    Returns
+    -------
+    group_ids : np.ndarray, shape (N,), int32
+        Group ID for each deposit. Invalid/padded deposits get 0.
+    group_to_track : np.ndarray, shape (n_groups,), int32
+        Track ID for each group. Index 0 = invalid group.
+    n_groups : int
+        Total number of groups (including the invalid group 0).
+    """
+    n = len(track_ids)
+    group_ids = np.zeros(n, dtype=np.int32)
+
+    valid_idx = np.where(valid_mask)[0]
+    if len(valid_idx) == 0:
+        return group_ids, np.array([0], dtype=np.int32), 1
+
+    v_tids = track_ids[valid_idx]
+    v_pos = positions_mm[valid_idx]
+
+    # Stable sort by track_id preserves array (trajectory) order within each track
+    sort_order = np.argsort(v_tids, kind='stable')
+    sorted_idx = valid_idx[sort_order]
+    sorted_tids = v_tids[sort_order]
+    sorted_pos = v_pos[sort_order]
+    nv = len(sorted_idx)
+
+    # Track boundaries
+    track_change = np.zeros(nv, dtype=bool)
+    track_change[1:] = sorted_tids[1:] != sorted_tids[:-1]
+
+    # Spatial gap boundaries (within same track)
+    gaps = np.zeros(nv)
+    gaps[1:] = np.linalg.norm(sorted_pos[1:] - sorted_pos[:-1], axis=1)
+    gap_break = gaps > gap_threshold_mm
+
+    # Contiguous segment starts: track change or spatial gap
+    seg_start = track_change | gap_break
+    seg_start[0] = True
+
+    # Within-segment position via forward-filled segment start indices
+    seg_start_positions = np.where(seg_start, np.arange(nv), 0)
+    seg_start_positions = np.maximum.accumulate(seg_start_positions)
+    within_seg = np.arange(nv) - seg_start_positions
+
+    # Group boundaries: segment start or every N deposits within a segment
+    group_start = seg_start.copy()
+    group_start |= (within_seg % group_size == 0) & (within_seg > 0)
+
+    # Consecutive group IDs (1-based; 0 reserved for invalid)
+    group_labels = np.cumsum(group_start)
+
+    # Write back to original deposit positions
+    group_ids[sorted_idx] = group_labels
+
+    # Build group_to_track lookup
+    n_groups = int(group_labels.max()) + 1
+    g2t = np.zeros(n_groups, dtype=np.int32)
+    g2t[group_labels] = sorted_tids
+
+    return group_ids, g2t, n_groups
 
 
 # =============================================================================
@@ -142,13 +231,12 @@ class DetectorSimulator:
         See ``tools.recombination`` for full model documentation.
     include_electric_dist : bool
         If True, load space charge effect (SCE) maps from the default
-        HDF5 file (``sce_jaxtpc.h5`` in the project root) and apply
-        E-field distortions and drift corrections during simulation.
-        Default False.
+        HDF5 file (``config/sce_jaxtpc.h5``) and apply E-field distortions
+        and drift corrections during simulation.  Default False.
     electric_dist_path : str, optional
         Path to the per-side SCE HDF5 file.  Only used when
-        ``include_electric_dist=True``.  Defaults to ``sce_jaxtpc.h5``
-        in the project root.
+        ``include_electric_dist=True``.  Defaults to
+        ``config/sce_jaxtpc.h5``.
     """
 
     def __init__(
@@ -173,12 +261,16 @@ class DetectorSimulator:
         digitization_config=None,
         differentiable=False,
         n_segments=None,
+        group_size=5,
+        gap_threshold_mm=5.0,
     ):
         print("--- Creating DetectorSimulator ---")
 
         # Differentiable mode: force compatible flags
         self.differentiable = differentiable
         self.n_segments = n_segments
+        self.group_size = group_size
+        self.gap_threshold_mm = gap_threshold_mm
         if differentiable:
             if n_segments is None:
                 raise ValueError("differentiable=True requires n_segments to be set")
@@ -218,10 +310,10 @@ class DetectorSimulator:
         # Space charge effect (electric field distortions)
         self.include_electric_dist = include_electric_dist
         if include_electric_dist:
-            from convert_sce_maps import load_sce_interpolation_fns
+            from tools.efield_distortions import load_sce_interpolation_fns
             if electric_dist_path is None:
                 electric_dist_path = os.path.join(
-                    os.path.dirname(os.path.dirname(__file__)), 'sce_jaxtpc.h5'
+                    os.path.dirname(os.path.dirname(__file__)), 'config', 'sce_jaxtpc.h5'
                 )
             print(f"   Loading SCE maps from {electric_dist_path}...")
             sce_efield_fn, sce_drift_correction_fn = load_sce_interpolation_fns(
@@ -427,7 +519,8 @@ class DetectorSimulator:
                   f"pedestal Y={dc.pedestal_collection} U/V={dc.pedestal_induction}, "
                   f"gain={dc.gain_scale})")
         if include_track_hits:
-            print(f"   Track labeling: ENABLED")
+            print(f"   Track labeling: ENABLED (group_size={self.group_size}, "
+                  f"gap_threshold={self.gap_threshold_mm}mm)")
         else:
             print(f"   Track labeling: DISABLED")
         print("--- DetectorSimulator Ready ---")
@@ -492,6 +585,18 @@ class DetectorSimulator:
         print(f"   East side: {n_east:,} hits (pad {self.total_pad:,})")
         print(f"   West side: {n_west:,} hits (pad {self.total_pad:,})")
 
+        # Compute group IDs for segment correspondence (before split)
+        if self.include_track_hits:
+            all_group_ids, group_to_track, n_groups = compute_group_ids(
+                positions_mm, track_ids, valid_mask,
+                group_size=self.group_size,
+                gap_threshold_mm=self.gap_threshold_mm,
+            )
+        else:
+            all_group_ids = np.zeros(len(track_ids), dtype=np.int32)
+            group_to_track = np.array([0], dtype=np.int32)
+            n_groups = 1
+
         # Extract and pad each side (numpy), convert to JAX at the end
         east_data = self._extract_and_pad(
             positions_mm, de, dx, theta, phi, track_ids,
@@ -502,10 +607,24 @@ class DetectorSimulator:
             west_mask, min(n_west, self.total_pad), self.total_pad
         )
 
+        # Extract and pad group_ids per side
+        east_gids = self._extract_and_pad_array(
+            all_group_ids, east_mask, min(n_east, self.total_pad), self.total_pad, pad_val=0
+        )
+        west_gids = self._extract_and_pad_array(
+            all_group_ids, west_mask, min(n_west, self.total_pad), self.total_pad, pad_val=0
+        )
+
         counts = {'n_east': min(n_east, self.total_pad),
                   'n_west': min(n_west, self.total_pad),
                   'n_tracks': n_tracks}
-        return east_data, west_data, counts
+        group_data = {
+            'east_group_ids': jnp.asarray(east_gids),
+            'west_group_ids': jnp.asarray(west_gids),
+            'group_to_track': group_to_track,
+            'n_groups': n_groups,
+        }
+        return east_data, west_data, counts, group_data
 
     def _extract_and_pad(self, positions_mm, de, dx, theta, phi, track_ids,
                          mask, n_valid, pad_size):
@@ -553,6 +672,15 @@ class DetectorSimulator:
             phi=jnp.asarray(ph),
             track_ids=jnp.asarray(tid),
         )
+
+    @staticmethod
+    def _extract_and_pad_array(arr, mask, n_valid, pad_size, pad_val=0):
+        """Extract masked 1D array and pad to target size (numpy)."""
+        extracted = arr[mask][:n_valid]
+        pad_width = pad_size - n_valid
+        if pad_width > 0:
+            return np.pad(extracted, (0, pad_width), constant_values=pad_val)
+        return extracted[:pad_size]
 
     def _validate_pre_simulation(self, counts):
         """Check inputs before running simulation."""
@@ -912,7 +1040,7 @@ class DetectorSimulator:
             def track_hits_fn(track_hits_list,
                               charges, drift_time_us, drift_distance_cm,
                               closest_wire_idx, closest_wire_distances,
-                              attenuation_factors, valid_mask, track_ids,
+                              attenuation_factors, valid_mask, group_ids,
                               theta, phi, angle_rad,
                               spacing_cm, min_idx_abs, num_wires_plane,
                               n_actual):
@@ -937,7 +1065,7 @@ class DetectorSimulator:
                 )
 
                 def body(i, state):
-                    s_pk, s_tr, s_ch, s_count = state
+                    s_pk, s_gid, s_ch, s_count, s_rowsums = state
                     start = i * hits_chunk_size
 
                     # Slice chunk from pre-computed arrays
@@ -951,7 +1079,7 @@ class DetectorSimulator:
                     c_theta_y = jax.lax.dynamic_slice(theta_y, (start,), (hits_chunk_size,))
                     c_ang_scale = jax.lax.dynamic_slice(angular_scaling_factor, (start,), (hits_chunk_size,))
                     c_valid = jax.lax.dynamic_slice(valid_mask, (start,), (hits_chunk_size,))
-                    c_tids = jax.lax.dynamic_slice(track_ids, (start,), (hits_chunk_size,))
+                    c_gids = jax.lax.dynamic_slice(group_ids, (start,), (hits_chunk_size,))
 
                     # Diffusion expansion via vmap
                     wire_rel, time_idx, sig_val = prepare_deposit_vmap_hit(
@@ -964,52 +1092,60 @@ class DetectorSimulator:
                         num_time_steps
                     )
 
+                    # Per-deposit row_sum: total diffused charge above threshold
+                    chunk_rowsums = jnp.sum(
+                        jnp.where(sig_val > track_inter_thresh, sig_val, 0.0),
+                        axis=1,
+                    )
+                    s_rowsums = jax.lax.dynamic_update_slice(
+                        s_rowsums, chunk_rowsums, (start,)
+                    )
+
                     # Flatten + encode pixel_key
                     wire_abs = wire_rel + min_idx_abs
-                    tid_exp = jnp.repeat(c_tids[:, jnp.newaxis], K_total, axis=1)
+                    gid_exp = jnp.repeat(c_gids[:, jnp.newaxis], K_total, axis=1)
 
                     w_flat = wire_abs.reshape(exp_size).astype(jnp.int32)
                     t_flat = time_idx.reshape(exp_size).astype(jnp.int32)
-                    tr_flat = tid_exp.reshape(exp_size).astype(jnp.int32)
+                    gid_flat = gid_exp.reshape(exp_size).astype(jnp.int32)
                     ch_flat = sig_val.reshape(exp_size)
 
                     chunk_pk = w_flat * max_time + t_flat
                     chunk_valid = ch_flat > 0.0
                     chunk_pk = jnp.where(chunk_valid, chunk_pk, SENTINEL_PK)
-                    chunk_tr = jnp.where(chunk_valid, tr_flat, jnp.int32(0))
+                    chunk_gid = jnp.where(chunk_valid, gid_flat, jnp.int32(0))
                     chunk_ch = jnp.where(chunk_valid, ch_flat, 0.0).astype(jnp.float32)
 
-                    # Merge with running state
-                    new_pk, new_tr, new_ch, new_count = merge_chunk_hits(
-                        s_pk, s_tr, s_ch,
-                        chunk_pk, chunk_tr, chunk_ch,
+                    # Merge with running state (groups by (pixel, group_id))
+                    new_pk, new_gid, new_ch, new_count = merge_chunk_hits(
+                        s_pk, s_gid, s_ch,
+                        chunk_pk, chunk_gid, chunk_ch,
                         track_inter_thresh
                     )
 
-                    return (new_pk, new_tr, new_ch, new_count)
+                    return (new_pk, new_gid, new_ch, new_count, s_rowsums)
 
                 init_state = (
                     jnp.full(max_keys, SENTINEL_PK, dtype=jnp.int32),
                     jnp.zeros(max_keys, dtype=jnp.int32),
                     jnp.zeros(max_keys, dtype=jnp.float32),
                     jnp.int32(0),
+                    jnp.zeros(charges.shape[0], dtype=jnp.float32),
                 )
 
-                final_pk, final_tr, final_ch, final_count = jax.lax.fori_loop(
+                final_pk, final_gid, final_ch, final_count, final_rowsums = jax.lax.fori_loop(
                     0, num_chunks, body, init_state
                 )
 
-                result = label_merged_hits(
-                    final_pk, final_tr, final_ch, final_count,
-                    track_threshold, max_time
+                # Return raw merge state — label_from_groups runs outside JIT
+                track_hits_list.append(
+                    (final_pk, final_gid, final_ch, final_count, final_rowsums)
                 )
-
-                track_hits_list.append(result)
         else:
             def track_hits_fn(track_hits_list,
                               charges, drift_time_us, drift_distance_cm,
                               closest_wire_idx, closest_wire_distances,
-                              attenuation_factors, valid_mask, track_ids,
+                              attenuation_factors, valid_mask, group_ids,
                               theta, phi, angle_rad,
                               spacing_cm, min_idx_abs, num_wires_plane,
                               n_actual):
@@ -1023,10 +1159,10 @@ class DetectorSimulator:
         def _calculate_signals_jit(
             # East side inputs (side 0, x < 0)
             east_positions_mm, east_de, east_dx, east_valid_mask,
-            east_theta, east_phi, east_track_ids,
+            east_theta, east_phi, east_track_ids, east_group_ids,
             # West side inputs (side 1, x >= 0)
             west_positions_mm, west_de, west_dx, west_valid_mask,
-            west_theta, west_phi, west_track_ids,
+            west_theta, west_phi, west_track_ids, west_group_ids,
             # Noise key
             noise_key,
             # Actual deposit counts (traced, not static)
@@ -1058,6 +1194,7 @@ class DetectorSimulator:
                     theta = east_theta
                     phi = east_phi
                     track_ids = east_track_ids
+                    group_ids = east_group_ids
                     n_actual = n_east
                 else:  # West (x >= 0)
                     positions_mm = west_positions_mm
@@ -1067,6 +1204,7 @@ class DetectorSimulator:
                     theta = west_theta
                     phi = west_phi
                     track_ids = west_track_ids
+                    group_ids = west_group_ids
                     n_actual = n_west
 
                 # Convert units: mm → cm
@@ -1136,7 +1274,7 @@ class DetectorSimulator:
                         track_hits_list,
                         charges, drift_time_us, drift_distance_cm,
                         closest_wire_idx, closest_wire_distances,
-                        attenuation_factors, valid_mask, track_ids,
+                        attenuation_factors, valid_mask, group_ids,
                         theta, phi, angle_rad,
                         spacing_cm, min_idx_abs, num_wires_plane,
                         n_actual
@@ -1360,7 +1498,7 @@ class DetectorSimulator:
         """
         # Split and pad data by side
         print("   Splitting and padding data by side...")
-        east_data, west_data, counts = self._split_and_pad_data(deposit_data)
+        east_data, west_data, counts, group_data = self._split_and_pad_data(deposit_data)
 
         # Pre-simulation validation
         self._validate_pre_simulation(counts)
@@ -1368,14 +1506,18 @@ class DetectorSimulator:
         # Noise key (used even when noise is disabled - identity function ignores it)
         noise_key = key if key is not None else jax.random.PRNGKey(0)
 
+        # Group IDs (zeros when track_hits disabled)
+        east_group_ids = group_data['east_group_ids']
+        west_group_ids = group_data['west_group_ids']
+
         # Call JIT-compiled calculator (single compilation for all events)
         response_tuple, track_hits_tuple = self._calculator_jit_raw(
             # East data (always shape (total_pad, ...))
             east_data.positions_mm, east_data.de, east_data.dx, east_data.valid_mask,
-            east_data.theta, east_data.phi, east_data.track_ids,
+            east_data.theta, east_data.phi, east_data.track_ids, east_group_ids,
             # West data (always shape (total_pad, ...))
             west_data.positions_mm, west_data.de, west_data.dx, west_data.valid_mask,
-            west_data.theta, west_data.phi, west_data.track_ids,
+            west_data.theta, west_data.phi, west_data.track_ids, west_group_ids,
             # Noise key
             noise_key,
             # Actual deposit counts (traced — dynamic batch count derived from these)
@@ -1397,12 +1539,18 @@ class DetectorSimulator:
         track_hits = {}
 
         idx = 0
+        g2t = group_data['group_to_track']
         for side_idx in range(2):
             for plane_idx in range(3):
                 response_signals[(side_idx, plane_idx)] = response_tuple[idx]
                 if self.include_track_hits:
-                    track_hits[(side_idx, plane_idx)] = track_hits_tuple[idx]
+                    # Raw state from JIT: (pk, gid, ch, count, row_sums)
+                    raw = track_hits_tuple[idx]
+                    track_hits[(side_idx, plane_idx)] = raw
                 idx += 1
+
+        # Store group_data for postprocessing access
+        self._last_group_data = group_data
 
         # Return raw results — call finalize_track_hits() after freeing
         # response_signals from GPU to avoid device memory pressure.
@@ -1449,6 +1597,7 @@ class DetectorSimulator:
         theta = jnp.zeros(N)                               # Not used by modified_box
         phi = jnp.zeros(N)                                 # Not used by modified_box
         track_ids = jnp.zeros(N, dtype=jnp.int32)
+        group_ids_dummy = jnp.zeros(N, dtype=jnp.int32)   # Dummy, track_hits disabled
         noise_key = jax.random.PRNGKey(0)                  # Dummy, noise disabled
         valid = jnp.ones(N, dtype=bool)                    # All entries are real
 
@@ -1474,9 +1623,9 @@ class DetectorSimulator:
 
             response_tuple, _ = calculator(
                 # East
-                positions_mm, de, dx, east_valid, theta, phi, track_ids,
+                positions_mm, de, dx, east_valid, theta, phi, track_ids, group_ids_dummy,
                 # West
-                positions_mm, de, dx, west_valid, theta, phi, track_ids,
+                positions_mm, de, dx, west_valid, theta, phi, track_ids, group_ids_dummy,
                 noise_key,
                 n_east=N, n_west=N,
                 max_wire_indices_tuple=max_indices,
@@ -1491,7 +1640,11 @@ class DetectorSimulator:
 
     def finalize_track_hits(self, track_hits):
         """
-        Post-process track hits: extract valid portions and validate.
+        Post-process track hits: derive track labels from group merge state.
+
+        Applies label_from_groups to each plane's raw (pk, gid, ch, count, row_sums)
+        tuple, producing the standard track_hits dict format with labeled_hits,
+        hits_by_track, and group_correspondence.
 
         Call this after moving response_signals off GPU (e.g. via np.asarray)
         to avoid device memory pressure from the int() sync calls.
@@ -1499,26 +1652,36 @@ class DetectorSimulator:
         Parameters
         ----------
         track_hits : dict
-            Raw track hits from process_event().
+            Raw track hits from process_event(). Each value is a 5-tuple
+            (pk, gid, ch, count, row_sums) from the JIT fori_loop.
 
         Returns
         -------
         track_hits : dict
-            Track hits with arrays sliced to valid lengths.
+            Track hits with labeled_hits, hits_by_track, group_correspondence.
         """
-        for plane_key, track_result in track_hits.items():
-            num_hits = track_result['num_hits']
-            num_labeled = track_result['num_labeled']
+        g2t = self._last_group_data['group_to_track']
+        max_time = self._max_time
 
-            track_result['hits_by_track'] = track_result['hits_by_track'][:num_hits]
-            track_result['labeled_hits'] = track_result['labeled_hits'][:num_labeled]
+        for plane_key, raw in track_hits.items():
+            pk, gid, ch, count, row_sums = raw
+            result = label_from_groups(
+                pk, gid, ch, count, g2t, max_time
+            )
+            result['row_sums'] = row_sums
+            track_hits[plane_key] = result
 
-        # Validate after slicing (int() calls already happened above)
+        # Validate: check for group merge overflow
         if self.track_config is not None:
             for plane_key, th in track_hits.items():
-                actual_hits = int(th['num_hits'])
-                if actual_hits >= self.track_config.max_keys:
-                    print(f"ERROR: Plane {plane_key}: num_hits ({actual_hits:,}) >= max_keys ({self.track_config.max_keys:,}). Data truncated!")
+                gp = th.get('group_correspondence')
+                if gp is not None:
+                    count_val = int(gp[-1])
+                    if count_val >= self.track_config.max_keys:
+                        print(f"ERROR: Plane {plane_key}: group merge count ({count_val:,}) >= "
+                              f"max_keys ({self.track_config.max_keys:,}). "
+                              f"Segment correspondence data TRUNCATED! "
+                              f"Increase max_keys or reduce event size.")
 
         return track_hits
 
@@ -1538,12 +1701,14 @@ class DetectorSimulator:
             track_ids=jnp.zeros((pad,), dtype=jnp.int32)
         )
 
+        dummy_group_ids = jnp.zeros((pad,), dtype=jnp.int32)
+
         # Call directly to avoid split/pad logic
         _ = self._calculator_jit_raw(
             dummy.positions_mm, dummy.de, dummy.dx, dummy.valid_mask,
-            dummy.theta, dummy.phi, dummy.track_ids,
+            dummy.theta, dummy.phi, dummy.track_ids, dummy_group_ids,
             dummy.positions_mm, dummy.de, dummy.dx, dummy.valid_mask,
-            dummy.theta, dummy.phi, dummy.track_ids,
+            dummy.theta, dummy.phi, dummy.track_ids, dummy_group_ids,
             jax.random.PRNGKey(0),
             n_east=0,
             n_west=0,

@@ -388,6 +388,181 @@ def label_merged_hits(state_pk, state_tr, state_ch, state_count,
     }
 
 
+def label_from_groups(state_pk, state_gid, state_ch, state_count,
+                      group_to_track, max_time, threshold=0.0):
+    """
+    Derive track hits from group merge state (postprocessing, outside JIT).
+
+    The group merge state contains (pixel_key, group_id, charge) entries
+    from merge_chunk_hits called with group_id as the grouping key.
+    All entries already passed inter_thresh during the merge.
+
+    This function maps groups → tracks, aggregates per (pixel, track),
+    and finds the dominant track per pixel. An optional threshold filters
+    the per-track totals (e.g., to match the response path's noise floor).
+
+    Parameters
+    ----------
+    state_pk : jnp.ndarray, shape (max_keys,), int32
+        Final pixel keys (wire * max_time + time).
+    state_gid : jnp.ndarray, shape (max_keys,), int32
+        Final group IDs.
+    state_ch : jnp.ndarray, shape (max_keys,), float32
+        Final charges per (pixel, group).
+    state_count : jnp.int32
+        Number of valid entries.
+    group_to_track : jnp.ndarray, shape (n_groups_padded,), int32
+        Lookup: group_to_track[group_id] = track_id.
+    max_time : int
+        Time dimension for decoding pixel_key.
+    threshold : float, optional
+        If > 0, filter per-(pixel, track) totals below this value.
+        Applied AFTER track aggregation, not to individual group entries.
+        Default 0.0 (no filtering — use inter_thresh from the merge).
+
+    Returns
+    -------
+    dict with:
+        labeled_hits : jnp.ndarray, shape (M, 4)
+            [track_id, wire, time, charge] per unique pixel (dominant track).
+        num_labeled : int
+            Number of labeled pixels.
+        hits_by_track : jnp.ndarray, shape (N, 3)
+            [wire, time, charge] per valid (pixel, track) entry.
+        num_hits : int
+            Number of valid (pixel, track) entries after threshold.
+        group_correspondence : tuple
+            (state_pk[:count], state_gid[:count], state_ch[:count], state_count)
+            Raw group merge state for segment-level queries.
+    """
+    import numpy as np
+
+    count = int(state_count)
+    pks = np.asarray(state_pk[:count])
+    gids = np.asarray(state_gid[:count])
+    chs = np.asarray(state_ch[:count])
+    g2t = np.asarray(group_to_track)
+
+    # Map group → track
+    tids = g2t[gids]
+
+    # Decode pixel keys
+    wires = pks // max_time
+    times = pks % max_time
+    n_valid = len(pks)
+
+    if n_valid == 0:
+        empty3 = np.zeros((0, 3), dtype=np.float32)
+        return {
+            'labeled_hits': empty3,
+            'labeled_track_ids': np.zeros((0,), dtype=np.int32),
+            'num_labeled': 0,
+            'hits_by_track': empty3,
+            'num_hits': 0,
+            'group_correspondence': (state_pk[:count], state_gid[:count],
+                                 state_ch[:count], count),
+        }
+
+    # Aggregate by (pixel, track): sum group charges per track at each pixel
+    # (no threshold here — group entries already passed inter_thresh during merge)
+    # Two-pass stable sort: by track (secondary), then pixel (primary)
+    order1 = np.argsort(tids, kind='stable')
+    order2 = np.argsort(pks[order1], kind='stable')
+    order = order1[order2]
+    s_pks = pks[order]
+    s_tids = tids[order]
+    s_chs = chs[order]
+    s_wires = wires[order]
+    s_times = times[order]
+
+    # (pixel, track) boundaries
+    pt_boundary = np.ones(n_valid, dtype=bool)
+    pt_boundary[1:] = (s_pks[1:] != s_pks[:-1]) | (s_tids[1:] != s_tids[:-1])
+    pt_starts = np.where(pt_boundary)[0]
+    n_pt = len(pt_starts)
+
+    # Sum charges within each (pixel, track) group (vectorized)
+    pt_charges = np.add.reduceat(s_chs, pt_starts)
+    pt_wires = s_wires[pt_starts]
+    pt_times = s_times[pt_starts]
+    pt_tracks = s_tids[pt_starts]
+    pt_pks = s_pks[pt_starts]
+
+    # Optional output threshold — applied to per-track totals (not per-group).
+    # Group entries already passed inter_thresh during the merge.
+    if threshold > 0:
+        keep = pt_charges > threshold
+        pt_charges = pt_charges[keep]
+        pt_wires = pt_wires[keep]
+        pt_times = pt_times[keep]
+        pt_tracks = pt_tracks[keep]
+        pt_pks = pt_pks[keep]
+        n_pt = len(pt_charges)
+
+    if n_pt == 0:
+        empty3 = np.zeros((0, 3), dtype=np.float32)
+        return {
+            'labeled_hits': empty3,
+            'labeled_track_ids': np.zeros((0,), dtype=np.int32),
+            'num_labeled': 0,
+            'hits_by_track': empty3,
+            'num_hits': 0,
+            'group_correspondence': (state_pk[:count], state_gid[:count],
+                                 state_ch[:count], count),
+        }
+
+    # hits_by_track: one entry per (pixel, track)
+    hits_by_track = np.stack([pt_wires, pt_times, pt_charges], axis=1).astype(np.float32)
+
+    # Find dominant track per pixel
+    # Pixel boundaries in the (pixel, track) sorted array
+    px_boundary = np.ones(n_pt, dtype=bool)
+    px_boundary[1:] = pt_pks[1:] != pt_pks[:-1]
+    px_starts_px = np.where(px_boundary)[0]
+    n_pixels = len(px_starts_px)
+
+    # Dominant track per pixel: max charge within each pixel group (vectorized)
+    # Use reduceat to find max, then locate the max position
+    max_charges = np.maximum.reduceat(pt_charges, px_starts_px)
+    # For each entry, check if it's the first max in its pixel group
+    px_ids = np.zeros(n_pt, dtype=np.int64)
+    px_ids[px_starts_px] = 1
+    px_ids = np.cumsum(px_ids) - 1
+    is_max = pt_charges >= max_charges[px_ids]
+    # First max per pixel: scan forward, take first match in each group
+    winner_idx = np.full(n_pixels, 0, dtype=np.int64)
+    winner_idx[px_ids[is_max]] = np.where(is_max)[0]
+    # Fix: take the FIRST max per group (the above overwrites, so last wins)
+    # Instead: iterate only over max entries (much fewer than n_pt)
+    max_positions = np.where(is_max)[0]
+    # Reset, then assign first seen per pixel
+    winner_idx[:] = max_positions[0]  # default
+    seen = np.zeros(n_pixels, dtype=bool)
+    for pos in max_positions:
+        pid = px_ids[pos]
+        if not seen[pid]:
+            winner_idx[pid] = pos
+            seen[pid] = True
+
+    # Separate arrays: int32 for IDs, float32 for coordinates/charges
+    labeled_hits = np.stack([
+        pt_wires[winner_idx],
+        pt_times[winner_idx],
+        pt_charges[winner_idx],
+    ], axis=1).astype(np.float32)
+    labeled_track_ids = pt_tracks[winner_idx].astype(np.int32)
+
+    return {
+        'labeled_hits': labeled_hits,
+        'labeled_track_ids': labeled_track_ids,
+        'num_labeled': n_pixels,
+        'hits_by_track': hits_by_track,
+        'num_hits': n_pt,
+        'group_correspondence': (state_pk[:count], state_gid[:count],
+                             state_ch[:count], count),
+    }
+
+
 def sparse_hits_to_dense(track_hit_result, num_wires, num_time_steps, min_wire_idx=0):
     """
     Convert sparse track hits to dense 2D array.
