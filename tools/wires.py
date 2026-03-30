@@ -41,94 +41,24 @@ def compute_wire_distances(
 
     Returns
     -------
-    closest_indices_abs : jnp.ndarray
-        Array of shape (n_hits,) containing the absolute indices of the closest wires.
-    closest_wire_distances : jnp.ndarray
+    closest_wire_idx : jnp.ndarray
+        Array of shape (n_hits,) containing the wire index of the closest wire.
+    closest_wire_dist : jnp.ndarray
         Array of shape (n_hits,) containing the distances to the closest wires in cm.
     """
     cos_theta = jnp.cos(angle_rad)
     sin_theta = jnp.sin(angle_rad)
 
-    # Extract y and z components from positions
-    P_y_cm = positions_yz_centered_cm[:, 0]  # Shape: (n_hits,)
-    P_z_cm = positions_yz_centered_cm[:, 1]  # Shape: (n_hits,)
+    P_y_cm = positions_yz_centered_cm[:, 0]
+    P_z_cm = positions_yz_centered_cm[:, 1]
 
-    # Calculate r_prime (the wire coordinate) for all positions
-    r_prime = P_y_cm * sin_theta + P_z_cm * cos_theta  # Shape: (n_hits,)
-
-    # Calculate index and distance to closest wire using round()
-    # This correctly handles all cases including r_prime exactly on a wire
-    closest_idx_rel = jnp.round(r_prime / wire_spacing_cm)  # Shape: (n_hits,)
-    closest_wire_distances = r_prime - closest_idx_rel * wire_spacing_cm  # Shape: (n_hits,)
-
-    closest_indices_abs = closest_idx_rel.astype(jnp.int32) + index_offset   # Shape: (n_hits,)
-
-    return closest_indices_abs, closest_wire_distances
-
-
-@partial(jax.jit, static_argnums=(3,))
-def calculate_k_nearest_wires(positions_yz_cm, angle_rad, wire_spacing_cm,
-                              K, max_wire_idx_abs, index_offset):
-    """
-    Calculate K nearest wire indices and distances for each hit in a detector plane.
-
-    Parameters
-    ----------
-    positions_yz_cm : jnp.ndarray
-        Array of shape (n_hits, 2) containing the (y, z) positions in cm.
-    angle_rad : float
-        Wire angle in radians, measured in the YZ plane.
-    wire_spacing_cm : float
-        Spacing between wires in cm.
-    K : int
-        Number of nearest wires to find.
-    max_wire_idx_abs : int
-        Maximum absolute wire index.
-    index_offset : int
-        Wire index offset.
-
-    Returns
-    -------
-    wire_indices : jnp.ndarray
-        Array of shape (n_hits, K) containing the indices of the K nearest wires.
-    wire_distances : jnp.ndarray
-        Array of shape (n_hits, K) containing the distances to K nearest wires.
-    """
-    cos_theta = jnp.cos(angle_rad)
-    sin_theta = jnp.sin(angle_rad)
-
-    # Extract y and z components
-    P_y_cm = positions_yz_cm[:, 0]
-    P_z_cm = positions_yz_cm[:, 1]
-
-    # Calculate r_prime (the wire coordinate) for all positions
     r_prime = P_y_cm * sin_theta + P_z_cm * cos_theta
 
-    # Find the closest wire index
-    closest_idx_rel = jnp.round(r_prime / wire_spacing_cm).astype(jnp.int32)
-    closest_idx_abs = closest_idx_rel + index_offset
+    idx_offset_rel = jnp.round(r_prime / wire_spacing_cm)
+    closest_wire_dist = r_prime - idx_offset_rel * wire_spacing_cm
+    closest_wire_idx = idx_offset_rel.astype(jnp.int32) + index_offset
 
-    # Calculate how many wires to take on each side
-    half_k = (K - 1) // 2
-
-    # Create offsets array
-    offsets = jnp.arange(-half_k, K - half_k)
-
-    # Calculate indices for K nearest wires using broadcasting
-    # Shape: (n_hits, 1) + (K,) -> (n_hits, K)
-    wire_indices = closest_idx_abs[:, jnp.newaxis] + offsets
-
-    # Calculate distances for each wire
-    # Shape: (n_hits, 1) - (n_hits, K) * scalar -> (n_hits, K)
-    wire_r_values = (wire_indices - index_offset) * wire_spacing_cm
-    wire_distances = r_prime[:, jnp.newaxis] - wire_r_values
-
-    # Replace out-of-bounds indices with -1
-    valid_mask = (wire_indices >= 0) & (wire_indices <= max_wire_idx_abs)
-    wire_indices = jnp.where(valid_mask, wire_indices, -1)
-    wire_distances = jnp.where(valid_mask, wire_distances, jnp.nan)
-
-    return wire_indices, wire_distances
+    return closest_wire_idx, closest_wire_dist
 
 
 @jax.jit
@@ -285,7 +215,8 @@ def compute_gaussian_diffusion(
 
 @jax.jit
 def compute_transverse_diffusion(
-    wire_distance_cm, drift_time_us, transverse_diffusion_cm2_us
+    wire_distance_cm, drift_time_us, transverse_diffusion_cm2_us,
+    min_sigma=1e-4
 ):
     """
     Calculate normalized 1D Gaussian response for wire (transverse) diffusion.
@@ -298,17 +229,15 @@ def compute_transverse_diffusion(
         Drift time in μs.
     transverse_diffusion_cm2_us : float
         Transverse diffusion coefficient in cm²/μs.
+    min_sigma : float
+        Minimum sigma value to avoid division by zero. Default 1e-4.
 
     Returns
     -------
     response : jnp.ndarray
         Normalized wire diffusion response.
     """
-    # Spatial diffusion (transverse)
     sigma_wire_squared = 2.0 * transverse_diffusion_cm2_us * drift_time_us
-
-    # Ensure minimum sigma value
-    min_sigma = 1e-4
     sigma_wire_squared = jnp.maximum(sigma_wire_squared, min_sigma ** 2)
 
     # Calculate Gaussian term
@@ -326,7 +255,8 @@ def compute_transverse_diffusion(
 @jax.jit
 def compute_longitudinal_diffusion(
     time_difference_us, drift_time_us,
-    longitudinal_diffusion_cm2_us, drift_velocity_cm_us
+    longitudinal_diffusion_cm2_us, drift_velocity_cm_us,
+    min_sigma=1e-4
 ):
     """
     Calculate normalized 1D Gaussian response for time (longitudinal) diffusion.
@@ -341,18 +271,16 @@ def compute_longitudinal_diffusion(
         Longitudinal diffusion coefficient in cm²/μs.
     drift_velocity_cm_us : float
         Drift velocity in cm/μs.
+    min_sigma : float
+        Minimum sigma value to avoid division by zero. Default 1e-4.
 
     Returns
     -------
     response : jnp.ndarray
         Normalized time diffusion response.
     """
-    # Time diffusion (longitudinal) - convert from spatial to time units
     longitudinal_diffusion_us2_us = longitudinal_diffusion_cm2_us / (drift_velocity_cm_us ** 2)
     sigma_time_squared = 2.0 * longitudinal_diffusion_us2_us * drift_time_us
-
-    # Ensure minimum sigma value
-    min_sigma = 1e-4
     sigma_time_squared = jnp.maximum(sigma_time_squared, min_sigma ** 2)
 
     # Calculate Gaussian term
@@ -369,11 +297,11 @@ def compute_longitudinal_diffusion(
 
 @partial(jax.jit, static_argnames=['K_wire', 'K_time', 'num_wires', 'num_time_steps'])
 def prepare_deposit_with_diffusion(
-    charge, drift_time_us, drift_distance_cm, closest_index_abs, closest_wire_distance,
+    charge, drift_time_us, drift_distance_cm, wire_idx, closest_wire_distance,
     attenuation_factor, theta_xz_rad, theta_y_rad, angular_scaling_factor, valid_hit,
     K_wire, K_time, wire_spacing_cm, time_step_size_us,
     longitudinal_diffusion_cm2_us, transverse_diffusion_cm2_us, drift_velocity_cm_us,
-    min_idx_abs, num_wires, num_time_steps
+    num_wires, num_time_steps
 ):
     """
     Prepare deposit data WITH K_wire x K_time diffusion (hit path).
@@ -390,8 +318,8 @@ def prepare_deposit_with_diffusion(
         Drift time of the hit in μs.
     drift_distance_cm : float
         Drift distance of the hit in cm.
-    closest_index_abs : int
-        Absolute index of the closest wire.
+    wire_idx : int
+        Wire index of the closest wire.
     closest_wire_distance : float
         Distance to the closest wire in cm.
     attenuation_factor : float
@@ -418,8 +346,6 @@ def prepare_deposit_with_diffusion(
         Transverse diffusion coefficient in cm²/μs.
     drift_velocity_cm_us : float
         Drift velocity in cm/μs.
-    min_idx_abs : int
-        Minimum absolute wire index.
     num_wires : int
         Number of wires in the plane.
     num_time_steps : int
@@ -429,7 +355,7 @@ def prepare_deposit_with_diffusion(
     -------
     tuple
         Tuple containing indices and values for the hit:
-        (wire_indices_rel, time_indices_out, signal_values_out)
+        (wire_indices, time_indices_out, signal_values_out)
     """
     # Only process if valid hit
     charge = jnp.where(valid_hit, charge, 0.0)
@@ -443,7 +369,7 @@ def prepare_deposit_with_diffusion(
 
     # 2. Calculate wire indices and distances (using K as half-width)
     relative_indices = jnp.arange(-K_wire, K_wire + 1)  # 2K+1 values
-    wire_indices = closest_index_abs + relative_indices  # Shape: (2*K_wire+1,)
+    wire_indices = wire_idx + relative_indices  # Shape: (2*K_wire+1,)
     wire_distances_cm = closest_wire_distance - relative_indices * wire_spacing_cm  # Shape: (2*K_wire+1,)
 
     # 3. Apply charge scaling and attenuation
@@ -486,7 +412,7 @@ def prepare_deposit_with_diffusion(
     valid_mask_2d = wire_valid_2d & time_valid_2d & valid_hit  # Shape: (2*K_wire+1, 2*K_time+1)
 
     # Apply validity mask to zero out invalid entries
-    wire_indices_rel = jnp.where(wire_valid, wire_indices - min_idx_abs, 0)
+    wire_indices = jnp.where(wire_valid, wire_indices, 0)
     time_indices_out = time_bins
     signal_values_2d = jnp.where(valid_mask_2d, diffusion_response, 0.0)
 
@@ -495,45 +421,12 @@ def prepare_deposit_with_diffusion(
     num_time_bins = 2 * K_time + 1
 
     # Flatten the arrays for output
-    wire_indices_rel_flat = jnp.repeat(wire_indices_rel, num_time_bins)
-    time_indices_out_flat = jnp.tile(time_indices_out, num_wire_bins)
+    wire_indices_flat = jnp.repeat(wire_indices, num_time_bins)
+    time_indices_flat = jnp.tile(time_indices_out, num_wire_bins)
     signal_values_out = signal_values_2d.reshape(-1)
 
-    # Return processed indices and values
-    return wire_indices_rel_flat, time_indices_out_flat, signal_values_out
+    return wire_indices_flat, time_indices_flat, signal_values_out
 
-
-@partial(jax.jit, static_argnames=["num_wires", "num_time_steps"])
-def accumulate_signals(indices_and_values, num_wires, num_time_steps):
-    """
-    Fill output array with calculated signal values.
-
-    Parameters
-    ----------
-    indices_and_values : tuple
-        Tuple of (wire_indices, time_indices, signal_values).
-    num_wires : int
-        Number of wires in the plane.
-    num_time_steps : int
-        Number of time steps in the simulation.
-
-    Returns
-    -------
-    jnp.ndarray
-        Filled signals array of shape (num_wires, num_time_steps).
-    """
-    wire_indices, time_indices, signal_values = indices_and_values
-
-    # Create output array
-    wire_signals = jnp.zeros((num_wires, num_time_steps))
-
-    # Fill array using scatter_add
-    # mode='drop' discards out-of-bounds indices instead of wrapping around
-    wire_signals = wire_signals.at[
-        wire_indices, time_indices
-    ].add(signal_values, mode='drop')
-
-    return wire_signals
 
 
 # ============================================================================
@@ -542,10 +435,10 @@ def accumulate_signals(indices_and_values, num_wires, num_time_steps):
 
 @partial(jax.jit, static_argnames=['num_wires'])
 def prepare_deposit_for_response(
-    charge, drift_time_us, closest_index_abs, closest_wire_distance,
+    charge, drift_time_us, wire_idx, closest_wire_distance,
     attenuation_factor, valid_hit,
     wire_spacing_cm, time_step_size_us,
-    min_idx_abs, num_wires
+    num_wires
 ):
     """
     Process a single hit without diffusion (handled by response kernels).
@@ -556,8 +449,8 @@ def prepare_deposit_for_response(
         Charge deposited by the hit.
     drift_time_us : float
         Drift time of the hit in μs.
-    closest_index_abs : int
-        Absolute index of the closest wire.
+    wire_idx : int
+        Wire index of the closest wire.
     closest_wire_distance : float
         Distance to the closest wire in cm.
     attenuation_factor : float
@@ -568,8 +461,6 @@ def prepare_deposit_for_response(
         Spacing between wires in cm.
     time_step_size_us : float
         Size of time step in μs.
-    min_idx_abs : int
-        Minimum absolute wire index.
     num_wires : int
         Number of wires in the plane.
 
@@ -592,21 +483,19 @@ def prepare_deposit_for_response(
     # Apply charge scaling and attenuation
     intensity = charge * attenuation_factor
 
-    # Convert to relative wire index
-    wire_index_rel = jnp.where(
-        (closest_index_abs >= 0) & (closest_index_abs < num_wires),
-        closest_index_abs - min_idx_abs,
+    wire_idx_out = jnp.where(
+        (wire_idx >= 0) & (wire_idx < num_wires),
+        wire_idx,
         -1  # Invalid index
     )
 
-    # Set intensity to 0 for invalid hits
     intensity = jnp.where(
-        valid_hit & (wire_index_rel >= 0),
+        valid_hit & (wire_idx_out >= 0),
         intensity,
         0.0
     )
 
-    return wire_index_rel, wire_offset, time_index, time_offset, intensity
+    return wire_idx_out, wire_offset, time_index, time_offset, intensity
 
 
 @partial(jax.jit, static_argnames=('num_wires', 'num_time_steps', 'kernel_num_wires', 'kernel_height',
@@ -654,23 +543,15 @@ def accumulate_response_signals(wire_indices, time_indices, intensities, contrib
     # Initialize output array
     signals = jnp.zeros((num_wires, num_time_steps))
 
-    # Use explicit center bins from kernel loading
-    # For symmetric kernels: wire_zero_bin = kernel_num_wires // 2, time_zero_bin = kernel_height // 2
-    # For asymmetric kernels: these reflect where wire=0 and t=0 actually are
-    wire_offset = wire_zero_bin
-    time_offset_center = time_zero_bin
-
     # Create kernel index offsets (reused for all segments)
-    kernel_wire_offsets = jnp.arange(kernel_num_wires)  # shape: (kernel_num_wires,)
-    kernel_time_offsets = jnp.arange(kernel_height)     # shape: (kernel_height,)
+    kernel_wire_offsets = jnp.arange(kernel_num_wires)
+    kernel_time_offsets = jnp.arange(kernel_height)
 
-    # Compute absolute wire positions for all segments
-    # Shape: (N, kernel_num_wires)
-    wire_positions = wire_indices[:, None] - wire_offset + kernel_wire_offsets[None, :]
+    # Compute absolute wire positions for all segments — shape: (N, kernel_num_wires)
+    wire_positions = wire_indices[:, None] - wire_zero_bin + kernel_wire_offsets[None, :]
 
-    # Compute absolute time positions for all segments (centered on arrival time)
-    # Shape: (N, kernel_height)
-    time_positions = time_indices[:, None] - time_offset_center + kernel_time_offsets[None, :]
+    # Compute absolute time positions — shape: (N, kernel_height)
+    time_positions = time_indices[:, None] - time_zero_bin + kernel_time_offsets[None, :]
 
     # Scale all contributions by their intensities
     # Shape: (N, kernel_num_wires, kernel_height)
@@ -727,21 +608,35 @@ def build_bucket_mapping(wire_indices, time_indices,
     its kernel can touch up to 4 buckets. This function computes which 4 buckets
     each segment touches and creates a compact mapping to active bucket indices.
 
-    Args:
-        wire_indices: (N,) center wire index for each segment
-        time_indices: (N,) start time index for each segment
-        B1: Bucket size in wire direction (= 2 * kernel_num_wires)
-        B2: Bucket size in time direction (= 2 * kernel_height)
-        num_wires: Total wires (X dimension)
-        num_time_steps: Total time steps (Y dimension)
-        max_buckets: Maximum active buckets to allocate
-        wire_zero_bin: Where wire=0 is in output wires (static)
-        time_zero_bin: Where t=0 is in output simulation time bins (static)
+    Parameters
+    ----------
+    wire_indices : jnp.ndarray, shape (N,)
+        Center wire index for each segment.
+    time_indices : jnp.ndarray, shape (N,)
+        Start time index for each segment.
+    B1 : int
+        Bucket size in wire direction (= 2 * kernel_num_wires).
+    B2 : int
+        Bucket size in time direction (= 2 * kernel_height).
+    num_wires : int
+        Total wires (X dimension).
+    num_time_steps : int
+        Total time steps (Y dimension).
+    max_buckets : int
+        Maximum active buckets to allocate.
+    wire_zero_bin : int
+        Where wire=0 is in output wires.
+    time_zero_bin : int
+        Where t=0 is in output simulation time bins.
 
-    Returns:
-        point_to_compact: (N, 4) int32 - maps (segment, quadrant) to compact index
-        num_active: scalar int32 - number of unique active buckets
-        compact_to_key: (max_buckets,) int32 - maps compact index to bucket key
+    Returns
+    -------
+    point_to_compact : jnp.ndarray, shape (N, 4)
+        Maps (segment, quadrant) to compact index.
+    num_active : int
+        Number of unique active buckets.
+    compact_to_key : jnp.ndarray, shape (max_buckets,)
+        Maps compact index to bucket key.
     """
     N = wire_indices.shape[0]
     # Use ceiling division to ensure all buckets have unique keys
@@ -815,29 +710,50 @@ def scatter_contributions_to_buckets(
     """
     Scatter (N, kernel_num_wires, kernel_height) contributions to sparse buckets.
 
+    Non-batched reference implementation. Production uses
+    scatter_contributions_to_buckets_batched which processes in chunks
+    via jax.lax.scan to reduce peak memory.
+
     Phase 2 of the sparse bucketing algorithm. Scatters pre-computed kernel
     contributions to sparse buckets using the mapping from Phase 1.
 
-    Args:
-        wire_indices: (N,) center wire index for each segment
-        time_indices: (N,) start time index for each segment
-        intensities: (N,) intensity scaling factor for each segment
-        contributions: (N, kernel_num_wires, kernel_height) kernel response for each segment
-        point_to_compact: (N, 4) mapping from (segment, quadrant) to compact index
-        max_buckets: Maximum number of buckets (static)
-        kernel_num_wires: Number of wires in kernel (static)
-        kernel_height: Number of time bins in kernel (static)
-        B1: Bucket size in wire direction (static)
-        B2: Bucket size in time direction (static)
-        wire_zero_bin: Where wire=0 is in output wires (static)
-        time_zero_bin: Where t=0 is in output simulation time bins (static)
+    Parameters
+    ----------
+    wire_indices : jnp.ndarray, shape (N,)
+        Center wire index for each segment.
+    time_indices : jnp.ndarray, shape (N,)
+        Start time index for each segment.
+    intensities : jnp.ndarray, shape (N,)
+        Intensity scaling factor for each segment.
+    contributions : jnp.ndarray, shape (N, kernel_num_wires, kernel_height)
+        Kernel response for each segment.
+    point_to_compact : jnp.ndarray, shape (N, 4)
+        Mapping from (segment, quadrant) to compact index.
+    max_buckets : int
+        Maximum number of buckets.
+    kernel_num_wires : int
+        Number of wires in kernel.
+    kernel_height : int
+        Number of time bins in kernel.
+    B1 : int
+        Bucket size in wire direction.
+    B2 : int
+        Bucket size in time direction.
+    wire_zero_bin : int
+        Where wire=0 is in output wires.
+    time_zero_bin : int
+        Where t=0 is in output simulation time bins.
+    num_wires : int, optional
+        Total wires for bounds checking.
+    num_time_steps : int, optional
+        Total time steps for bounds checking.
 
-    Returns:
-        (max_buckets, B1, B2) array of sparse bucket contributions
+    Returns
+    -------
+    jnp.ndarray, shape (max_buckets, B1, B2)
+        Sparse bucket contributions.
     """
     N = wire_indices.shape[0]
-    wire_offset = wire_zero_bin
-    time_offset_center = time_zero_bin
 
     # Scale contributions by intensity
     scaled = contributions * intensities[:, None, None]
@@ -848,8 +764,8 @@ def scatter_contributions_to_buckets(
     kt_idx = jnp.arange(kernel_height)[None, None, :]
 
     # Global coordinates (centered on wire_indices and time_indices)
-    gw = (wire_indices[:, None, None] - wire_offset + kw_idx).astype(jnp.int32)
-    gt = (time_indices[:, None, None] - time_offset_center + kt_idx).astype(jnp.int32)
+    gw = (wire_indices[:, None, None] - wire_zero_bin + kw_idx).astype(jnp.int32)
+    gt = (time_indices[:, None, None] - time_zero_bin + kt_idx).astype(jnp.int32)
 
     # Zero contributions outside detector bounds
     if num_wires is not None and num_time_steps is not None:
@@ -857,9 +773,8 @@ def scatter_contributions_to_buckets(
         scaled = scaled * valid
 
     # Compute which quadrant each kernel element falls into
-    # Home bucket based on kernel start position
-    home_bw = (wire_indices[:, None, None] - wire_offset) // B1
-    home_bt = (time_indices[:, None, None] - time_offset_center) // B2
+    home_bw = (wire_indices[:, None, None] - wire_zero_bin) // B1
+    home_bt = (time_indices[:, None, None] - time_zero_bin) // B2
 
     # Cell bucket for each kernel element
     cell_bw = gw // B1
@@ -903,27 +818,45 @@ def scatter_contributions_to_buckets_batched(
     of 14 arrays of shape (N, K1, K2) simultaneously. Use this for large N
     where the original scatter would OOM.
 
-    Args:
-        wire_indices: (N,) center wire index for each segment
-        time_indices: (N,) start time index for each segment
-        intensities: (N,) intensity scaling factor for each segment
-        contributions: (N, kernel_num_wires, kernel_height) kernel response
-        point_to_compact: (N, 4) mapping from (segment, quadrant) to compact index
-        max_buckets: Maximum number of buckets (static)
-        kernel_num_wires: Number of wires in kernel (static)
-        kernel_height: Number of time bins in kernel (static)
-        B1: Bucket size in wire direction (static)
-        B2: Bucket size in time direction (static)
-        wire_zero_bin: Where wire=0 is in output wires (static)
-        time_zero_bin: Where t=0 is in output simulation time bins (static)
-        batch_size: Number of segments to process per batch (static)
+    Parameters
+    ----------
+    wire_indices : jnp.ndarray, shape (N,)
+        Center wire index for each segment.
+    time_indices : jnp.ndarray, shape (N,)
+        Start time index for each segment.
+    intensities : jnp.ndarray, shape (N,)
+        Intensity scaling factor for each segment.
+    contributions : jnp.ndarray, shape (N, kernel_num_wires, kernel_height)
+        Kernel response for each segment.
+    point_to_compact : jnp.ndarray, shape (N, 4)
+        Mapping from (segment, quadrant) to compact index.
+    max_buckets : int
+        Maximum number of buckets.
+    kernel_num_wires : int
+        Number of wires in kernel.
+    kernel_height : int
+        Number of time bins in kernel.
+    B1 : int
+        Bucket size in wire direction.
+    B2 : int
+        Bucket size in time direction.
+    wire_zero_bin : int
+        Where wire=0 is in output wires.
+    time_zero_bin : int
+        Where t=0 is in output simulation time bins.
+    batch_size : int
+        Number of segments to process per batch.
+    num_wires : int, optional
+        Total wires for bounds checking.
+    num_time_steps : int, optional
+        Total time steps for bounds checking.
 
-    Returns:
-        (max_buckets, B1, B2) array of sparse bucket contributions
+    Returns
+    -------
+    jnp.ndarray, shape (max_buckets, B1, B2)
+        Sparse bucket contributions.
     """
     N = wire_indices.shape[0]
-    wire_offset = wire_zero_bin
-    time_offset_center = time_zero_bin
 
     # Pad to multiple of batch_size
     n_batches = (N + batch_size - 1) // batch_size
@@ -958,8 +891,8 @@ def scatter_contributions_to_buckets_batched(
 
         # Global coordinates - shape (batch_size, K1, K2)
         # Centered on wire and time indices
-        gw = (bw[:, None, None] - wire_offset + kw_idx[None, :, None]).astype(jnp.int32)
-        gt = (bt[:, None, None] - time_offset_center + kt_idx[None, None, :]).astype(jnp.int32)
+        gw = (bw[:, None, None] - wire_zero_bin + kw_idx[None, :, None]).astype(jnp.int32)
+        gt = (bt[:, None, None] - time_zero_bin + kt_idx[None, None, :]).astype(jnp.int32)
 
         # Zero contributions outside detector bounds
         if num_wires is not None and num_time_steps is not None:
@@ -967,8 +900,8 @@ def scatter_contributions_to_buckets_batched(
             scaled = scaled * valid_bounds
 
         # Home bucket
-        home_bw = (bw[:, None, None] - wire_offset) // B1
-        home_bt = (bt[:, None, None] - time_offset_center) // B2
+        home_bw = (bw[:, None, None] - wire_zero_bin) // B1
+        home_bt = (bt[:, None, None] - time_zero_bin) // B2
 
         # Cell bucket
         cell_bw = gw // B1
@@ -1025,24 +958,41 @@ def accumulate_response_signals_sparse_bucketed(
     Phase 1: Build bucket mapping (O(N) with sort)
     Phase 2: Batched scatter to sparse buckets (O(N * K1 * K2))
 
-    Args:
-        wire_indices: (N,) center wire index for each segment
-        time_indices: (N,) start time index for each segment
-        intensities: (N,) intensity scaling factor for each segment
-        contributions: (N, kernel_num_wires, kernel_height) kernel response for each segment
-        num_wires: Total number of wires in output
-        num_time_steps: Total number of time steps in output
-        kernel_num_wires: Number of wires in kernel
-        kernel_height: Number of time bins in kernel
-        max_buckets: Maximum number of active buckets to allocate
-        wire_zero_bin: Where wire=0 is in output wires (static)
-        time_zero_bin: Where t=0 is in output simulation time bins (static)
-        batch_size: Batch size for scatter. Recommended: 500-2000.
+    Parameters
+    ----------
+    wire_indices : jnp.ndarray, shape (N,)
+        Center wire index for each segment.
+    time_indices : jnp.ndarray, shape (N,)
+        Start time index for each segment.
+    intensities : jnp.ndarray, shape (N,)
+        Intensity scaling factor for each segment.
+    contributions : jnp.ndarray, shape (N, kernel_num_wires, kernel_height)
+        Kernel response for each segment.
+    num_wires : int
+        Total number of wires in output.
+    num_time_steps : int
+        Total number of time steps in output.
+    kernel_num_wires : int
+        Number of wires in kernel.
+    kernel_height : int
+        Number of time bins in kernel.
+    max_buckets : int
+        Maximum number of active buckets to allocate.
+    wire_zero_bin : int
+        Where wire=0 is in output wires.
+    time_zero_bin : int
+        Where t=0 is in output simulation time bins.
+    batch_size : int
+        Batch size for scatter. Recommended: 500-2000.
 
-    Returns:
-        buckets: (max_buckets, B1, B2) sparse bucket contributions
-        num_active: Number of active buckets
-        compact_to_key: (max_buckets,) mapping to original bucket keys
+    Returns
+    -------
+    buckets : jnp.ndarray, shape (max_buckets, B1, B2)
+        Sparse bucket contributions.
+    num_active : int
+        Number of active buckets.
+    compact_to_key : jnp.ndarray, shape (max_buckets,)
+        Mapping to original bucket keys.
     """
     # Bucket sizes: 2x kernel size
     B1 = 2 * kernel_num_wires
@@ -1071,18 +1021,29 @@ def sparse_buckets_to_dense(buckets, compact_to_key, num_active,
     """
     Convert sparse buckets back to dense (num_wires, num_time_steps) array.
 
-    Args:
-        buckets: (max_buckets, B1, B2) sparse bucket contributions
-        compact_to_key: (max_buckets,) mapping to original bucket keys
-        num_active: Number of active buckets
-        B1: Bucket size in wire direction
-        B2: Bucket size in time direction
-        num_wires: Total number of wires
-        num_time_steps: Total number of time steps
-        max_buckets: Maximum number of buckets
+    Parameters
+    ----------
+    buckets : jnp.ndarray, shape (max_buckets, B1, B2)
+        Sparse bucket contributions.
+    compact_to_key : jnp.ndarray, shape (max_buckets,)
+        Mapping to original bucket keys.
+    num_active : int
+        Number of active buckets.
+    B1 : int
+        Bucket size in wire direction.
+    B2 : int
+        Bucket size in time direction.
+    num_wires : int
+        Total number of wires.
+    num_time_steps : int
+        Total number of time steps.
+    max_buckets : int
+        Maximum number of buckets.
 
-    Returns:
-        (num_wires, num_time_steps) dense array
+    Returns
+    -------
+    jnp.ndarray, shape (num_wires, num_time_steps)
+        Dense output array.
     """
     # Use ceiling division to match build_bucket_mapping
     NUM_BUCKETS_T = (num_time_steps + B2 - 1) // B2
