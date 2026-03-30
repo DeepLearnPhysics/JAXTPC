@@ -322,7 +322,7 @@ class DetectorSimulator:
         These are factory functions defined at __init__ time (outside JIT),
         called inside JIT within unrolled side/plane loops. No if inside JIT.
         """
-        from tools.recombination import calculate_modified_box_charge, calculate_emb_charge
+        from tools.recombination import compute_quanta, XI_FN
 
         # ── SCE factory ──
         if sce_efield_fn is not None:
@@ -383,13 +383,10 @@ class DetectorSimulator:
                     kernel.wire_spacing, kernel.num_wires)
             return response_fn
 
-        # ── Recombination function (5-arg v2 with NamedTuple params) ──
-        if self.recomb_model == 'modified_box':
-            _recomb_fn = calculate_modified_box_charge
-        elif self.recomb_model == 'emb':
-            _recomb_fn = calculate_emb_charge
-        else:
-            raise ValueError(f"Unknown recombination model: {self.recomb_model}")
+        # ── Recombination function — returns (Q, L) for any model ──
+        _xi_fn = XI_FN[self.recomb_model]
+        def _recomb_fn(de, dx, phi_drift, e_field_Vcm, params):
+            return compute_quanta(de, dx, phi_drift, e_field_Vcm, params, _xi_fn)
 
         return _build_sce_fn, _build_response_fn, _build_response_fn_diff, _recomb_fn
 
@@ -482,6 +479,21 @@ class DetectorSimulator:
 
         self._calculator_jit_raw = _calculate_signals_jit
 
+        # ── Light-only JIT (SCE + recombination, no wire signals) ──
+        _sce_fn = _build_sce_fn(None)
+
+        @jax.jit
+        def _calculate_light_jit(sim_params, deposits_east, deposits_west,
+                                  n_east, n_west):
+            side_int_east = compute_side_physics(
+                deposits_east, sim_params, cfg.side_geom[0], _sce_fn, _recomb_fn)
+            side_int_west = compute_side_physics(
+                deposits_west, sim_params, cfg.side_geom[1], _sce_fn, _recomb_fn)
+            return (side_int_east.charges, side_int_east.photons,
+                    side_int_west.charges, side_int_west.photons)
+
+        self._light_calculator_jit = _calculate_light_jit
+
         # ── Differentiable path (no @jax.jit — caller wraps in jax.grad) ──
         if self.n_segments is not None:
             n_segments = self.n_segments
@@ -573,6 +585,52 @@ class DetectorSimulator:
         self._validate_post_simulation(track_hits, response_signals)
 
         return response_signals, track_hits, qs_fractions
+
+    def process_event_light(self, deposit_data: DepositData, sim_params=None):
+        """Compute per-segment charge and scintillation light.
+
+        Runs only SCE + recombination — no wire signals, response,
+        electronics, or noise. Returns arrays in original segment order.
+
+        Parameters
+        ----------
+        deposit_data : DepositData
+            Input deposits (any size).
+        sim_params : SimParams, optional
+            Override physics parameters. Uses defaults if None.
+
+        Returns
+        -------
+        result : dict
+            Per-side results with keys:
+            - 'east': (charges, photons) each jnp.ndarray shape (total_pad,)
+            - 'west': (charges, photons) each jnp.ndarray shape (total_pad,)
+            - 'n_east': int, valid entries in east arrays
+            - 'n_west': int, valid entries in west arrays
+            - 'east_idx': np.ndarray, original segment indices for east
+            - 'west_idx': np.ndarray, original segment indices for west
+        """
+        if sim_params is None:
+            sim_params = self._default_sim_params
+
+        east_data, west_data, counts = split_and_pad_data(
+            deposit_data, self._sim_config.total_pad)
+
+        Q_east, L_east, Q_west, L_west = self._light_calculator_jit(
+            sim_params, east_data, west_data,
+            counts['n_east'], counts['n_west'])
+
+        x_mm = np.asarray(deposit_data.positions_mm[:, 0])
+        valid = np.asarray(deposit_data.valid_mask)
+
+        return {
+            'east': (Q_east, L_east),
+            'west': (Q_west, L_west),
+            'n_east': counts['n_east'],
+            'n_west': counts['n_west'],
+            'east_idx': np.where(valid & (x_mm < 0))[0][:counts['n_east']],
+            'west_idx': np.where(valid & (x_mm >= 0))[0][:counts['n_west']],
+        }
 
     def finalize_track_hits(self, track_hits):
         """Derive track labels from raw group merge state."""

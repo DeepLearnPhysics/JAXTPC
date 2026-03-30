@@ -331,6 +331,7 @@ class ModifiedBoxParams(NamedTuple):
     """ArgoNeuT 2013 Modified Box recombination parameters."""
     density: jnp.ndarray
     w_value: jnp.ndarray
+    excitation_ratio: jnp.ndarray
     field_strength_Vcm: jnp.ndarray
     alpha: jnp.ndarray
     beta: jnp.ndarray
@@ -340,6 +341,7 @@ class EMBParams(NamedTuple):
     """ICARUS 2024 Ellipsoid Modified Box recombination parameters."""
     density: jnp.ndarray
     w_value: jnp.ndarray
+    excitation_ratio: jnp.ndarray
     field_strength_Vcm: jnp.ndarray
     alpha: jnp.ndarray
     beta_90: jnp.ndarray
@@ -379,6 +381,7 @@ class SideGeometry(NamedTuple):
 class SideIntermediates(NamedTuple):
     """Output of compute_side_physics, input to compute_plane_physics."""
     charges: jnp.ndarray            # (N,) zeroed for invalid deposits (valid_mask applied)
+    photons: jnp.ndarray            # (N,) scintillation photons (valid_mask applied)
     drift_distance_cm: jnp.ndarray  # (N,)
     drift_time_us: jnp.ndarray     # (N,)
     positions_cm: jnp.ndarray      # (N, 3) original positions (for NN response)
@@ -393,6 +396,7 @@ class PlaneIntermediates(NamedTuple):
     closest_wire_idx: jnp.ndarray  # (N,) int
     closest_wire_dist: jnp.ndarray # (N,)
     charges: jnp.ndarray           # (N,) zeroed for invalid deposits
+    photons: jnp.ndarray           # (N,) scintillation photons
     positions_cm: jnp.ndarray      # (N, 3) carried through for response_fn
 
 
@@ -420,6 +424,7 @@ def create_sim_params(detector_config, recombination_model='modified_box',
 
     density = float(detector_config['medium']['properties']['density'])
     w_value = float(detector_config['medium']['properties']['ionization_energy'])
+    excitation_ratio = float(detector_config['medium']['properties']['excitation_ratio'])
     field_strength = float(detector_config['electric_field']['field_strength'])
 
     sim_cfg = detector_config.get('simulation', {})
@@ -438,6 +443,7 @@ def create_sim_params(detector_config, recombination_model='modified_box',
         recomb = ModifiedBoxParams(
             density=jnp.array(density),
             w_value=jnp.array(w_value),
+            excitation_ratio=jnp.array(excitation_ratio),
             field_strength_Vcm=jnp.array(field_strength),
             alpha=_get_recomb_param('alpha'),
             beta=_get_recomb_param('beta'),
@@ -446,6 +452,7 @@ def create_sim_params(detector_config, recombination_model='modified_box',
         recomb = EMBParams(
             density=jnp.array(density),
             w_value=jnp.array(w_value),
+            excitation_ratio=jnp.array(excitation_ratio),
             field_strength_Vcm=jnp.array(field_strength),
             alpha=_get_recomb_param('alpha_emb'),
             beta_90=_get_recomb_param('beta_90'),

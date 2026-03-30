@@ -39,7 +39,7 @@ from tools.config import (
 from tools.geometry import generate_detector
 from tools.loader import load_particle_step_data
 from tools.simulation import DetectorSimulator
-from tools.recombination import RECOMB_MODELS
+from tools.recombination import RECOMB_MODELS, compute_quanta, XI_FN
 from tools.particle_generator import (
     generate_muon_segments, generate_muon_segments_trig,
     load_dedx_table_jax, mask_outside_volume,
@@ -58,8 +58,8 @@ __all__ = [
     'DepositData', 'SimParams', 'SimConfig', 'ModifiedBoxParams', 'EMBParams',
     'SCEOutputs', 'SideGeometry', 'SideIntermediates', 'PlaneIntermediates',
     'DiffusionConfig', 'TrackHitsConfig', 'DigitizationConfig', 'ResponseKernel',
-    # Constants
-    'RECOMB_MODELS',
+    # Recombination
+    'RECOMB_MODELS', 'compute_quanta', 'XI_FN',
     # Entry points
     'generate_detector', 'load_particle_step_data', 'DetectorSimulator',
     # Factories

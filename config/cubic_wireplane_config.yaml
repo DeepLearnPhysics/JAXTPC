@@ -84,7 +84,8 @@ medium:
   type: liquid_argon
   properties:
     density: 1.396  # g/cm³
-    ionization_energy: 23.6  # eV per ion pair
+    ionization_energy: 23.6  # eV per ion pair (W_ion)
+    excitation_ratio: 0.21  # N_ex / N_i (alpha), universal LAr constant
   temperature: 87.0  # K
   pressure: 1.0  # atm
 

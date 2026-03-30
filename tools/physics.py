@@ -94,13 +94,14 @@ def compute_side_physics(
         sce.efield_correction, deposits.theta, deposits.phi,
         sim_params.recomb_params.field_strength_Vcm,
     )
-    charges = recomb_fn(
+    charges, photons = recomb_fn(
         deposits.de, dx_cm, phi_drift, E_mag, sim_params.recomb_params
     )
 
-    # Apply valid_mask once here — charges=0 for invalid deposits.
+    # Apply valid_mask once here — charges/photons=0 for invalid deposits.
     # No need to propagate valid_mask further.
     charges = charges * deposits.valid_mask
+    photons = photons * deposits.valid_mask
 
     # Drift to furthest plane
     drift_dist, drift_time, yz = compute_drift_to_plane(
@@ -117,6 +118,7 @@ def compute_side_physics(
 
     return SideIntermediates(
         charges=charges,
+        photons=photons,
         drift_distance_cm=drift_dist,
         drift_time_us=drift_time,
         positions_cm=positions_cm,
@@ -171,6 +173,7 @@ def compute_plane_physics(side_int, sim_params, side_geom, plane_idx):
         closest_wire_idx=closest_idx,
         closest_wire_dist=closest_dist,
         charges=side_int.charges,
+        photons=side_int.photons,
         positions_cm=side_int.positions_cm,
     )
 
