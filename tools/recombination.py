@@ -47,21 +47,6 @@ Available Models
     recombination) than perpendicular tracks (φ = 90°), matching the
     physical expectation that aligned columns produce denser charge.
 
-Usage
------
-Use ``create_recombination_fn()`` to get a model-specific callable::
-
-    from tools.recombination import create_recombination_fn
-
-    recomb_fn, model_name = create_recombination_fn(detector_config)
-    charges = recomb_fn(de, dx_cm, phi_drift, e_field_Vcm)
-
-The model is selected from the YAML config key ``simulation.charge_recombination.model``
-or overridden via the ``model`` argument. Both models return a function with the
-same signature ``fn(de, dx_cm, phi_drift, e_field_Vcm) -> charges`` for drop-in
-interchangeability.  The ``e_field_Vcm`` parameter accepts either a scalar
-(uniform field) or a per-deposit array (spatially varying field from SCE maps).
-
 Edge Cases
 ----------
 Both models use a natural extension at low ionization density:
@@ -75,34 +60,36 @@ Both models use a natural extension at low ionization density:
     - Negative dE values are clamped to zero.
 """
 
-import jax
 import jax.numpy as jnp
 from jax import jit
-from typing import Dict, Any
+
+
+# Valid recombination model names
+RECOMB_MODELS = ('modified_box', 'emb')
 
 
 @jit
-def calculate_modified_box_charge(de, dx, params):
+def calculate_modified_box_charge(de, dx, phi_drift, e_field_Vcm, params):
     """
-    Calculate deposited charge using the Modified Box model (ArgoNeuT).
-
-    This implementation follows LArSoft's ISCalcSeparate.cxx approach,
-    which is the standard for DUNE, MicroBooNE, SBND, and ICARUS.
+    Calculate deposited charge using the Modified Box model (ArgoNeuT 2013).
 
     Parameters
     ----------
-    de : jnp.ndarray
-        Array of energy depositions in MeV.
-    dx : jnp.ndarray
-        Array of step lengths in cm.
-    params : tuple
-        Tuple of parameters (field_strength_Vcm, density, w_value, alpha, beta).
-        field_strength is in V/cm (converted to kV/cm internally).
+    de : jnp.ndarray, shape (N,)
+        Energy depositions in MeV.
+    dx : jnp.ndarray, shape (N,)
+        Step lengths in cm.
+    phi_drift : jnp.ndarray, shape (N,)
+        Angle between track and drift field (accepted but unused).
+    e_field_Vcm : scalar or jnp.ndarray, shape (N,)
+        Local E-field magnitude in V/cm (from SCE or nominal).
+    params : ModifiedBoxParams
+        NamedTuple with fields: density, w_value, field_strength_Vcm, alpha, beta.
 
     Returns
     -------
-    jnp.ndarray
-        Array of deposited charge (electrons) for each step.
+    jnp.ndarray, shape (N,)
+        Deposited charge (electrons) for each step.
 
     Notes
     -----
@@ -117,103 +104,31 @@ def calculate_modified_box_charge(de, dx, params):
     Edge case handling:
         - Natural extension: R = ln(max(α+ξ, 1))/ξ, giving R → 0 at low dE/dx
         - dx <= 0 returns zero charge (no valid step)
+        - Safe denominator: max(xi, 1e-10) keeps backward pass finite
 
-    References:
-        - ArgoNeuT: JINST 8 (2013) P08005, arXiv:1306.1712
-        - LArSoft: larsim/IonizationScintillation/ISCalcSeparate.cxx
+    References
+    ----------
+    - ArgoNeuT: JINST 8 (2013) P08005, arXiv:1306.1712
+    - LArSoft: larsim/IonizationScintillation/ISCalcSeparate.cxx
     """
-    field_strength_Vcm, density, w_value, alpha, beta = params
-
-    # Convert field from V/cm to kV/cm
-    field_kVcm = field_strength_Vcm / 1000.0
-
-    # Convert w_value from eV to MeV
-    w_value_mev = w_value * 1e-6
-
-    # Ensure non-negative energy deposits
+    field_kVcm = e_field_Vcm / 1000.0
+    w_value_mev = params.w_value * 1e-6
     de_safe = jnp.maximum(de, 0.0)
-
-    # Calculate dE/dx, handling zero step length
-    # Following LArSoft: dEdx = (ds <= 0.0) ? 0.0 : e / ds
     dx_positive = dx > 0.0
     de_dx_raw = jnp.where(dx_positive, de_safe / jnp.maximum(dx, 1e-10), 0.0)
 
-    # Natural extension: clamp ln argument instead of dE/dx input.
-    # R = ln(max(α + ξ, 1)) / ξ gives R → 0 smoothly as dE → 0,
-    # instead of the LArSoft dE/dx clamp at 1.0 MeV/cm.
-    xi = (beta / density) * de_dx_raw / jnp.maximum(field_kVcm, 1e-10)
-    ln_arg = jnp.maximum(alpha + xi, 1.0)
-    # Safe denominator: when de=0 there is no ionization, so survival is
-    # irrelevant (initial_charge=0).  Using max(xi, 1e-10) keeps the
-    # backward pass finite — JAX evaluates gradients through both branches
-    # of jnp.where, so the true-branch must not produce NaN at xi=0.
+    xi = (params.beta / params.density) * de_dx_raw / jnp.maximum(field_kVcm, 1e-10)
+    ln_arg = jnp.maximum(params.alpha + xi, 1.0)
     safe_xi = jnp.maximum(xi, 1e-10)
     survival_fraction = jnp.where(xi > 1e-10, jnp.log(ln_arg) / safe_xi, 0.0)
-
-    # For dx <= 0, set survival to 0 (no valid step)
     survival_fraction = jnp.where(dx_positive, survival_fraction, 0.0)
 
-    # Calculate initial charge and apply recombination
     initial_charge = de_safe / w_value_mev
-    collected_charge = initial_charge * survival_fraction
-
-    return collected_charge
-
-def extract_recombination_params(detector_config):
-    """
-    Extract Modified Box recombination parameters from the detector configuration.
-
-    Falls back to ArgoNeuT 2013 defaults if config keys are missing.
-
-    Parameters
-    ----------
-    detector_config : dict
-        Dictionary with detector configuration parameters.
-
-    Returns
-    -------
-    tuple
-        Tuple of parameters (field_strength_Vcm, density, w_value, alpha, beta).
-    """
-    field_strength = detector_config['electric_field']['field_strength']
-    density = detector_config['medium']['properties']['density']
-    w_value = detector_config['medium']['properties']['ionization_energy']
-    recomb_params = detector_config.get('simulation', {}).get('charge_recombination', {}).get('recomb_parameters', {})
-    alpha = recomb_params.get('alpha', 0.93)
-    beta = recomb_params.get('beta', 0.212)
-
-    return field_strength, density, w_value, alpha, beta
-
-
-def extract_emb_params(detector_config):
-    """
-    Extract Ellipsoid Modified Box (EMB) parameters from the detector configuration.
-
-    Falls back to ICARUS 2024 (arXiv:2407.12969) defaults if config keys are missing.
-
-    Parameters
-    ----------
-    detector_config : dict
-        Dictionary with detector configuration parameters.
-
-    Returns
-    -------
-    tuple
-        Tuple of parameters (field_strength_Vcm, density, w_value, alpha, beta_90, R).
-    """
-    field_strength = detector_config['electric_field']['field_strength']
-    density = detector_config['medium']['properties']['density']
-    w_value = detector_config['medium']['properties']['ionization_energy']
-    recomb_params = detector_config.get('simulation', {}).get('charge_recombination', {}).get('recomb_parameters', {})
-    alpha = recomb_params.get('alpha_emb', 0.904)
-    beta_90 = recomb_params.get('beta_90', 0.204)
-    R = recomb_params.get('R_anisotropy', 1.25)
-
-    return field_strength, density, w_value, alpha, beta_90, R
+    return initial_charge * survival_fraction
 
 
 @jit
-def calculate_emb_charge(de, dx, phi_drift, params):
+def calculate_emb_charge(de, dx, phi_drift, e_field_Vcm, params):
     """
     Calculate deposited charge using the Ellipsoid Modified Box (EMB) model.
 
@@ -224,172 +139,55 @@ def calculate_emb_charge(de, dx, phi_drift, params):
 
     Parameters
     ----------
-    de : jnp.ndarray
-        Array of energy depositions in MeV.
-    dx : jnp.ndarray
-        Array of step lengths in cm.
-    phi_drift : jnp.ndarray
-        Array of angles between track direction and drift electric field
-        in radians. phi=0 means parallel to field, phi=pi/2 means perpendicular.
-    params : tuple
-        Tuple of parameters (field_strength_Vcm, density, w_value, alpha, beta_90, R).
+    de : jnp.ndarray, shape (N,)
+        Energy depositions in MeV.
+    dx : jnp.ndarray, shape (N,)
+        Step lengths in cm.
+    phi_drift : jnp.ndarray, shape (N,)
+        Angle between track direction and drift electric field in radians.
+        phi=0 means parallel to field, phi=pi/2 means perpendicular.
+    e_field_Vcm : scalar or jnp.ndarray, shape (N,)
+        Local E-field magnitude in V/cm (from SCE or nominal).
+    params : EMBParams
+        NamedTuple with fields: density, w_value, field_strength_Vcm, alpha, beta_90, R.
 
     Returns
     -------
-    jnp.ndarray
-        Array of deposited charge (electrons) for each step.
+    jnp.ndarray, shape (N,)
+        Deposited charge (electrons) for each step.
+
+    Notes
+    -----
+    EMB model (ICARUS 2024):
+        R = ln(α + ξ(φ)) / ξ(φ)
+        ξ(φ) = β_eff(φ) / (ρ × E) × dE/dx
+        β_eff(φ) = β_90 / √(sin²φ + cos²φ / R²)
+
+    Parameters (ICARUS):
+        α   = 0.904
+        β_90 = 0.204 (kV/cm)(g/cm²)/MeV
+        R   = 1.25
+
+    References
+    ----------
+    - ICARUS: arXiv:2407.12969
     """
-    field_strength_Vcm, density, w_value, alpha, beta_90, R = params
-
-    # Convert field from V/cm to kV/cm
-    field_kVcm = field_strength_Vcm / 1000.0
-
-    # Convert w_value from eV to MeV
-    w_value_mev = w_value * 1e-6
-
-    # Ensure non-negative energy deposits
+    field_kVcm = e_field_Vcm / 1000.0
+    w_value_mev = params.w_value * 1e-6
     de_safe = jnp.maximum(de, 0.0)
-
-    # Calculate dE/dx, handling zero step length
     dx_positive = dx > 0.0
     de_dx_raw = jnp.where(dx_positive, de_safe / jnp.maximum(dx, 1e-10), 0.0)
 
-    # EMB angular correction: effective beta depends on track-to-field angle
-    # beta_eff(phi) = beta_90 / sqrt(sin²phi + cos²phi / R²)
     sin_phi = jnp.sin(phi_drift)
     cos_phi = jnp.cos(phi_drift)
-    angular_factor = jnp.sqrt(sin_phi**2 + cos_phi**2 / (R**2))
-    effective_beta = beta_90 / jnp.maximum(angular_factor, 1e-10)
+    angular_factor = jnp.sqrt(sin_phi**2 + cos_phi**2 / (params.R**2))
+    effective_beta = params.beta_90 / jnp.maximum(angular_factor, 1e-10)
 
-    # Natural extension: clamp ln argument instead of dE/dx input.
-    xi = (effective_beta / density) * de_dx_raw / jnp.maximum(field_kVcm, 1e-10)
-    ln_arg = jnp.maximum(alpha + xi, 1.0)
+    xi = (effective_beta / params.density) * de_dx_raw / jnp.maximum(field_kVcm, 1e-10)
+    ln_arg = jnp.maximum(params.alpha + xi, 1.0)
     safe_xi = jnp.maximum(xi, 1e-10)
     survival_fraction = jnp.where(xi > 1e-10, jnp.log(ln_arg) / safe_xi, 0.0)
-
-    # For dx <= 0, set survival to 0 (no valid step)
     survival_fraction = jnp.where(dx_positive, survival_fraction, 0.0)
 
-    # Calculate initial charge and apply recombination
     initial_charge = de_safe / w_value_mev
-    collected_charge = initial_charge * survival_fraction
-
-    return collected_charge
-
-
-def create_recombination_fn(detector_config, model=None):
-    """
-    Factory to create a recombination function for use in the simulation.
-
-    Returns a JIT-compatible function with a unified signature so that models
-    can be swapped without changing the calling code.
-
-    Parameters
-    ----------
-    detector_config : dict
-        Detector configuration from generate_detector(). Physical constants
-        (E-field, density, W-value) are always read from this dict. Model-
-        specific parameters fall back to published defaults if absent.
-    model : str, optional
-        Which recombination model to use:
-
-        - ``'modified_box'`` : Standard Modified Box (ArgoNeuT 2013).
-          Angle-independent. Uses config keys ``alpha``, ``beta``.
-          Default values: α = 0.93, β = 0.212.
-        - ``'emb'`` : Ellipsoid Modified Box (ICARUS 2024).
-          Angle-dependent via phi_drift. Uses config keys ``alpha_emb``,
-          ``beta_90``, ``R_anisotropy``.
-          Default values: α = 0.904, β_90 = 0.204, R = 1.25.
-
-        If None, reads from ``simulation.charge_recombination.model`` in the
-        config dict, falling back to ``'modified_box'`` if not specified.
-
-    Returns
-    -------
-    tuple of (callable, str)
-        - **recomb_fn** : function with signature
-          ``fn(de, dx_cm, phi_drift, e_field_Vcm) -> charges``
-          where de (MeV), dx_cm (cm), phi_drift (rad) are JAX arrays,
-          e_field_Vcm (V/cm) is a scalar or per-deposit array, and
-          charges is the number of surviving electrons per step.
-          For ``'modified_box'``, phi_drift is accepted but ignored.
-        - **model_name** : the string name of the selected model.
-    """
-    if model is None:
-        model = (detector_config
-                 .get('simulation', {})
-                 .get('charge_recombination', {})
-                 .get('model', 'modified_box'))
-
-    if model == 'modified_box':
-        params = extract_recombination_params(detector_config)
-        _, density, w_value, alpha, beta = params
-
-        def recomb_fn(de, dx_cm, phi_drift, e_field_Vcm):
-            return calculate_modified_box_charge(
-                de, dx_cm, (e_field_Vcm, density, w_value, alpha, beta)
-            )
-
-        return recomb_fn, model
-
-    elif model == 'emb':
-        params = extract_emb_params(detector_config)
-        _, density, w_value, alpha, beta_90, R = params
-
-        def recomb_fn(de, dx_cm, phi_drift, e_field_Vcm):
-            return calculate_emb_charge(
-                de, dx_cm, phi_drift,
-                (e_field_Vcm, density, w_value, alpha, beta_90, R)
-            )
-
-        return recomb_fn, model
-
-    else:
-        raise ValueError(
-            f"Unknown recombination model: '{model}'. "
-            f"Supported models: 'modified_box', 'emb'."
-        )
-
-
-def recombine_steps(step_data, detector_config):
-    """
-    Process particle steps to calculate deposited charge.
-
-    Uses the Modified Box model (ArgoNeuT 2013) to calculate the
-    fraction of ionization electrons that survive recombination.
-
-    Parameters
-    ----------
-    step_data : dict
-        Dictionary containing arrays from the particle step data.
-        Must contain 'de' (energy deposits in MeV) and 'dx' (step lengths in cm).
-    detector_config : dict
-        Dictionary with detector configuration parameters.
-
-    Returns
-    -------
-    jnp.ndarray
-        Array of deposited charge (electrons) for each step.
-    """
-    params = extract_recombination_params(detector_config)
-
-    # Extract de and dx arrays from step_data
-    de = step_data['de']
-    dx = step_data['dx']
-
-    return calculate_modified_box_charge(de, dx, params)
-
-if __name__ == "__main__":
-    from geometry import generate_detector
-    from loader import load_particle_step_data
-
-    config_path = "config/cubic_wireplane_config.yaml"
-    detector = generate_detector(config_path)
-
-    data_path = "mpvmpr.h5"
-    event_idx = 0
-
-    step_data = load_particle_step_data(data_path, event_idx)
-
-    processed_charge = recombine_steps(step_data, detector)
-
+    return initial_charge * survival_fraction
