@@ -104,12 +104,16 @@ See `production/README.md` for pipeline details, output schema, and threading ar
 - **Dual-sided TPC**: Simulates both east and west drift regions
 - **Three wire planes**: U, V, Y induction and collection planes per side
 - **Electron drift**: Diffusion (DCT-based kernel generation) and lifetime attenuation
-- **Recombination models**: Modified Box (ArgoNeuT) and EMB (ICARUS 2024) with angular dependence
+- **Angle-dependent recombination**: Modified Box (ArgoNeuT) and EMB (ICARUS 2024) models
 - **Electronics response**: RC-RC convolution via sparse FFT
 - **Intrinsic noise**: Wire-length-dependent noise model (MicroBooNE)
 - **ADC digitization**: Configurable bit depth, pedestal, gain
 - **Track correspondence**: Group-based 3D-to-2D mapping with Q_s disaggregation fractions
 - **Threaded production**: Overlapped GPU simulation with CPU save workers
+
+## Performance
+
+~1.3s/event on a single GPU with threaded save workers (170K deposits, with correspondence). ~0.5s/event without correspondence.
 
 ## Input Data Format
 
