@@ -6,7 +6,7 @@ Produces three file types per batch:
     {dataset}_seg_{NNNN}.h5   — 3D truth deposits
     {dataset}_corr_{NNNN}.h5  — 3D→2D correspondence + track labels
 
-See DATA_FORMAT.md for output schema and decoding instructions.
+See README.md for pipeline details, output schema, and threading architecture.
 
 Usage (from project root):
     python3 production/run_batch.py

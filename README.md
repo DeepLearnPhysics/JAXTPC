@@ -96,7 +96,7 @@ dense = to_dense(response_signals, simulator.config)
 python3 production/run_batch.py --data events.h5 --events 1000 --workers 2
 ```
 
-See `production/DATA_FORMAT.md` for output schema and batch pipeline details.
+See `production/README.md` for pipeline details, output schema, and threading architecture.
 
 ## Features
 
