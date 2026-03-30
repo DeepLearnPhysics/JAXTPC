@@ -110,8 +110,8 @@ def main():
     parser.add_argument('--group-size', type=int, default=5)
     parser.add_argument('--gap-threshold', type=float, default=5.0,
                         help='Gap threshold in mm for group splitting')
-    parser.add_argument('--corr-threshold', type=float, default=0.0,
-                        help='Charge threshold in electrons for correspondence entries (default: 0)')
+    parser.add_argument('--corr-threshold', type=float, default=25.0,
+                        help='Charge threshold in electrons for correspondence entries (default: 25)')
     parser.add_argument('--total-pad', type=int, default=500_000)
     parser.add_argument('--workers', type=int, default=2,
                         help='Number of save worker threads (0=serial, default: 2)')

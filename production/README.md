@@ -55,7 +55,7 @@ python3 production/run_batch.py \
 | `--sce` | off | Path to SCE HDF5 map for E-field distortions |
 | `--group-size` | 5 | Deposits per correspondence group |
 | `--gap-threshold` | 5.0 | Group split threshold in mm |
-| `--corr-threshold` | 0.0 | Charge threshold for correspondence entries (electrons) |
+| `--corr-threshold` | 25.0 | Charge threshold for correspondence entries (electrons) |
 | `--total-pad` | 500,000 | Max deposits per side (sets JIT compiled shape) |
 | `--seed` | 42 | Random seed for noise generation |
 
