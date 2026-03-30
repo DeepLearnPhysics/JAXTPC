@@ -23,23 +23,6 @@ deposit_data, _ = load_particle_step_data(data_path, event_idx=0)
 result = sim.process_event_light(deposit_data)
 jax.block_until_ready(result['east'][0])
 
-# Verify conservation on warmup event
-Q_e, L_e = result['east']
-Q_w, L_w = result['west']
-n_e, n_w = result['n_east'], result['n_west']
-de = np.asarray(deposit_data.de)
-dx = np.asarray(deposit_data.dx)
-W_ph = 23.6e-6 / 1.21
-
-total_ql = float(Q_e[:n_e].sum() + L_e[:n_e].sum() + Q_w[:n_w].sum() + L_w[:n_w].sum())
-total_expected = float(de.sum()) / W_ph
-lost = float(de[(dx <= 0) | (de <= 0)].sum()) / W_ph
-
-print(f"Conservation check (event 0):")
-print(f"  Q + L:       {total_ql:,.0f}")
-print(f"  ΔE / W_ph:   {total_expected:,.0f}")
-print(f"  Lost (dx≤0): {lost:,.0f}")
-
 print(f"\n{'Event':>5} {'Segs':>8} {'Load':>8} {'Sim':>8} {'Photons':>14} {'Charge':>14} {'Q/(Q+L)':>8}")
 print("-" * 75)
 
@@ -59,11 +42,13 @@ for event_idx in range(20):
     load_times.append(t_load)
     sim_times.append(t_sim)
 
-    Q_e, L_e = result['east']
-    Q_w, L_w = result['west']
+    # Move to CPU for reporting only
     n_e, n_w = result['n_east'], result['n_west']
-    total_q = float(Q_e[:n_e].sum() + Q_w[:n_w].sum())
-    total_l = float(L_e[:n_e].sum() + L_w[:n_w].sum())
+    Q_e, L_e, pos_e = [np.asarray(x) for x in result['east']]
+    Q_w, L_w, pos_w = [np.asarray(x) for x in result['west']]
+
+    total_q = Q_e[:n_e].sum() + Q_w[:n_w].sum()
+    total_l = L_e[:n_e].sum() + L_w[:n_w].sum()
     q_frac = total_q / (total_q + total_l) if (total_q + total_l) > 0 else 0
     n = len(deposit_data.de)
 
