@@ -1,8 +1,13 @@
+"""
+Particle step data loading and preprocessing for LArTPC simulation.
+
+Handles HDF5 I/O, group ID assignment for segment correspondence,
+and side-splitting with fixed-size padding for JIT compilation.
+"""
+
 import h5py
 import jax.numpy as jnp
 import numpy as np
-from typing import Dict, List, Tuple, Any, Optional
-import json
 
 from tools.config import DepositData
 
@@ -154,7 +159,7 @@ class ParticleStepExtractor:
         Returns
         -------
         dict
-            Dictionary mapping field names to JAX arrays.
+            Dictionary mapping field names to numpy arrays.
         """
         if dataset not in self.file:
             if self.verbose:
@@ -183,8 +188,7 @@ class ParticleStepExtractor:
                             print(f"Skipping string field: {field}")
                         continue
 
-                    # Convert to JAX array for numeric data
-                    result[field] = jnp.array(field_data)
+                    result[field] = np.asarray(field_data)
                 except Exception as e:
                     if self.verbose:
                         print(f"Error extracting field {field}: {e}")
@@ -202,8 +206,8 @@ class ParticleStepExtractor:
             
         Returns
         -------
-        jnp.ndarray or None
-            JAX array where index[i] gives the particle index for step i,
+        np.ndarray or None
+            Array where index[i] gives the particle index for step i,
             or None if the mapping could not be created.
         """
         if not self.association_path or self.association_path not in self.file:
@@ -229,7 +233,7 @@ class ParticleStepExtractor:
                     end_idx = ends[i]
                     step_to_particle[start_idx:end_idx] = i
 
-                return jnp.array(step_to_particle)
+                return step_to_particle
             else:
                 # Other format - this would need to be adapted based on the specific file structure
                 if self.verbose:
@@ -295,18 +299,14 @@ class ParticleStepExtractor:
 
         # Add some convenience properties
         if 'x' in result and 'y' in result and 'z' in result:
-            result['position'] = jnp.stack([result['x'], result['y'], result['z']], axis=1)
+            result['position'] = np.stack([result['x'], result['y'], result['z']], axis=1)
 
         return result
 
 
-def load_particle_step_data(file_path, event_idx=0, verbose=False) -> DepositData:
+def load_particle_step_data(file_path, event_idx=0, verbose=False):
     """
     Load particle step data from an HDF5 file and return as DepositData.
-
-    This function creates a ParticleStepExtractor, extracts the data,
-    converts to appropriate dtypes, and returns a DepositData namedtuple
-    ready for simulation.
 
     Parameters
     ----------
@@ -319,8 +319,11 @@ def load_particle_step_data(file_path, event_idx=0, verbose=False) -> DepositDat
 
     Returns
     -------
-    DepositData
-        Namedtuple with positions_mm, de, dx, valid_mask, theta, phi, track_ids.
+    deposit_data : DepositData
+        Namedtuple with positions_mm, de, dx, valid_mask, theta, phi,
+        track_ids, group_ids.
+    group_to_track : np.ndarray
+        Lookup array: group_to_track[group_id] = track_id.
     """
     with ParticleStepExtractor(file_path, verbose=verbose) as extractor:
         step_data = extractor.extract_step_arrays(event_idx)
@@ -331,15 +334,24 @@ def load_particle_step_data(file_path, event_idx=0, verbose=False) -> DepositDat
     )
     n = positions_mm.shape[0]
 
-    return DepositData(
+    track_ids = np.asarray(step_data.get('track_id', np.ones((n,))), dtype=np.int32)
+    valid_mask = np.ones(n, dtype=bool)
+
+    # Compute group IDs for segment correspondence
+    group_ids, group_to_track, n_groups = compute_group_ids(
+        positions_mm, track_ids, valid_mask)
+
+    deposit_data = DepositData(
         positions_mm=positions_mm,
         de=np.asarray(step_data.get('de', np.zeros((n,))), dtype=np.float32),
         dx=np.asarray(step_data.get('dx', np.zeros((n,))), dtype=np.float32),
-        valid_mask=np.ones(n, dtype=bool),
+        valid_mask=valid_mask,
         theta=np.asarray(step_data.get('theta', np.zeros((n,))), dtype=np.float32),
         phi=np.asarray(step_data.get('phi', np.zeros((n,))), dtype=np.float32),
-        track_ids=np.asarray(step_data.get('track_id', np.ones((n,))), dtype=np.int32),
+        track_ids=track_ids,
+        group_ids=group_ids,
     )
+    return deposit_data, group_to_track
 
 
 def main():
@@ -359,12 +371,12 @@ def main():
     args = parser.parse_args()
 
     # Extract step data as DepositData
-    deposit_data = load_particle_step_data(args.file_path, args.event, args.verbose)
+    deposit_data, group_to_track = load_particle_step_data(args.file_path, args.event, args.verbose)
 
     # Print summary
     n_segments = deposit_data.positions_mm.shape[0]
-    n_tracks = len(jnp.unique(deposit_data.track_ids))
-    total_de = jnp.sum(deposit_data.de)
+    n_tracks = len(np.unique(deposit_data.track_ids))
+    total_de = float(np.sum(deposit_data.de))
 
     print(f"\nLoaded DepositData:")
     print(f"  Segments: {n_segments:,}")
@@ -374,6 +386,192 @@ def main():
     for field in deposit_data._fields:
         arr = getattr(deposit_data, field)
         print(f"  {field}: shape={arr.shape}, dtype={arr.dtype}")
+
+
+# =============================================================================
+# GROUP ID ASSIGNMENT (numpy host-side, before split)
+# =============================================================================
+
+def compute_group_ids(positions_mm, track_ids, valid_mask,
+                      group_size=5, gap_threshold_mm=5.0):
+    """Assign group IDs for segment correspondence: N consecutive deposits per track.
+
+    Groups are split on large spatial gaps (neutrons/gammas) to avoid
+    grouping physically distant deposits.
+
+    Parameters
+    ----------
+    positions_mm : np.ndarray, shape (N, 3)
+    track_ids : np.ndarray, shape (N,), int32
+    valid_mask : np.ndarray, shape (N,), bool
+    group_size : int
+        Consecutive deposits per group. Default 5.
+    gap_threshold_mm : float
+        Start new group if gap exceeds this. Default 5.0.
+
+    Returns
+    -------
+    group_ids : np.ndarray, shape (N,), int32
+        Group ID per deposit (0 = invalid/padding).
+    group_to_track : np.ndarray, shape (n_groups,), int32
+        Lookup: group_to_track[group_id] = track_id.
+    n_groups : int
+        Total number of groups (including invalid group 0).
+    """
+    n = len(track_ids)
+    group_ids = np.zeros(n, dtype=np.int32)
+
+    valid_idx = np.where(valid_mask)[0]
+    if len(valid_idx) == 0:
+        return group_ids, np.array([0], dtype=np.int32), 1
+
+    v_tids = track_ids[valid_idx]
+    v_pos = positions_mm[valid_idx]
+
+    # Stable sort by track_id preserves trajectory order within each track
+    sort_order = np.argsort(v_tids, kind='stable')
+    sorted_idx = valid_idx[sort_order]
+    sorted_tids = v_tids[sort_order]
+    sorted_pos = v_pos[sort_order]
+    n_valid = len(sorted_idx)
+
+    # Track boundaries
+    track_change = np.zeros(n_valid, dtype=bool)
+    track_change[1:] = sorted_tids[1:] != sorted_tids[:-1]
+
+    # Spatial gap boundaries (within same track)
+    gaps = np.zeros(n_valid)
+    gaps[1:] = np.linalg.norm(sorted_pos[1:] - sorted_pos[:-1], axis=1)
+    gap_break = gaps > gap_threshold_mm
+
+    # Side change boundary (x < 0 → east, x >= 0 → west)
+    side = (sorted_pos[:, 0] >= 0).astype(np.int8)
+    side_change = np.zeros(n_valid, dtype=bool)
+    side_change[1:] = side[1:] != side[:-1]
+
+    # Contiguous segment starts: track change, spatial gap, or side change
+    seg_start = track_change | gap_break | side_change
+    seg_start[0] = True
+
+    # Within-segment position via forward-filled segment start indices
+    seg_start_positions = np.where(seg_start, np.arange(n_valid), 0)
+    seg_start_positions = np.maximum.accumulate(seg_start_positions)
+    within_seg = np.arange(n_valid) - seg_start_positions
+
+    # Group boundaries: segment start or every N deposits within a segment
+    group_start = seg_start.copy()
+    group_start |= (within_seg % group_size == 0) & (within_seg > 0)
+
+    # Consecutive group IDs (1-based; 0 reserved for invalid)
+    group_labels = np.cumsum(group_start)
+
+    # Write back to original deposit positions
+    group_ids[sorted_idx] = group_labels
+
+    # Build group_to_track lookup
+    n_groups = int(group_labels.max()) + 1
+    group_to_track = np.zeros(n_groups, dtype=np.int32)
+    group_to_track[group_labels] = sorted_tids
+
+    return group_ids, group_to_track, n_groups
+
+
+# =============================================================================
+# SPLIT & PAD (numpy host-side, no JIT)
+# =============================================================================
+
+def _extract_and_pad(deposit_data, mask, n_valid, pad_size):
+    """Extract masked deposits and pad to fixed size.
+
+    All operations in numpy. Returns DepositData with JAX arrays
+    at the fixed shape (no XLA recompilation).
+    """
+    # Extract valid entries per field
+    arrays = {}
+    for field in deposit_data._fields:
+        arr = np.asarray(getattr(deposit_data, field))
+        extracted = arr[mask]
+
+        if field == 'valid_mask':
+            # Recompute valid_mask for the padded output
+            continue
+
+        pad_width = pad_size - n_valid
+        if pad_width > 0:
+            # dx=1.0 for padding avoids division by zero in recombination
+            pad_val = 1.0 if field == 'dx' else 0
+            if arr.ndim == 2:
+                extracted = np.pad(extracted, ((0, pad_width), (0, 0)),
+                                   constant_values=pad_val)
+            else:
+                extracted = np.pad(extracted, (0, pad_width), constant_values=pad_val)
+        else:
+            extracted = extracted[:pad_size]
+        arrays[field] = extracted
+
+    valid_out = np.arange(pad_size) < n_valid
+
+    return DepositData(
+        positions_mm=jnp.asarray(arrays['positions_mm']),
+        de=jnp.asarray(arrays['de']),
+        dx=jnp.asarray(arrays['dx']),
+        valid_mask=jnp.asarray(valid_out),
+        theta=jnp.asarray(arrays['theta']),
+        phi=jnp.asarray(arrays['phi']),
+        track_ids=jnp.asarray(arrays['track_ids']),
+        group_ids=jnp.asarray(arrays['group_ids']),
+    )
+
+
+def split_and_pad_data(deposit_data, total_pad):
+    """Split deposit data by side and pad to total_pad.
+
+    All operations use numpy to avoid XLA recompilation on variable-length
+    intermediates. The final padded arrays are converted to JAX at the end
+    (fixed total_pad shape -> single JIT compilation for all events).
+
+    Parameters
+    ----------
+    deposit_data : DepositData
+        Input data (can be any size, will be split and padded).
+    total_pad : int
+        Fixed pad size per side.
+
+    Returns
+    -------
+    east_data : DepositData
+        Padded data for east side (x < 0).
+    west_data : DepositData
+        Padded data for west side (x >= 0).
+    counts : dict
+        Actual counts: n_east, n_west, n_tracks.
+    """
+    positions_mm = np.asarray(deposit_data.positions_mm)
+    valid_mask = np.asarray(deposit_data.valid_mask)
+    track_ids = np.asarray(deposit_data.track_ids)
+
+    x_mm = positions_mm[:, 0]
+    east_mask = valid_mask & (x_mm < 0)
+    west_mask = valid_mask & (x_mm >= 0)
+
+    n_east = int(np.sum(east_mask))
+    n_west = int(np.sum(west_mask))
+    n_tracks = int(len(np.unique(track_ids[valid_mask])))
+
+    if n_east > total_pad:
+        print(f"WARNING: n_east ({n_east:,}) > total_pad ({total_pad:,}). Truncating!")
+    if n_west > total_pad:
+        print(f"WARNING: n_west ({n_west:,}) > total_pad ({total_pad:,}). Truncating!")
+
+    east_data = _extract_and_pad(
+        deposit_data, east_mask, min(n_east, total_pad), total_pad)
+    west_data = _extract_and_pad(
+        deposit_data, west_mask, min(n_west, total_pad), total_pad)
+
+    counts = {'n_east': min(n_east, total_pad),
+              'n_west': min(n_west, total_pad),
+              'n_tracks': n_tracks}
+    return east_data, west_data, counts
 
 
 if __name__ == "__main__":
