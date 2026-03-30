@@ -4,74 +4,73 @@ JAXTPC Tools Package
 Simulation tools for LArTPC detector simulation.
 
 Main entry points:
+- generate_detector: Parse YAML detector configuration
 - DetectorSimulator: Main simulation class
-- run_simulation: Convenience function for single-event processing
-
-Configuration classes:
-- DepositData: Input data container
-- DriftParams: Drift physics parameters
-- TimeParams: Time discretization parameters
-- PlaneGeometry: Wire plane geometry
-- DiffusionParams: Diffusion parameters
-- TrackHitsConfig: Track labeling configuration (optional, for include_track_hits=True)
+  - process_event(): Production path (fori_loop batching, post-processing)
+  - forward(): Differentiable path (gradients through SimParams)
+- load_particle_step_data: Load HDF5 particle step data
+- generate_noise / add_noise: Standalone noise generation (accepts SimConfig)
 """
 
 from tools.config import (
+    # Core types
     DepositData,
-    DriftParams,
-    TimeParams,
-    PlaneGeometry,
-    DiffusionParams,
+    SimParams,
+    SimConfig,
+    ModifiedBoxParams,
+    EMBParams,
+    SCEOutputs,
+    SideGeometry,
+    SideIntermediates,
+    PlaneIntermediates,
+    DiffusionConfig,
     TrackHitsConfig,
-    create_diffusion_params,
-    create_drift_params,
-    create_time_params,
-    create_plane_geometry,
+    DigitizationConfig,
+    ResponseKernel,
+    # Factories
+    create_sim_params,
+    create_sim_config,
+    create_deposit_data,
+    pad_deposit_data,
     create_track_hits_config,
+    create_digitization_config,
 )
 
-from tools.simulation import (
-    DetectorSimulator,
-    run_simulation,
+from tools.geometry import generate_detector
+from tools.loader import load_particle_step_data
+from tools.simulation import DetectorSimulator
+from tools.recombination import RECOMB_MODELS
+from tools.particle_generator import (
+    generate_muon_segments, generate_muon_segments_trig,
+    load_dedx_table_jax, mask_outside_volume,
 )
 
-from tools.wires import (
-    sparse_buckets_to_dense,
-    accumulate_response_signals_sparse_bucketed,
-)
+from tools.wires import sparse_buckets_to_dense
 
 from tools.noise import (
     add_noise,
     generate_noise,
     generate_noise_bucketed,
-    process_response,
-    extract_signal,
 )
 
 __all__ = [
-    # Config classes
-    'DepositData',
-    'DriftParams',
-    'TimeParams',
-    'PlaneGeometry',
-    'DiffusionParams',
-    'TrackHitsConfig',
-    # Factory functions
-    'create_diffusion_params',
-    'create_drift_params',
-    'create_time_params',
-    'create_plane_geometry',
-    'create_track_hits_config',
-    # Main simulation
-    'DetectorSimulator',
-    'run_simulation',
+    # Core types
+    'DepositData', 'SimParams', 'SimConfig', 'ModifiedBoxParams', 'EMBParams',
+    'SCEOutputs', 'SideGeometry', 'SideIntermediates', 'PlaneIntermediates',
+    'DiffusionConfig', 'TrackHitsConfig', 'DigitizationConfig', 'ResponseKernel',
+    # Constants
+    'RECOMB_MODELS',
+    # Entry points
+    'generate_detector', 'load_particle_step_data', 'DetectorSimulator',
+    # Factories
+    'create_sim_params', 'create_sim_config', 'create_deposit_data',
+    'pad_deposit_data',
+    'create_track_hits_config', 'create_digitization_config',
+    # Particle generation (differentiable)
+    'generate_muon_segments', 'generate_muon_segments_trig',
+    'load_dedx_table_jax', 'mask_outside_volume',
     # Sparse utilities
     'sparse_buckets_to_dense',
-    'accumulate_response_signals_sparse_bucketed',
-    # Noise
-    'add_noise',
-    'generate_noise',
-    'generate_noise_bucketed',
-    'process_response',
-    'extract_signal',
+    # Noise post-processing
+    'add_noise', 'generate_noise', 'generate_noise_bucketed',
 ]
