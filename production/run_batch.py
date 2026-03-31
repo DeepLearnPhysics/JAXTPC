@@ -180,6 +180,7 @@ def main():
 
     cfg = simulator._sim_config
     params = simulator.default_sim_params
+    dig_config = simulator.digitization_config  # None if digitization disabled
 
     t_warmup = time.time()
     simulator.warm_up()
@@ -230,7 +231,8 @@ def main():
         # HDF5 write (serialized through file lock)
         with file_lock:
             save_event_resp(f_resp, event_key, response_np, threshold_adc,
-                            source_idx, n_deposits, n_east, n_west)
+                            source_idx, n_deposits, n_east, n_west,
+                            digitized=include_digitize)
             save_event_seg(f_seg, event_key, deposit_data, group_to_track,
                            source_idx, n_east, n_west, qs_fractions=qs_frac)
             if corr_data is not None:
@@ -288,7 +290,8 @@ def main():
                     write_config_resp(
                         f_resp, cfg, params, simulator.recomb_model,
                         dataset_name, file_idx, args.data,
-                        n_in_file, event_start, threshold_adc)
+                        n_in_file, event_start, threshold_adc,
+                        digitization_config=dig_config)
                     write_config_seg(
                         f_seg, cfg, dataset_name, file_idx, args.data,
                         n_in_file, event_start,

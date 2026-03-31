@@ -102,7 +102,9 @@ from production.load import get_file_paths, build_viz_config, load_event_resp, l
 
 resp_path, seg_path, corr_path = get_file_paths('output/', 'myrun', file_index=0)
 viz_config = build_viz_config(resp_path)  # minimal config from HDF5 metadata
-dense_signals, attrs = load_event_resp(resp_path, event_idx=0)
+dense_signals, attrs, pedestals = load_event_resp(resp_path, event_idx=0)
+# pedestals is {(side, plane): int} if digitized, None otherwise
+# To get signed ADC: signal = dense_signals[(s,p)].astype(int) - pedestals[(s,p)]
 seg = load_event_seg(seg_path, event_idx=0)
 track_hits, truth_dense, g2t = load_event_corr(corr_path, event_idx=0, num_time_steps=2701)
 ```
@@ -129,22 +131,26 @@ Sparse thresholded wire signals after full detector simulation.
            num_time_steps, time_step_us, electrons_per_adc,
            velocity_cm_us, lifetime_us, recombination_model,
            include_noise, include_electronics, include_digitize,
-           threshold_adc
+           threshold_adc, n_bits (if digitized)
     num_wires           (2, 3) int32
+    pedestals           (2, 3) int32    per-plane pedestal (if digitized)
 
 /event_{NNN}/
     attrs: source_event_idx, n_deposits, n_east, n_west
     {plane}/                           6 planes: east_U/V/Y, west_U/V/Y
         delta_wire      (P,) int16     delta-encoded wire indices
         delta_time      (P,) int16     delta-encoded time indices
-        values          (P,) float32   signal amplitude (ADC)
-        attrs: wire_start, time_start, n_pixels
+        values          (P,) uint16    unsigned ADC (pedestal added) if digitized
+                        (P,) float32   signal amplitude (ADC) if not digitized
+        attrs: wire_start, time_start, n_pixels, pedestal (if digitized)
 ```
 
 **Decode:**
 ```python
 wires = wire_start + np.cumsum(delta_wire)
 times = time_start + np.cumsum(delta_time)
+# If digitized (values.dtype == uint16):
+signal_adc = values.astype(np.int32) - pedestal  # signed ADC
 ```
 
 ### 2. Segment File (`_seg_`)

@@ -22,7 +22,8 @@ PLANE_NAMES = {
 # =============================================================================
 
 def write_config_resp(f, cfg, params, recomb_model, dataset_name, file_index,
-                      source_file, n_events, global_offset, threshold_adc):
+                      source_file, n_events, global_offset, threshold_adc,
+                      digitization_config=None):
     """Write config group for response file."""
     if 'config' in f:
         return
@@ -45,6 +46,18 @@ def write_config_resp(f, cfg, params, recomb_model, dataset_name, file_index,
     num_wires = np.array([[sg.num_wires[p] for p in range(3)]
                           for sg in cfg.side_geom], dtype=np.int32)
     g.create_dataset('num_wires', data=num_wires)
+    # Store per-plane pedestals for uint16 decoding when digitized
+    if digitization_config is not None:
+        plane_types = cfg.plane_names  # (('U','V','Y'), ('U','V','Y'))
+        pedestals = np.zeros((2, 3), dtype=np.int32)
+        for s in range(2):
+            for p in range(3):
+                if plane_types[s][p] == 'Y':
+                    pedestals[s, p] = digitization_config.pedestal_collection
+                else:
+                    pedestals[s, p] = digitization_config.pedestal_induction
+        g.create_dataset('pedestals', data=pedestals)
+        g.attrs['n_bits'] = digitization_config.n_bits
 
 
 def write_config_seg(f, cfg, dataset_name, file_index, source_file,
@@ -89,19 +102,30 @@ def write_config_corr(f, cfg, dataset_name, file_index, source_file,
 # =============================================================================
 
 def save_event_resp(f, event_key, response_signals, threshold_adc,
-                    source_event_idx, n_deposits, n_east, n_west):
-    """Save one event's response signals (sparse, delta-encoded, lzf)."""
+                    source_event_idx, n_deposits, n_east, n_west,
+                    digitized=False):
+    """Save one event's response signals (sparse, delta-encoded, gzip).
+
+    When digitized=True, values are packed as uint16 (pedestal added back
+    so values are in [0, 2^n_bits - 1]). The per-plane pedestal is read
+    from /config/pedestals to decode on load.
+    """
     evt = f.create_group(event_key)
     evt.attrs['source_event_idx'] = source_event_idx
     evt.attrs['n_deposits'] = n_deposits
     evt.attrs['n_east'] = n_east
     evt.attrs['n_west'] = n_west
 
+    # Read per-plane pedestals if digitized
+    pedestals = None
+    if digitized and 'config' in f and 'pedestals' in f['config']:
+        pedestals = f['config']['pedestals'][:]
+
     for (side_idx, plane_idx), signal in response_signals.items():
         arr = np.asarray(signal)
         mask = np.abs(arr) >= threshold_adc
         wire_idx, time_idx = np.where(mask)
-        values = arr[mask].astype(np.float32)
+        values = arr[mask]
 
         name = PLANE_NAMES[(side_idx, plane_idx)]
         g = evt.create_group(name)
@@ -119,9 +143,18 @@ def save_event_resp(f, event_key, response_signals, threshold_adc,
         delta_wire = np.diff(wire_s, prepend=wire_s[0]).astype(np.int16)
         delta_time = np.diff(time_s, prepend=time_s[0]).astype(np.int16)
 
-        g.create_dataset('delta_wire', data=delta_wire, compression='lzf')
-        g.create_dataset('delta_time', data=delta_time, compression='lzf')
-        g.create_dataset('values', data=values_s, compression='lzf')
+        g.create_dataset('delta_wire', data=delta_wire, compression='gzip')
+        g.create_dataset('delta_time', data=delta_time, compression='gzip')
+
+        if digitized and pedestals is not None:
+            # Add pedestal back: signed ADC → unsigned [0, 4095] → uint16
+            ped = int(pedestals[side_idx, plane_idx])
+            values_unsigned = np.round(values_s + ped).clip(0, 65535).astype(np.uint16)
+            g.create_dataset('values', data=values_unsigned, compression='gzip')
+            g.attrs['pedestal'] = ped
+        else:
+            g.create_dataset('values', data=values_s.astype(np.float32), compression='gzip')
+
         g.attrs['wire_start'] = int(wire_s[0])
         g.attrs['time_start'] = int(time_s[0])
         g.attrs['n_pixels'] = len(wire_s)

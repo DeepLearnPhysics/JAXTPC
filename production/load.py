@@ -81,6 +81,11 @@ def build_viz_config(resp_path):
 def load_event_resp(resp_path, event_idx):
     """Load one event's response signals as dense arrays.
 
+    Automatically detects uint16 (digitized) vs float32 format.
+    For uint16, subtracts the per-plane pedestal to recover signed ADC
+    values. Returns uint16 arrays (unsigned, with pedestal) when digitized,
+    float32 otherwise.
+
     Parameters
     ----------
     resp_path : str
@@ -92,8 +97,12 @@ def load_event_resp(resp_path, event_idx):
     -------
     dense_signals : dict
         {(side, plane): (num_wires, num_time_steps) ndarray}
+        dtype is uint16 if digitized (values include pedestal), float32 otherwise.
     event_attrs : dict
         Event-level attributes (n_deposits, n_east, n_west, source_event_idx).
+    pedestals : dict or None
+        {(side, plane): int} pedestal per plane if digitized, None otherwise.
+        Subtract to get signed ADC: ``signal_adc = values.astype(int) - pedestal``.
     """
     event_key = f'event_{event_idx:03d}'
 
@@ -106,27 +115,39 @@ def load_event_resp(resp_path, event_idx):
         event_attrs = dict(evt.attrs)
 
         dense_signals = {}
+        pedestals = {}
+        digitized = False
         for (s, p) in PLANE_KEYS:
             name = PLANE_NAMES[(s, p)]
             nw = int(num_wires_arr[s, p])
-            dense = np.zeros((nw, num_time_steps), dtype=np.float32)
 
-            if name in evt and 'delta_wire' in evt[name]:
-                g = evt[name]
-                wire_start = int(g.attrs['wire_start'])
-                time_start = int(g.attrs['time_start'])
+            if name not in evt or 'delta_wire' not in evt[name]:
+                dense_signals[(s, p)] = np.zeros((nw, num_time_steps), dtype=np.uint16)
+                continue
 
-                wires = wire_start + np.cumsum(g['delta_wire'][:]).astype(np.int32)
-                times = time_start + np.cumsum(g['delta_time'][:]).astype(np.int32)
-                values = g['values'][:]
+            g = evt[name]
+            wire_start = int(g.attrs['wire_start'])
+            time_start = int(g.attrs['time_start'])
 
-                valid = ((wires >= 0) & (wires < nw) &
-                         (times >= 0) & (times < num_time_steps))
-                dense[wires[valid], times[valid]] = values[valid]
+            wires = wire_start + np.cumsum(g['delta_wire'][:]).astype(np.int32)
+            times = time_start + np.cumsum(g['delta_time'][:]).astype(np.int32)
+            valid = ((wires >= 0) & (wires < nw) &
+                     (times >= 0) & (times < num_time_steps))
+
+            raw_values = g['values'][:]
+            if raw_values.dtype == np.uint16:
+                digitized = True
+                ped = int(g.attrs['pedestal'])
+                pedestals[(s, p)] = ped
+                dense = np.zeros((nw, num_time_steps), dtype=np.uint16)
+                dense[wires[valid], times[valid]] = raw_values[valid]
+            else:
+                dense = np.zeros((nw, num_time_steps), dtype=np.float32)
+                dense[wires[valid], times[valid]] = raw_values[valid]
 
             dense_signals[(s, p)] = dense
 
-    return dense_signals, event_attrs
+    return dense_signals, event_attrs, pedestals if digitized else None
 
 
 # =============================================================================
