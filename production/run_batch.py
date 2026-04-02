@@ -61,7 +61,12 @@ def load_deposit(extractor, event_idx, sim_config,
     Returns DepositData (multi-volume, padded, grouped).
     """
     step_data = extractor.extract_step_arrays(event_idx)
-    interaction_ids = compute_interaction_ids(extractor.file, event_idx)
+    pdata = getattr(extractor, '_last_particle_data', None) or {}
+    interaction_ids = compute_interaction_ids(
+        extractor.file, event_idx,
+        ancestor_track_ids=step_data.get('ancestor_track_id'),
+        particle_track_ids=pdata.get('track_id'),
+        particle_parent_ids=pdata.get('parent_track_id'))
     positions_mm = np.asarray(
         step_data.get('position', np.empty((0, 3))), dtype=np.float32)
     n = positions_mm.shape[0]

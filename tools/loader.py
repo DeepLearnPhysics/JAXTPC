@@ -12,7 +12,8 @@ import numpy as np
 from tools.config import DepositData, VolumeDeposits
 
 
-def compute_interaction_ids(file, event_idx):
+def compute_interaction_ids(file, event_idx, ancestor_track_ids=None,
+                            particle_track_ids=None, particle_parent_ids=None):
     """Map each step to its interaction_id via ancestor → primary lookup.
 
     Uses bulk vectorized approach: resolve unique ancestors first (~50–70),
@@ -24,18 +25,30 @@ def compute_interaction_ids(file, event_idx):
         Open HDF5 file.
     event_idx : int
         Event index.
+    ancestor_track_ids : np.ndarray, optional
+        Pre-extracted ancestor_track_id array from pstep. If provided,
+        avoids re-reading pstep from HDF5.
+    particle_track_ids : np.ndarray, optional
+        Pre-extracted particle track_id array. If provided along with
+        particle_parent_ids, avoids re-reading particle/geant4 for orphans.
+    particle_parent_ids : np.ndarray, optional
+        Pre-extracted particle parent_track_id array.
 
     Returns
     -------
     interaction_ids : np.ndarray, shape (n_steps,), int16
         Interaction ID per step. -1 for unresolvable (sentinel ancestors).
     """
-    steps = file['pstep/lar_vol'][event_idx]
     primaries = file['primary/geant4'][event_idx]
 
     prim_tids = primaries['track_id'].astype(np.int32)
     prim_iids = primaries['interaction_id'].astype(np.int32)
-    s_anc = steps['ancestor_track_id'].astype(np.int32)
+
+    if ancestor_track_ids is not None:
+        s_anc = np.asarray(ancestor_track_ids, dtype=np.int32)
+    else:
+        steps = file['pstep/lar_vol'][event_idx]
+        s_anc = steps['ancestor_track_id'].astype(np.int32)
 
     # Phase 1: resolve unique ancestors via primary lookup
     unique_anc = np.unique(s_anc)
@@ -53,9 +66,13 @@ def compute_interaction_ids(file, event_idx):
     # Phase 2: resolve orphans (pi0 decay photons) via parent chain
     orphan_mask = anc_iid == -1
     if np.any(orphan_mask):
-        particles = file['particle/geant4'][event_idx]
-        p_tids = particles['track_id'].astype(np.int32)
-        p_parents = particles['parent_track_id'].astype(np.int32)
+        if particle_track_ids is not None and particle_parent_ids is not None:
+            p_tids = np.asarray(particle_track_ids, dtype=np.int32)
+            p_parents = np.asarray(particle_parent_ids, dtype=np.int32)
+        else:
+            particles = file['particle/geant4'][event_idx]
+            p_tids = particles['track_id'].astype(np.int32)
+            p_parents = particles['parent_track_id'].astype(np.int32)
         p_sort = np.argsort(p_tids)
         sorted_p_tids = p_tids[p_sort]
         sorted_p_parents = p_parents[p_sort]
@@ -341,8 +358,9 @@ class ParticleStepExtractor:
                 print("No step data found")
             return {}
 
-        # Get particle data
+        # Get particle data (cache for reuse by compute_interaction_ids)
         particle_data = self._get_numeric_fields(self.particle_path, event_idx)
+        self._last_particle_data = particle_data
         if not particle_data:
             if self.verbose:
                 print("No particle data found")
@@ -401,8 +419,13 @@ def load_particle_step_data(file_path, event_idx=0, verbose=False):
     """
     with ParticleStepExtractor(file_path, verbose=verbose) as extractor:
         step_data = extractor.extract_step_arrays(event_idx)
-        # Compute interaction_ids while file is still open
-        interaction_ids = compute_interaction_ids(extractor.file, event_idx)
+        # Compute interaction_ids while file is still open, reusing already-read data
+        pdata = getattr(extractor, '_last_particle_data', None) or {}
+        interaction_ids = compute_interaction_ids(
+            extractor.file, event_idx,
+            ancestor_track_ids=step_data.get('ancestor_track_id'),
+            particle_track_ids=pdata.get('track_id'),
+            particle_parent_ids=pdata.get('parent_track_id'))
 
     # Get positions and determine array size (numpy — no XLA compilation)
     positions_mm = np.asarray(
@@ -646,7 +669,7 @@ def build_deposit_data(positions_mm, de, dx, sim_config,
 
     theta = np.asarray(theta, dtype=np.float32) if theta is not None else np.zeros(N, dtype=np.float32)
     phi = np.asarray(phi, dtype=np.float32) if phi is not None else np.zeros(N, dtype=np.float32)
-    track_ids = np.asarray(track_ids, dtype=np.int32) if track_ids is not None else np.zeros(N, dtype=np.int32)
+    track_ids = np.asarray(track_ids, dtype=np.int32) if track_ids is not None else np.full(N, -1, dtype=np.int32)
     t0_us = np.asarray(t0_us, dtype=np.float32) if t0_us is not None else np.zeros(N, dtype=np.float32)
     interaction_ids = np.asarray(interaction_ids, dtype=np.int16) if interaction_ids is not None else np.full(N, -1, dtype=np.int16)
     ancestor_track_ids = np.asarray(ancestor_track_ids, dtype=np.int32) if ancestor_track_ids is not None else np.full(N, -1, dtype=np.int32)
@@ -748,7 +771,7 @@ def _build_padded_deposit_data(vol_arrays, vol_n_actuals, vol_group_to_track,
             dx=_pad(vol_arrays['dx'][v], vol_n_actuals[v], pad_val=1.0),
             theta=_pad(vol_arrays['theta'][v], vol_n_actuals[v]),
             phi=_pad(vol_arrays['phi'][v], vol_n_actuals[v]),
-            track_ids=_pad(vol_arrays['track_ids'][v], vol_n_actuals[v]),
+            track_ids=_pad(vol_arrays['track_ids'][v], vol_n_actuals[v], pad_val=-1),
             group_ids=_pad(vol_arrays['group_ids'][v], vol_n_actuals[v]),
             t0_us=_pad(vol_arrays['t0_us'][v], vol_n_actuals[v]),
             interaction_ids=_pad(vol_arrays['interaction_ids'][v], vol_n_actuals[v], pad_val=-1),

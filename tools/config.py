@@ -566,7 +566,7 @@ def create_deposit_data(positions_mm, de, dx, theta=None, phi=None,
     dx_arr = jnp.full(N, dx) if jnp.ndim(dx) == 0 else dx
     th = theta if theta is not None else jnp.zeros(N)
     ph = phi if phi is not None else jnp.zeros(N)
-    tids = track_ids if track_ids is not None else jnp.zeros(N, jnp.int32)
+    tids = track_ids if track_ids is not None else jnp.full(N, -1, jnp.int32)
     gids = group_ids if group_ids is not None else jnp.zeros(N, jnp.int32)
     t0 = t0_us if t0_us is not None else jnp.zeros(N)
     iids = interaction_ids if interaction_ids is not None else jnp.full(N, -1, jnp.int16)
@@ -612,7 +612,7 @@ def pad_deposit_data(deposits, target_size):
             dx=_pad(vol.dx, pad_val=1.0),
             theta=_pad(vol.theta),
             phi=_pad(vol.phi),
-            track_ids=_pad(vol.track_ids),
+            track_ids=_pad(vol.track_ids, pad_val=-1),
             group_ids=_pad(vol.group_ids),
             t0_us=_pad(vol.t0_us),
             interaction_ids=_pad(vol.interaction_ids, pad_val=-1),

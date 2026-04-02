@@ -735,11 +735,11 @@ class DetectorSimulator:
             dx=jnp.ones(pad, dtype=jnp.float32),
             theta=jnp.zeros(pad, dtype=jnp.float32),
             phi=jnp.zeros(pad, dtype=jnp.float32),
-            track_ids=jnp.zeros(pad, dtype=jnp.int32),
+            track_ids=jnp.full(pad, -1, dtype=jnp.int32),
             group_ids=jnp.zeros(pad, dtype=jnp.int32),
             t0_us=jnp.zeros(pad, dtype=jnp.float32),
             interaction_ids=jnp.full(pad, -1, dtype=jnp.int16),
-            ancestor_track_ids=jnp.zeros(pad, dtype=jnp.int32),
+            ancestor_track_ids=jnp.full(pad, -1, dtype=jnp.int32),
             pdg=jnp.zeros(pad, dtype=jnp.int32),
             charge=jnp.zeros(pad, dtype=jnp.float32),
             photons=jnp.zeros(pad, dtype=jnp.float32),
@@ -796,7 +796,7 @@ class DetectorSimulator:
         padded_dx = _pad(dx_arr, pad_val=1.0)
         padded_theta = jnp.zeros(total_pad)
         padded_phi = jnp.zeros(total_pad)
-        padded_tids = jnp.zeros(total_pad, dtype=jnp.int32)
+        padded_tids = jnp.full(total_pad, -1, dtype=jnp.int32)
         padded_gids = jnp.zeros(total_pad, dtype=jnp.int32)
         padded_t0 = jnp.zeros(total_pad)
 
@@ -820,7 +820,7 @@ class DetectorSimulator:
                 group_ids=padded_gids,
                 t0_us=padded_t0,
                 interaction_ids=jnp.full(total_pad, -1, dtype=jnp.int16),
-                ancestor_track_ids=jnp.zeros(total_pad, dtype=jnp.int32),
+                ancestor_track_ids=jnp.full(total_pad, -1, dtype=jnp.int32),
                 pdg=jnp.zeros(total_pad, dtype=jnp.int32),
                 charge=jnp.zeros(total_pad),
                 photons=jnp.zeros(total_pad),
