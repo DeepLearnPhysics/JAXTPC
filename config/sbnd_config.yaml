@@ -1,16 +1,22 @@
 ---
-# JAXTPC Detector Configuration, Almost SBND size
+# SBND Detector Configuration
+# Short-Baseline Near Detector at Fermilab
+# References: arXiv:2501.11349, arXiv:2002.08424, arXiv:2505.21151
+#
+# Dual-drift TPC: central cathode (-100 kV), two symmetric drift volumes
+# Active volume: 4m (x) x 4m (y) x 5m (z) = 112 tonnes LAr
+# Cold electronics: BNL LArASIC (same family as MicroBooNE)
 
 volumes:
   - id: 0
     description: "TPC East (x < 0)"
     geometry:
-      ranges: [[-216.0, 0.0], [-216.0, 216.0], [-216.0, 216.0]]  # cm [x, y, z]
+      ranges: [[-200.0, 0.0], [-200.0, 200.0], [0.0, 500.0]]  # cm [x, y, z]
       drift_direction: -1   # electrons drift toward -x anode
     planes:
       - plane_id: 0
         type: first_induction
-        angle: 60.0  # degrees
+        angle: 60.0  # degrees from vertical (z-axis)
         wire_spacing: 0.3  # cm
         distance_from_anode: 0.6  # cm (furthest from detector edge)
         bias_voltage: -200.0  # V
@@ -22,41 +28,39 @@ volumes:
         bias_voltage: 0.0  # V
       - plane_id: 2
         type: collection
-        angle: 0.0  # degrees
+        angle: 0.0  # degrees (vertical wires)
         wire_spacing: 0.3  # cm
         distance_from_anode: 0.0  # cm (closest to detector edge)
-        bias_voltage: 500.0  # V
+        bias_voltage: 440.0  # V
 
   - id: 1
     description: "TPC West (x > 0)"
     geometry:
-      ranges: [[0.0, 216.0], [-216.0, 216.0], [-216.0, 216.0]]  # cm [x, y, z]
+      ranges: [[0.0, 200.0], [-200.0, 200.0], [0.0, 500.0]]  # cm [x, y, z]
       drift_direction: 1    # electrons drift toward +x anode
     planes:
       - plane_id: 3
         type: first_induction
         angle: 60.0  # degrees
         wire_spacing: 0.3  # cm
-        distance_from_anode: 0.6  # cm (furthest from detector edge)
+        distance_from_anode: 0.6  # cm
         bias_voltage: -200.0  # V
       - plane_id: 4
         type: second_induction
         angle: -60.0  # degrees
         wire_spacing: 0.3  # cm
-        distance_from_anode: 0.3  # cm (middle plane)
+        distance_from_anode: 0.3  # cm
         bias_voltage: 0.0  # V
       - plane_id: 5
         type: collection
         angle: 0.0  # degrees
         wire_spacing: 0.3  # cm
-        distance_from_anode: 0.0  # cm (closest to detector edge)
-        bias_voltage: 500.0  # V
+        distance_from_anode: 0.0  # cm
+        bias_voltage: 440.0  # V
 
 readout:
   sampling_rate: 2.0  # MHz
-  electrons_per_adc: 182  # electrons per ADC count (from MicroBooNE electronics)
-  pre_window_fraction: 0.0   # fraction of max drift time before t=0
-  post_window_fraction: 0.0  # fraction of max drift time after max drift
+  electrons_per_adc: 182  # electrons per ADC count (MicroBooNE/SBND cold electronics)
   digitization:
     n_bits: 12                  # ADC resolution
     pedestal_collection: 410    # Baseline ADC for Y (collection) planes
@@ -65,25 +69,25 @@ readout:
 
 simulation:
   drift:
-    velocity: 1.6  # mm/μs
-    longitudinal_diffusion: 7.2  # cm²/s
-    transverse_diffusion: 12.0  # cm²/s
-    electron_lifetime: 10.0  # ms
+    velocity: 1.6  # mm/us (Walkowiak at 500 V/cm, ~87 K)
+    longitudinal_diffusion: 7.2  # cm^2/s (Li et al. 2016 parametrization)
+    transverse_diffusion: 12.0  # cm^2/s (community standard)
+    electron_lifetime: 10.0  # ms (conservative default; SBND sim uses 35 ms)
   charge_recombination:
     model: emb  # Options: 'modified_box' (ArgoNeuT), 'emb' (ICARUS)
     recomb_parameters:
       # Standard Modified Box (ArgoNeuT 2013, JINST 8 P08005)
       alpha: 0.93   # dimensionless
-      beta: 0.212   # (kV/cm)(g/cm²)/MeV
+      beta: 0.212   # (kV/cm)(g/cm^2)/MeV
       # Ellipsoid Modified Box (ICARUS 2024, arXiv:2407.12969)
       alpha_emb: 0.904      # dimensionless
-      beta_90: 0.204        # (kV/cm)(g/cm²)/MeV (at phi=90 deg)
+      beta_90: 0.204        # (kV/cm)(g/cm^2)/MeV (at phi=90 deg)
       R_anisotropy: 1.25    # ellipsoid anisotropy parameter
 
 medium:
   type: liquid_argon
   properties:
-    density: 1.396  # g/cm³
+    density: 1.396  # g/cm^3 (at ~87 K)
     ionization_energy: 23.6  # eV per ion pair (W_ion)
     excitation_ratio: 0.21  # N_ex / N_i (alpha), universal LAr constant
   temperature: 87.0  # K

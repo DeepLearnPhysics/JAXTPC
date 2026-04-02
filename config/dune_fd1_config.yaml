@@ -1,0 +1,169 @@
+---
+# DUNE Far Detector Module 1 (Horizontal Drift) Configuration
+# References: arXiv:2002.03010 (FD TDR Vol IV), arXiv:1706.07081 (ProtoDUNE-SP)
+#             GDML: generate_dune10kt_v6_refactored.pl (DUNE/dunecore)
+#
+# Full module: 4 drift volumes in A-C-A-C-A arrangement
+#   APA0 | vol 0 (359.4cm) | CPA0 (0.3cm) | vol 1 (359.4cm) | APA1 | vol 2 (359.4cm) | CPA1 (0.3cm) | vol 3 (359.4cm) | APA2
+#   ~8cm                                                        ~8cm                                                        ~8cm
+#
+# Dimensions per drift volume (from GDML v6):
+#   Drift (x): 359.4 cm (3.594 m)
+#   Height (y): 1212.4 cm (2 APAs × 606.0 cm + 0.4 cm gap)
+#   Length (z): 5808.6 cm (25 APAs × 231.59 cm + 24 × 0.8 cm gaps)
+#
+# Double-sided APAs: U/V induction wires wrap around frame (both faces on same channel).
+# X collection and G grid wires are independent per face (not wrapped).
+# 150 APAs per module (25 columns × 2 rows × 3 anode walls), each 2.32m × 6.06m.
+# Cold electronics: LArASIC + ColdADC + COLDATA
+#
+# NOTE on wire counts: Collection (X) wire counts are accurate (~1%).
+# Induction (U/V) wire counts are ~58% of the real detector because the
+# continuous rectangular model doesn't capture APA segmentation — in reality
+# angled wires restart at each of the 25 APA boundaries. The per-wire
+# physics (signal shape, diffusion, response) remains correct.
+#
+# Key differences from SBN:
+#   - Wire angles: +/-35.7 deg (not +/-60 deg)
+#   - Wire pitch: 4.669 mm (U/V), 4.790 mm (X) — not 3 mm
+#   - Inter-plane gap: 4.76 mm (not 3 mm)
+#   - Drift distance: 359.4 cm (vs 200 cm SBND)
+
+volumes:
+  # --- Volumes 0 & 1: share CPA0, between APA0 (outer) and APA1 (central) ---
+  - id: 0
+    description: "Drift volume 0 (APA0 side, outermost left)"
+    geometry:
+      ranges: [[-727.4, -367.7], [-606.2, 606.2], [0.0, 5808.6]]  # cm [x, y, z]
+      drift_direction: -1   # electrons drift toward -x (APA0)
+    planes:
+      - plane_id: 0
+        type: first_induction
+        angle: 35.7  # degrees from vertical
+        wire_spacing: 0.4669  # cm (4.669 mm)
+        distance_from_anode: 0.952  # cm (2 × 4.76 mm inter-plane gap)
+        bias_voltage: -370.0  # V
+      - plane_id: 1
+        type: second_induction
+        angle: -35.7  # degrees
+        wire_spacing: 0.4669  # cm
+        distance_from_anode: 0.476  # cm (1 × 4.76 mm)
+        bias_voltage: 0.0  # V
+      - plane_id: 2
+        type: collection
+        angle: 0.0  # degrees (vertical wires)
+        wire_spacing: 0.479  # cm (4.79 mm)
+        distance_from_anode: 0.0  # cm
+        bias_voltage: 820.0  # V
+
+  - id: 1
+    description: "Drift volume 1 (APA1 side of CPA0)"
+    geometry:
+      ranges: [[-359.4, 0.0], [-606.2, 606.2], [0.0, 5808.6]]  # cm [x, y, z]
+      drift_direction: 1    # electrons drift toward +x (APA1 at x=0)
+    planes:
+      - plane_id: 3
+        type: first_induction
+        angle: 35.7
+        wire_spacing: 0.4669
+        distance_from_anode: 0.952
+        bias_voltage: -370.0
+      - plane_id: 4
+        type: second_induction
+        angle: -35.7
+        wire_spacing: 0.4669
+        distance_from_anode: 0.476
+        bias_voltage: 0.0
+      - plane_id: 5
+        type: collection
+        angle: 0.0
+        wire_spacing: 0.479
+        distance_from_anode: 0.0
+        bias_voltage: 820.0
+
+  # --- Volumes 2 & 3: share CPA1, between APA1 (central) and APA2 (outer) ---
+  - id: 2
+    description: "Drift volume 2 (APA1 side of CPA1)"
+    geometry:
+      ranges: [[0.0, 359.4], [-606.2, 606.2], [0.0, 5808.6]]  # cm [x, y, z]
+      drift_direction: -1   # electrons drift toward -x (APA1 at x=0)
+    planes:
+      - plane_id: 6
+        type: first_induction
+        angle: 35.7
+        wire_spacing: 0.4669
+        distance_from_anode: 0.952
+        bias_voltage: -370.0
+      - plane_id: 7
+        type: second_induction
+        angle: -35.7
+        wire_spacing: 0.4669
+        distance_from_anode: 0.476
+        bias_voltage: 0.0
+      - plane_id: 8
+        type: collection
+        angle: 0.0
+        wire_spacing: 0.479
+        distance_from_anode: 0.0
+        bias_voltage: 820.0
+
+  - id: 3
+    description: "Drift volume 3 (APA2 side, outermost right)"
+    geometry:
+      ranges: [[367.7, 727.4], [-606.2, 606.2], [0.0, 5808.6]]  # cm [x, y, z]
+      drift_direction: 1    # electrons drift toward +x (APA2)
+    planes:
+      - plane_id: 9
+        type: first_induction
+        angle: 35.7
+        wire_spacing: 0.4669
+        distance_from_anode: 0.952
+        bias_voltage: -370.0
+      - plane_id: 10
+        type: second_induction
+        angle: -35.7
+        wire_spacing: 0.4669
+        distance_from_anode: 0.476
+        bias_voltage: 0.0
+      - plane_id: 11
+        type: collection
+        angle: 0.0
+        wire_spacing: 0.479
+        distance_from_anode: 0.0
+        bias_voltage: 820.0
+
+readout:
+  sampling_rate: 2.0  # MHz (ColdADC at 2 MS/s)
+  electrons_per_adc: 182  # Approximate (DUNE cold electronics, same ASIC family)
+  digitization:
+    n_bits: 12                  # ADC resolution (ColdADC)
+    pedestal_collection: 410    # Approximate — same cold ASIC baseline convention
+    pedestal_induction: 1843    # Approximate
+    gain_scale: 1.0             # Gain rescale factor
+
+simulation:
+  drift:
+    velocity: 1.6  # mm/us (at 500 V/cm, ~87 K)
+    longitudinal_diffusion: 7.2  # cm^2/s
+    transverse_diffusion: 12.0  # cm^2/s
+    electron_lifetime: 10.0  # ms (DUNE target spec; technical req >= 3 ms)
+  charge_recombination:
+    model: emb  # Options: 'modified_box' (ArgoNeuT), 'emb' (ICARUS)
+    recomb_parameters:
+      alpha: 0.93
+      beta: 0.212
+      alpha_emb: 0.904
+      beta_90: 0.204
+      R_anisotropy: 1.25
+
+medium:
+  type: liquid_argon
+  properties:
+    density: 1.396  # g/cm^3
+    ionization_energy: 23.6  # eV per ion pair (W_ion)
+    excitation_ratio: 0.21  # N_ex / N_i
+  temperature: 87.0  # K
+  pressure: 1.0  # atm
+
+electric_field:
+  field_strength: 500.0  # V/cm

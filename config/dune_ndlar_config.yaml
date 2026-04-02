@@ -1,0 +1,876 @@
+---
+# DUNE Near Detector LAr (ND-LAr / ArgonCube) Configuration
+# References: arXiv:2103.13910 (ND CDR), arXiv:2403.03212 (Module-0),
+#             arXiv:2509.07012 (2x2 Demonstrator), dunendggd GDML configs
+#
+# 35 modules in a 7x5 grid (7 along beam z, 5 transverse x)
+# Each module: dual-drift with central cathode, 46.79 cm drift per side
+# Module footprint: 100 cm x 100 cm, height: ~303 cm active
+# G10 walls + structure: ~2.9 cm per side, ~5.8 cm dead between modules
+#
+# NOTE: Real ND-LAr uses LArPix pixel readout (4mm pitch), NOT wire planes.
+# This config approximates the readout with SBND-style wire planes
+# (3 planes at +60/-60/0 deg, 3mm pitch) for use with the JAXTPC framework.
+#
+# Coordinate system:
+#   x = transverse to beam (drift direction within each module)
+#   y = vertical (height)
+#   z = beam direction
+#
+# Total: 70 drift volumes (35 modules x 2 drifts each)
+volumes:
+- id: 0
+  description: Module(0,0) left drift
+  geometry:
+    ranges:
+    - [-247.11, -200.32]
+    - [-151.3, 151.3]
+    - [-347.11, -252.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 0, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 1, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 2, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 1
+  description: Module(0,0) right drift
+  geometry:
+    ranges:
+    - [-199.68, -152.89]
+    - [-151.3, 151.3]
+    - [-347.11, -252.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 3, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 4, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 5, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 2
+  description: Module(0,1) left drift
+  geometry:
+    ranges:
+    - [-247.11, -200.32]
+    - [-151.3, 151.3]
+    - [-247.11, -152.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 6, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 7, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 8, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 3
+  description: Module(0,1) right drift
+  geometry:
+    ranges:
+    - [-199.68, -152.89]
+    - [-151.3, 151.3]
+    - [-247.11, -152.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 9, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 10, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 11, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 4
+  description: Module(0,2) left drift
+  geometry:
+    ranges:
+    - [-247.11, -200.32]
+    - [-151.3, 151.3]
+    - [-147.11, -52.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 12, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 13, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 14, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 5
+  description: Module(0,2) right drift
+  geometry:
+    ranges:
+    - [-199.68, -152.89]
+    - [-151.3, 151.3]
+    - [-147.11, -52.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 15, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 16, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 17, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 6
+  description: Module(0,3) left drift
+  geometry:
+    ranges:
+    - [-247.11, -200.32]
+    - [-151.3, 151.3]
+    - [-47.11, 47.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 18, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 19, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 20, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 7
+  description: Module(0,3) right drift
+  geometry:
+    ranges:
+    - [-199.68, -152.89]
+    - [-151.3, 151.3]
+    - [-47.11, 47.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 21, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 22, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 23, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 8
+  description: Module(0,4) left drift
+  geometry:
+    ranges:
+    - [-247.11, -200.32]
+    - [-151.3, 151.3]
+    - [52.89, 147.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 24, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 25, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 26, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 9
+  description: Module(0,4) right drift
+  geometry:
+    ranges:
+    - [-199.68, -152.89]
+    - [-151.3, 151.3]
+    - [52.89, 147.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 27, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 28, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 29, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 10
+  description: Module(0,5) left drift
+  geometry:
+    ranges:
+    - [-247.11, -200.32]
+    - [-151.3, 151.3]
+    - [152.89, 247.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 30, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 31, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 32, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 11
+  description: Module(0,5) right drift
+  geometry:
+    ranges:
+    - [-199.68, -152.89]
+    - [-151.3, 151.3]
+    - [152.89, 247.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 33, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 34, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 35, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 12
+  description: Module(0,6) left drift
+  geometry:
+    ranges:
+    - [-247.11, -200.32]
+    - [-151.3, 151.3]
+    - [252.89, 347.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 36, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 37, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 38, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 13
+  description: Module(0,6) right drift
+  geometry:
+    ranges:
+    - [-199.68, -152.89]
+    - [-151.3, 151.3]
+    - [252.89, 347.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 39, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 40, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 41, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 14
+  description: Module(1,0) left drift
+  geometry:
+    ranges:
+    - [-147.11, -100.32]
+    - [-151.3, 151.3]
+    - [-347.11, -252.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 42, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 43, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 44, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 15
+  description: Module(1,0) right drift
+  geometry:
+    ranges:
+    - [-99.68, -52.89]
+    - [-151.3, 151.3]
+    - [-347.11, -252.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 45, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 46, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 47, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 16
+  description: Module(1,1) left drift
+  geometry:
+    ranges:
+    - [-147.11, -100.32]
+    - [-151.3, 151.3]
+    - [-247.11, -152.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 48, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 49, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 50, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 17
+  description: Module(1,1) right drift
+  geometry:
+    ranges:
+    - [-99.68, -52.89]
+    - [-151.3, 151.3]
+    - [-247.11, -152.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 51, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 52, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 53, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 18
+  description: Module(1,2) left drift
+  geometry:
+    ranges:
+    - [-147.11, -100.32]
+    - [-151.3, 151.3]
+    - [-147.11, -52.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 54, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 55, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 56, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 19
+  description: Module(1,2) right drift
+  geometry:
+    ranges:
+    - [-99.68, -52.89]
+    - [-151.3, 151.3]
+    - [-147.11, -52.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 57, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 58, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 59, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 20
+  description: Module(1,3) left drift
+  geometry:
+    ranges:
+    - [-147.11, -100.32]
+    - [-151.3, 151.3]
+    - [-47.11, 47.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 60, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 61, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 62, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 21
+  description: Module(1,3) right drift
+  geometry:
+    ranges:
+    - [-99.68, -52.89]
+    - [-151.3, 151.3]
+    - [-47.11, 47.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 63, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 64, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 65, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 22
+  description: Module(1,4) left drift
+  geometry:
+    ranges:
+    - [-147.11, -100.32]
+    - [-151.3, 151.3]
+    - [52.89, 147.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 66, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 67, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 68, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 23
+  description: Module(1,4) right drift
+  geometry:
+    ranges:
+    - [-99.68, -52.89]
+    - [-151.3, 151.3]
+    - [52.89, 147.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 69, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 70, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 71, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 24
+  description: Module(1,5) left drift
+  geometry:
+    ranges:
+    - [-147.11, -100.32]
+    - [-151.3, 151.3]
+    - [152.89, 247.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 72, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 73, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 74, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 25
+  description: Module(1,5) right drift
+  geometry:
+    ranges:
+    - [-99.68, -52.89]
+    - [-151.3, 151.3]
+    - [152.89, 247.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 75, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 76, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 77, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 26
+  description: Module(1,6) left drift
+  geometry:
+    ranges:
+    - [-147.11, -100.32]
+    - [-151.3, 151.3]
+    - [252.89, 347.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 78, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 79, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 80, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 27
+  description: Module(1,6) right drift
+  geometry:
+    ranges:
+    - [-99.68, -52.89]
+    - [-151.3, 151.3]
+    - [252.89, 347.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 81, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 82, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 83, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 28
+  description: Module(2,0) left drift
+  geometry:
+    ranges:
+    - [-47.11, -0.32]
+    - [-151.3, 151.3]
+    - [-347.11, -252.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 84, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 85, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 86, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 29
+  description: Module(2,0) right drift
+  geometry:
+    ranges:
+    - [0.32, 47.11]
+    - [-151.3, 151.3]
+    - [-347.11, -252.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 87, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 88, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 89, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 30
+  description: Module(2,1) left drift
+  geometry:
+    ranges:
+    - [-47.11, -0.32]
+    - [-151.3, 151.3]
+    - [-247.11, -152.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 90, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 91, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 92, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 31
+  description: Module(2,1) right drift
+  geometry:
+    ranges:
+    - [0.32, 47.11]
+    - [-151.3, 151.3]
+    - [-247.11, -152.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 93, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 94, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 95, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 32
+  description: Module(2,2) left drift
+  geometry:
+    ranges:
+    - [-47.11, -0.32]
+    - [-151.3, 151.3]
+    - [-147.11, -52.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 96, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 97, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 98, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 33
+  description: Module(2,2) right drift
+  geometry:
+    ranges:
+    - [0.32, 47.11]
+    - [-151.3, 151.3]
+    - [-147.11, -52.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 99, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 100, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 101, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 34
+  description: Module(2,3) left drift
+  geometry:
+    ranges:
+    - [-47.11, -0.32]
+    - [-151.3, 151.3]
+    - [-47.11, 47.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 102, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 103, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 104, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 35
+  description: Module(2,3) right drift
+  geometry:
+    ranges:
+    - [0.32, 47.11]
+    - [-151.3, 151.3]
+    - [-47.11, 47.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 105, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 106, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 107, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 36
+  description: Module(2,4) left drift
+  geometry:
+    ranges:
+    - [-47.11, -0.32]
+    - [-151.3, 151.3]
+    - [52.89, 147.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 108, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 109, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 110, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 37
+  description: Module(2,4) right drift
+  geometry:
+    ranges:
+    - [0.32, 47.11]
+    - [-151.3, 151.3]
+    - [52.89, 147.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 111, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 112, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 113, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 38
+  description: Module(2,5) left drift
+  geometry:
+    ranges:
+    - [-47.11, -0.32]
+    - [-151.3, 151.3]
+    - [152.89, 247.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 114, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 115, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 116, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 39
+  description: Module(2,5) right drift
+  geometry:
+    ranges:
+    - [0.32, 47.11]
+    - [-151.3, 151.3]
+    - [152.89, 247.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 117, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 118, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 119, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 40
+  description: Module(2,6) left drift
+  geometry:
+    ranges:
+    - [-47.11, -0.32]
+    - [-151.3, 151.3]
+    - [252.89, 347.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 120, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 121, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 122, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 41
+  description: Module(2,6) right drift
+  geometry:
+    ranges:
+    - [0.32, 47.11]
+    - [-151.3, 151.3]
+    - [252.89, 347.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 123, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 124, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 125, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 42
+  description: Module(3,0) left drift
+  geometry:
+    ranges:
+    - [52.89, 99.68]
+    - [-151.3, 151.3]
+    - [-347.11, -252.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 126, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 127, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 128, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 43
+  description: Module(3,0) right drift
+  geometry:
+    ranges:
+    - [100.32, 147.11]
+    - [-151.3, 151.3]
+    - [-347.11, -252.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 129, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 130, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 131, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 44
+  description: Module(3,1) left drift
+  geometry:
+    ranges:
+    - [52.89, 99.68]
+    - [-151.3, 151.3]
+    - [-247.11, -152.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 132, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 133, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 134, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 45
+  description: Module(3,1) right drift
+  geometry:
+    ranges:
+    - [100.32, 147.11]
+    - [-151.3, 151.3]
+    - [-247.11, -152.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 135, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 136, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 137, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 46
+  description: Module(3,2) left drift
+  geometry:
+    ranges:
+    - [52.89, 99.68]
+    - [-151.3, 151.3]
+    - [-147.11, -52.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 138, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 139, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 140, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 47
+  description: Module(3,2) right drift
+  geometry:
+    ranges:
+    - [100.32, 147.11]
+    - [-151.3, 151.3]
+    - [-147.11, -52.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 141, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 142, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 143, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 48
+  description: Module(3,3) left drift
+  geometry:
+    ranges:
+    - [52.89, 99.68]
+    - [-151.3, 151.3]
+    - [-47.11, 47.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 144, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 145, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 146, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 49
+  description: Module(3,3) right drift
+  geometry:
+    ranges:
+    - [100.32, 147.11]
+    - [-151.3, 151.3]
+    - [-47.11, 47.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 147, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 148, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 149, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 50
+  description: Module(3,4) left drift
+  geometry:
+    ranges:
+    - [52.89, 99.68]
+    - [-151.3, 151.3]
+    - [52.89, 147.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 150, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 151, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 152, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 51
+  description: Module(3,4) right drift
+  geometry:
+    ranges:
+    - [100.32, 147.11]
+    - [-151.3, 151.3]
+    - [52.89, 147.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 153, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 154, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 155, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 52
+  description: Module(3,5) left drift
+  geometry:
+    ranges:
+    - [52.89, 99.68]
+    - [-151.3, 151.3]
+    - [152.89, 247.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 156, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 157, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 158, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 53
+  description: Module(3,5) right drift
+  geometry:
+    ranges:
+    - [100.32, 147.11]
+    - [-151.3, 151.3]
+    - [152.89, 247.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 159, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 160, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 161, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 54
+  description: Module(3,6) left drift
+  geometry:
+    ranges:
+    - [52.89, 99.68]
+    - [-151.3, 151.3]
+    - [252.89, 347.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 162, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 163, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 164, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 55
+  description: Module(3,6) right drift
+  geometry:
+    ranges:
+    - [100.32, 147.11]
+    - [-151.3, 151.3]
+    - [252.89, 347.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 165, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 166, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 167, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 56
+  description: Module(4,0) left drift
+  geometry:
+    ranges:
+    - [152.89, 199.68]
+    - [-151.3, 151.3]
+    - [-347.11, -252.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 168, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 169, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 170, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 57
+  description: Module(4,0) right drift
+  geometry:
+    ranges:
+    - [200.32, 247.11]
+    - [-151.3, 151.3]
+    - [-347.11, -252.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 171, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 172, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 173, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 58
+  description: Module(4,1) left drift
+  geometry:
+    ranges:
+    - [152.89, 199.68]
+    - [-151.3, 151.3]
+    - [-247.11, -152.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 174, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 175, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 176, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 59
+  description: Module(4,1) right drift
+  geometry:
+    ranges:
+    - [200.32, 247.11]
+    - [-151.3, 151.3]
+    - [-247.11, -152.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 177, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 178, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 179, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 60
+  description: Module(4,2) left drift
+  geometry:
+    ranges:
+    - [152.89, 199.68]
+    - [-151.3, 151.3]
+    - [-147.11, -52.89]
+    drift_direction: -1
+  planes:
+  - {plane_id: 180, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 181, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 182, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 61
+  description: Module(4,2) right drift
+  geometry:
+    ranges:
+    - [200.32, 247.11]
+    - [-151.3, 151.3]
+    - [-147.11, -52.89]
+    drift_direction: 1
+  planes:
+  - {plane_id: 183, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 184, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 185, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 62
+  description: Module(4,3) left drift
+  geometry:
+    ranges:
+    - [152.89, 199.68]
+    - [-151.3, 151.3]
+    - [-47.11, 47.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 186, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 187, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 188, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 63
+  description: Module(4,3) right drift
+  geometry:
+    ranges:
+    - [200.32, 247.11]
+    - [-151.3, 151.3]
+    - [-47.11, 47.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 189, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 190, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 191, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 64
+  description: Module(4,4) left drift
+  geometry:
+    ranges:
+    - [152.89, 199.68]
+    - [-151.3, 151.3]
+    - [52.89, 147.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 192, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 193, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 194, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 65
+  description: Module(4,4) right drift
+  geometry:
+    ranges:
+    - [200.32, 247.11]
+    - [-151.3, 151.3]
+    - [52.89, 147.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 195, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 196, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 197, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 66
+  description: Module(4,5) left drift
+  geometry:
+    ranges:
+    - [152.89, 199.68]
+    - [-151.3, 151.3]
+    - [152.89, 247.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 198, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 199, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 200, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 67
+  description: Module(4,5) right drift
+  geometry:
+    ranges:
+    - [200.32, 247.11]
+    - [-151.3, 151.3]
+    - [152.89, 247.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 201, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 202, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 203, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 68
+  description: Module(4,6) left drift
+  geometry:
+    ranges:
+    - [152.89, 199.68]
+    - [-151.3, 151.3]
+    - [252.89, 347.11]
+    drift_direction: -1
+  planes:
+  - {plane_id: 204, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 205, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 206, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+- id: 69
+  description: Module(4,6) right drift
+  geometry:
+    ranges:
+    - [200.32, 247.11]
+    - [-151.3, 151.3]
+    - [252.89, 347.11]
+    drift_direction: 1
+  planes:
+  - {plane_id: 207, type: first_induction, angle: 60.0, wire_spacing: 0.3, distance_from_anode: 0.6, bias_voltage: -200.0}
+  - {plane_id: 208, type: second_induction, angle: -60.0, wire_spacing: 0.3, distance_from_anode: 0.3, bias_voltage: 0.0}
+  - {plane_id: 209, type: collection, angle: 0.0, wire_spacing: 0.3, distance_from_anode: 0.0, bias_voltage: 440.0}
+readout:
+  sampling_rate: 2.0
+  electrons_per_adc: 182
+  digitization: {n_bits: 12, pedestal_collection: 410, pedestal_induction: 1843, gain_scale: 1.0}
+simulation:
+  drift: {velocity: 1.6, longitudinal_diffusion: 7.2, transverse_diffusion: 12.0, electron_lifetime: 10.0}
+  charge_recombination:
+    model: emb
+    recomb_parameters: {alpha: 0.93, beta: 0.212, alpha_emb: 0.904, beta_90: 0.204, R_anisotropy: 1.25}
+medium:
+  type: liquid_argon
+  properties: {density: 1.396, ionization_energy: 23.6, excitation_ratio: 0.21}
+  temperature: 87.0
+  pressure: 1.0
+electric_field: {field_strength: 500.0}

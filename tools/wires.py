@@ -297,7 +297,7 @@ def compute_longitudinal_diffusion(
 
 @partial(jax.jit, static_argnames=['K_wire', 'K_time', 'num_wires', 'num_time_steps'])
 def prepare_deposit_with_diffusion(
-    charge, drift_time_us, drift_distance_cm, wire_idx, closest_wire_distance,
+    charge, drift_time_us, tick_us, drift_distance_cm, wire_idx, closest_wire_distance,
     attenuation_factor, theta_xz_rad, theta_y_rad, angular_scaling_factor, valid_hit,
     K_wire, K_time, wire_spacing_cm, time_step_size_us,
     longitudinal_diffusion_cm2_us, transverse_diffusion_cm2_us, drift_velocity_cm_us,
@@ -315,7 +315,9 @@ def prepare_deposit_with_diffusion(
     charge : float
         Charge deposited by the hit.
     drift_time_us : float
-        Drift time of the hit in μs.
+        Pure drift time in μs (for diffusion sigma calculation).
+    tick_us : float
+        Readout tick time in μs (drift + t0 + pre_window, for time binning).
     drift_distance_cm : float
         Drift distance of the hit in cm.
     wire_idx : int
@@ -361,11 +363,12 @@ def prepare_deposit_with_diffusion(
     charge = jnp.where(valid_hit, charge, 0.0)
 
     # 1. Calculate time bins and offsets (using K as half-width)
-    central_time_bin = jnp.floor(drift_time_us / time_step_size_us).astype(jnp.int32)
+    # Use tick_us (readout time) for bin placement, drift_time_us for diffusion sigma
+    central_time_bin = jnp.floor(tick_us / time_step_size_us).astype(jnp.int32)
     time_bin_offsets = jnp.arange(-K_time, K_time + 1)  # 2K+1 values
     time_bins = central_time_bin + time_bin_offsets
     bin_center_times = (time_bins + 0.5) * time_step_size_us
-    time_differences_us = drift_time_us - bin_center_times  # Shape: (2*K_time+1,)
+    time_differences_us = tick_us - bin_center_times  # Shape: (2*K_time+1,)
 
     # 2. Calculate wire indices and distances (using K as half-width)
     relative_indices = jnp.arange(-K_wire, K_wire + 1)  # 2K+1 values
@@ -435,7 +438,7 @@ def prepare_deposit_with_diffusion(
 
 @partial(jax.jit, static_argnames=['num_wires'])
 def prepare_deposit_for_response(
-    charge, drift_time_us, wire_idx, closest_wire_distance,
+    charge, tick_us, wire_idx, closest_wire_distance,
     attenuation_factor, valid_hit,
     wire_spacing_cm, time_step_size_us,
     num_wires
@@ -447,8 +450,8 @@ def prepare_deposit_for_response(
     ----------
     charge : float
         Charge deposited by the hit.
-    drift_time_us : float
-        Drift time of the hit in μs.
+    tick_us : float
+        Readout tick time in μs (drift + t0 + pre_window).
     wire_idx : int
         Wire index of the closest wire.
     closest_wire_distance : float
@@ -474,8 +477,8 @@ def prepare_deposit_for_response(
     charge = jnp.where(valid_hit, charge, 0.0)
 
     # Calculate central time bin and offset
-    time_index = jnp.floor(drift_time_us / time_step_size_us).astype(jnp.int32)
-    time_offset = (drift_time_us / time_step_size_us) - time_index
+    time_index = jnp.floor(tick_us / time_step_size_us).astype(jnp.int32)
+    time_offset = (tick_us / time_step_size_us) - time_index
 
     # Calculate wire offset (fractional part of wire position)
     wire_offset = closest_wire_distance / wire_spacing_cm

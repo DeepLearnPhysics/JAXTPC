@@ -124,12 +124,24 @@ _OBSIDIAN = LinearSegmentedColormap.from_list('obsidian', [
     (0.65, '#AA5500'), (0.8,  '#FF8800'), (1.0,  '#FFEECC'),
 ])
 
-_SIDE_NAMES = ['East Side', 'West Side']
-_PLANE_TYPES = ['1st Induction (U)', '2nd Induction (V)', 'Collection (Y)']
-_PLANE_NAME_MAP = {
-    (0, 0): 'U-plane', (0, 1): 'V-plane', (0, 2): 'Y-plane',
-    (1, 0): 'U-plane', (1, 1): 'V-plane', (1, 2): 'Y-plane',
+_PLANE_TYPE_LABELS = {
+    0: '1st Induction (U)',
+    1: '2nd Induction (V)',
+    2: 'Collection (Y)',
 }
+_PLANE_NORM_KEYS = {0: 'U-plane', 1: 'V-plane', 2: 'Y-plane'}
+
+
+def _vol_name(vol_idx):
+    return f'Volume {vol_idx}'
+
+
+def _plane_type(plane_idx):
+    return _PLANE_TYPE_LABELS.get(plane_idx, f'Plane {plane_idx}')
+
+
+def _plane_norm_key(plane_idx):
+    return _PLANE_NORM_KEYS.get(plane_idx, f'plane_{plane_idx}')
 
 
 def _resolve_cmap(cmap):
@@ -155,10 +167,40 @@ def _add_colorbar(fig, ax, mappable, norm, label_size=12, tick_size=10):
     return cbar
 
 
+def _compute_marker_size(figsize, n_rows, n_cols, num_wires, max_time):
+    """Compute scatter marker size (points²) to fill ~1 data bin.
+
+    Estimates axes size from figure layout and computes a square marker
+    that covers approximately one (wire, time_step) cell. Returns at
+    least 0.01 so markers are always visible.
+
+    Parameters
+    ----------
+    figsize : tuple (width, height) in inches
+    n_rows, n_cols : grid dimensions
+    num_wires : int, data range in wire direction
+    max_time : float, data range in time direction (us)
+    """
+    # Approximate axes size (accounting for spacing/labels ~70% of cell)
+    ax_w_inches = figsize[0] / n_cols * 0.7
+    ax_h_inches = figsize[1] / n_rows * 0.7
+    # With set_box_aspect(1), axes are square in display
+    ax_inches = min(ax_w_inches, ax_h_inches)
+
+    # Points per data unit (72 points per inch)
+    pts_per_wire = (ax_inches * 72) / max(num_wires, 1)
+    pts_per_tick = (ax_inches * 72) / max(max_time, 1e-6)
+    side = min(pts_per_wire, pts_per_tick)
+    return max(side ** 2, 0.01)
+
+
 def _extract_viz_params(config):
     """Extract visualization parameters from SimConfig."""
-    num_wires = np.array([[config.side_geom[s].num_wires[p]
-                           for p in range(3)] for s in range(2)])
+    num_wires = {
+        (v, p): config.volumes[v].num_wires[p]
+        for v in range(config.n_volumes)
+        for p in range(config.volumes[v].n_planes)
+    }
     return {
         'num_time_steps': config.num_time_steps,
         'time_step_us': config.time_step_us,
@@ -239,10 +281,10 @@ def _diffused_charge_setup(valid_values, threshold, log_norm):
 # Response signal visualization
 # =========================================================================
 
-def visualize_wire_signals(wire_signals, config, figsize=(20, 10),
+def visualize_wire_signals(wire_signals, config, figsize=None,
                            threshold_enc=0, gamma=0.2, cmap='obsidian',
-                           sparse=False, point_size=0.1):
-    """Visualize wire signals for all 6 planes.
+                           sparse=False, point_size=None):
+    """Visualize wire signals for all planes.
 
     Parameters
     ----------
@@ -266,14 +308,15 @@ def visualize_wire_signals(wire_signals, config, figsize=(20, 10),
                     'V-plane': [np.inf, -np.inf],
                     'Y-plane': [np.inf, -np.inf]}
 
-    for s in range(2):
-        for p in range(3):
-            if (s, p) in wire_signals and num_wires[s, p] > 0:
+    for s in range(config.n_volumes):
+        for p in range(config.volumes[s].n_planes):
+            if (s, p) in wire_signals and num_wires[(s, p)] > 0:
                 vals = _get_values(wire_signals[(s, p)], sparse)
                 if len(vals) > 0:
-                    pname = _PLANE_NAME_MAP[(s, p)]
-                    plane_ranges[pname][0] = min(plane_ranges[pname][0], vals.min())
-                    plane_ranges[pname][1] = max(plane_ranges[pname][1], vals.max())
+                    pname = _plane_norm_key(p)
+                    if pname in plane_ranges:
+                        plane_ranges[pname][0] = min(plane_ranges[pname][0], vals.min())
+                        plane_ranges[pname][1] = max(plane_ranges[pname][1], vals.max())
 
     for pname, (vmin, vmax) in plane_ranges.items():
         if vmin == np.inf:
@@ -282,20 +325,24 @@ def visualize_wire_signals(wire_signals, config, figsize=(20, 10),
             m = max(abs(vmin), abs(vmax))
             plane_ranges[pname] = [-m, m]
 
+    n_vol = config.n_volumes
+    max_planes = max(v.n_planes for v in config.volumes)
+    if figsize is None:
+        figsize = (20, 5 * n_vol)
     fig = plt.figure(figsize=figsize, facecolor='white')
-    gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.30)
+    gs = gridspec.GridSpec(n_vol, max_planes, figure=fig, hspace=0.35, wspace=0.30)
     zero_color = resolved_cmap(0.5)
 
-    for side_idx in range(2):
-        for plane_idx in range(3):
-            ax = fig.add_subplot(gs[side_idx, plane_idx])
+    for vol_idx in range(config.n_volumes):
+        for plane_idx in range(config.volumes[vol_idx].n_planes):
+            ax = fig.add_subplot(gs[vol_idx, plane_idx])
             ax.set_facecolor(zero_color)
             ax.grid(False)
-            nw = int(num_wires[side_idx, plane_idx])
-            title = f"{_SIDE_NAMES[side_idx]} {_PLANE_TYPES[plane_idx]}"
-            pname = _PLANE_NAME_MAP[(side_idx, plane_idx)]
+            nw = int(num_wires[(vol_idx, plane_idx)])
+            title = f"{_vol_name(vol_idx)} {_plane_type(plane_idx)}"
+            pname = _plane_norm_key(plane_idx)
 
-            if (side_idx, plane_idx) not in wire_signals or nw == 0:
+            if (vol_idx, plane_idx) not in wire_signals or nw == 0:
                 ax.text(0.5, 0.5, "(No data)", color='grey',
                         ha='center', va='center', transform=ax.transAxes)
             else:
@@ -303,16 +350,19 @@ def visualize_wire_signals(wire_signals, config, figsize=(20, 10),
                 norm = DeadbandNorm(vmin, vmax, deadband_adc, gamma)
 
                 if sparse:
-                    d = wire_signals[(side_idx, plane_idx)]
+                    d = wire_signals[(vol_idx, plane_idx)]
                     w = np.asarray(d['wire'])
                     t = np.asarray(d['time']) * time_step
                     v = np.asarray(d['values'])
                     if len(v) > 0:
+                        ps = point_size if point_size is not None else \
+                            _compute_marker_size(figsize, n_vol, max_planes, nw, max_time)
                         sc = ax.scatter(w, t, c=v, cmap=resolved_cmap, norm=norm,
-                                        s=point_size, marker='s', linewidths=0)
+                                        s=ps, marker='s', linewidths=0,
+                                        edgecolors='none', rasterized=True)
                         _add_colorbar(fig, ax, sc, norm)
                 else:
-                    arr = np.asarray(wire_signals[(side_idx, plane_idx)])
+                    arr = np.asarray(wire_signals[(vol_idx, plane_idx)])
                     im = ax.imshow(arr.T, aspect='auto', origin='lower',
                                    extent=[0, nw, 0, max_time],
                                    cmap=resolved_cmap, norm=norm,
@@ -329,14 +379,14 @@ def visualize_wire_signals(wire_signals, config, figsize=(20, 10),
     return fig
 
 
-def visualize_single_plane(wire_signals, config, side_idx=0, plane_idx=0,
+def visualize_single_plane(wire_signals, config, vol_idx=0, plane_idx=0,
                            figsize=(10, 10), threshold_enc=0, gamma=0.2,
                            cmap='obsidian', sparse=False, point_size=0.5):
     """Visualize a single plane."""
     vp = _extract_viz_params(config)
     num_time = vp['num_time_steps']
     time_step = vp['time_step_us']
-    nw = int(vp['num_wires'][side_idx, plane_idx])
+    nw = int(vp['num_wires'][(vol_idx, plane_idx)])
     deadband_adc = threshold_enc / vp['electrons_per_adc']
     resolved_cmap = _resolve_cmap(cmap)
     max_time = num_time * time_step
@@ -345,7 +395,7 @@ def visualize_single_plane(wire_signals, config, side_idx=0, plane_idx=0,
     ax.set_facecolor(resolved_cmap(0.5))
     ax.grid(False)
 
-    key = (side_idx, plane_idx)
+    key = (vol_idx, plane_idx)
     if key in wire_signals and nw > 0:
         vals = _get_values(wire_signals[key], sparse)
         if len(vals) > 0:
@@ -374,7 +424,7 @@ def visualize_single_plane(wire_signals, config, side_idx=0, plane_idx=0,
     ax.set_xlim(0, nw)
     ax.set_ylim(0, max_time)
     ax.set_box_aspect(1)
-    ax.set_title(f"{_SIDE_NAMES[side_idx]} {_PLANE_TYPES[plane_idx]}", fontsize=14)
+    ax.set_title(f"{_vol_name(vol_idx)} {_plane_type(plane_idx)}", fontsize=14)
     ax.set_xlabel('Wire Index', fontsize=12)
     ax.set_ylabel('Time (us)', fontsize=12)
 
@@ -385,19 +435,25 @@ def visualize_single_plane(wire_signals, config, side_idx=0, plane_idx=0,
 # Truth hits (diffused charge) visualization
 # =========================================================================
 
-def visualize_diffused_charge(wire_signals, config, figsize=(20, 10),
-                              log_norm=False, threshold=100):
-    """Visualize diffused charge (truth hits) for all 6 planes. Dense only.
+def visualize_diffused_charge(wire_signals, config, figsize=None,
+                              log_norm=False, threshold=100,
+                              sparse=False, point_size=None):
+    """Visualize diffused charge (truth hits) for all planes.
 
     Parameters
     ----------
     wire_signals : dict
-        Keyed by (side, plane). Values are (W, T) dense arrays (electrons).
+        Keyed by (vol, plane). Dense: (W, T) arrays. Sparse: dict with
+        'wire', 'time', 'values' arrays.
     config : SimConfig
     log_norm : bool
         Use log normalization.
     threshold : float
-        Values below this are masked.
+        Values below this are masked (dense) or filtered (sparse).
+    sparse : bool
+        If True, data is sparse format. Uses scatter instead of imshow.
+    point_size : float
+        Marker size for sparse scatter plot.
     """
     vp = _extract_viz_params(config)
     num_time = vp['num_time_steps']
@@ -407,33 +463,59 @@ def visualize_diffused_charge(wire_signals, config, figsize=(20, 10),
 
     # Collect all valid values for global percentile clipping
     all_valid = []
-    for s in range(2):
-        for p in range(3):
-            if (s, p) in wire_signals and num_wires[s, p] > 0:
+    for s in range(config.n_volumes):
+        for p in range(config.volumes[s].n_planes):
+            if (s, p) not in wire_signals or num_wires[(s, p)] == 0:
+                continue
+            if sparse:
+                d = wire_signals[(s, p)]
+                v = np.asarray(d['values'])
+                valid = v[v > threshold]
+            else:
                 arr = np.asarray(wire_signals[(s, p)])
                 valid = arr[arr > threshold]
-                if len(valid) > 0:
-                    all_valid.append(valid)
+            if len(valid) > 0:
+                all_valid.append(valid)
 
     concat = np.concatenate(all_valid) if all_valid else np.array([])
     norm, cmap_obj, background = _diffused_charge_setup(concat, threshold, log_norm)
 
+    n_vol = config.n_volumes
+    max_planes = max(v.n_planes for v in config.volumes)
+    if figsize is None:
+        figsize = (20, 5 * n_vol)
     fig = plt.figure(figsize=figsize, facecolor='white')
-    gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.30)
+    gs = gridspec.GridSpec(n_vol, max_planes, figure=fig, hspace=0.35, wspace=0.30)
 
-    for side_idx in range(2):
-        for plane_idx in range(3):
-            ax = fig.add_subplot(gs[side_idx, plane_idx])
+    for vol_idx in range(config.n_volumes):
+        for plane_idx in range(config.volumes[vol_idx].n_planes):
+            ax = fig.add_subplot(gs[vol_idx, plane_idx])
             ax.set_facecolor(background)
             ax.grid(True, alpha=0.3, color='#505050', linestyle='--', linewidth=0.5)
-            nw = int(num_wires[side_idx, plane_idx])
-            title = f"{_SIDE_NAMES[side_idx]} {_PLANE_TYPES[plane_idx]}"
+            nw = int(num_wires[(vol_idx, plane_idx)])
+            title = f"{_vol_name(vol_idx)} {_plane_type(plane_idx)}"
 
-            if (side_idx, plane_idx) not in wire_signals or nw == 0:
+            if (vol_idx, plane_idx) not in wire_signals or nw == 0:
                 ax.text(0.5, 0.5, "(No data)", color='grey',
                         ha='center', va='center', transform=ax.transAxes)
+            elif sparse:
+                d = wire_signals[(vol_idx, plane_idx)]
+                w = np.asarray(d['wire'])
+                t = np.asarray(d['time']) * time_step
+                v = np.asarray(d['values'])
+                mask = v > threshold
+                if mask.any():
+                    ps = point_size if point_size is not None else \
+                        _compute_marker_size(figsize, n_vol, max_planes, nw, max_time)
+                    sc = ax.scatter(w[mask], t[mask], c=v[mask],
+                                    cmap=cmap_obj, norm=norm,
+                                    s=ps, marker='s', linewidths=0,
+                                    edgecolors='none', rasterized=True)
+                    divider = make_axes_locatable(ax)
+                    cax = divider.append_axes('right', size='3%', pad=0.0)
+                    fig.colorbar(sc, cax=cax)
             else:
-                arr = np.asarray(wire_signals[(side_idx, plane_idx)])
+                arr = np.asarray(wire_signals[(vol_idx, plane_idx)])
                 masked = np.ma.masked_where(arr <= threshold, arr)
                 im = ax.imshow(masked.T, aspect='auto', origin='lower',
                                extent=[0, nw, 0, max_time],
@@ -499,7 +581,7 @@ def get_top_tracks_by_charge(track_hits, top_n=20):
 
 
 def visualize_track_labels(track_hits, config, top_tracks_by_charge,
-                           max_tracks=15, figsize=(20, 12)):
+                           max_tracks=15, figsize=None):
     """Visualize track labels with distinct colors for top tracks.
 
     Parameters
@@ -519,17 +601,21 @@ def visualize_track_labels(track_hits, config, top_tracks_by_charge,
     colorize, top_tracks, top_color_map, hash_cmap = _build_colorize_fn(
         top_tracks_by_charge, max_tracks)
 
+    n_vol = config.n_volumes
+    max_planes = max(v.n_planes for v in config.volumes)
+    if figsize is None:
+        figsize = (20, 6 * n_vol)
     fig = plt.figure(figsize=figsize, facecolor='white')
-    gs = gridspec.GridSpec(2, 4, figure=fig, hspace=0.35, wspace=0.30,
-                           width_ratios=[1, 1, 1, 0.12])
+    gs = gridspec.GridSpec(n_vol, max_planes + 1, figure=fig, hspace=0.35, wspace=0.30,
+                           width_ratios=[1] * max_planes + [0.12])
 
-    for side_idx in range(2):
-        for plane_idx in range(3):
-            ax = fig.add_subplot(gs[side_idx, plane_idx])
+    for vol_idx in range(config.n_volumes):
+        for plane_idx in range(config.volumes[vol_idx].n_planes):
+            ax = fig.add_subplot(gs[vol_idx, plane_idx])
             ax.set_facecolor('black')
-            nw = int(num_wires[side_idx, plane_idx])
+            nw = int(num_wires[(vol_idx, plane_idx)])
 
-            key = (side_idx, plane_idx)
+            key = (vol_idx, plane_idx)
             data = track_hits[key]
             nl = int(data['num_labeled'])
 
@@ -550,14 +636,14 @@ def visualize_track_labels(track_hits, config, top_tracks_by_charge,
             ax.set_xlim(0, nw)
             ax.set_ylim(0, max_time)
             ax.set_box_aspect(1)
-            ax.set_title(f"{_SIDE_NAMES[side_idx]} {_PLANE_TYPES[plane_idx]}",
+            ax.set_title(f"{_vol_name(vol_idx)} {_plane_type(plane_idx)}",
                          fontsize=14, pad=10)
             ax.set_xlabel('Wire Index', fontsize=12)
             ax.set_ylabel('Time (us)', fontsize=12)
 
     # Legend
     if top_tracks:
-        cbar_ax = fig.add_subplot(gs[:, 3])
+        cbar_ax = fig.add_subplot(gs[:, max_planes])
         n_show = min(len(top_tracks), max_tracks)
         cbar_ax.set_xlim(0, 1)
         cbar_ax.set_ylim(0, n_show)
@@ -580,7 +666,7 @@ def visualize_track_labels(track_hits, config, top_tracks_by_charge,
 # Wire waveform visualization
 # =========================================================================
 
-def visualize_waveforms(wire_signals, config, wire_indices, side_idx=0,
+def visualize_waveforms(wire_signals, config, wire_indices, vol_idx=0,
                         plane_idx=0, figsize=(12, 6), sparse=False):
     """Plot wire signal waveforms at specific wire indices.
 
@@ -600,7 +686,7 @@ def visualize_waveforms(wire_signals, config, wire_indices, side_idx=0,
     time_axis = np.arange(num_time) * time_step
 
     fig, ax = plt.subplots(figsize=figsize)
-    key = (side_idx, plane_idx)
+    key = (vol_idx, plane_idx)
 
     if key not in wire_signals:
         ax.text(0.5, 0.5, "(No data)", ha='center', va='center', transform=ax.transAxes)
@@ -624,7 +710,7 @@ def visualize_waveforms(wire_signals, config, wire_indices, side_idx=0,
 
     ax.set_xlabel('Time (us)', fontsize=12)
     ax.set_ylabel('Signal (ADC)', fontsize=12)
-    ax.set_title(f"{_SIDE_NAMES[side_idx]} {_PLANE_TYPES[plane_idx]}", fontsize=14)
+    ax.set_title(f"{_vol_name(vol_idx)} {_plane_type(plane_idx)}", fontsize=14)
     ax.grid(True, alpha=0.3)
     if len(wire_indices) <= 10:
         ax.legend(fontsize=9)
@@ -636,17 +722,17 @@ def visualize_waveforms(wire_signals, config, wire_indices, side_idx=0,
 # Single-plane variants
 # =========================================================================
 
-def visualize_diffused_charge_single_plane(wire_signals, config, side_idx=0,
+def visualize_diffused_charge_single_plane(wire_signals, config, vol_idx=0,
                                            plane_idx=0, figsize=(10, 10),
                                            log_norm=False, threshold=100):
     """Visualize diffused charge for a single plane. Dense only."""
     vp = _extract_viz_params(config)
     num_time = vp['num_time_steps']
     time_step = vp['time_step_us']
-    nw = int(vp['num_wires'][side_idx, plane_idx])
+    nw = int(vp['num_wires'][(vol_idx, plane_idx)])
     max_time = num_time * time_step
 
-    key = (side_idx, plane_idx)
+    key = (vol_idx, plane_idx)
     arr = np.asarray(wire_signals[key]) if key in wire_signals else np.zeros((nw, num_time))
     valid = arr[arr > threshold]
     norm, cmap_obj, background = _diffused_charge_setup(valid, threshold, log_norm)
@@ -667,7 +753,7 @@ def visualize_diffused_charge_single_plane(wire_signals, config, side_idx=0,
     ax.set_xlim(0, nw)
     ax.set_ylim(0, max_time)
     ax.set_box_aspect(1)
-    ax.set_title(f"{_SIDE_NAMES[side_idx]} {_PLANE_TYPES[plane_idx]}", fontsize=14)
+    ax.set_title(f"{_vol_name(vol_idx)} {_plane_type(plane_idx)}", fontsize=14)
     ax.set_xlabel('Wire Index', fontsize=12)
     ax.set_ylabel('Time (us)', fontsize=12)
 
@@ -675,13 +761,13 @@ def visualize_diffused_charge_single_plane(wire_signals, config, side_idx=0,
 
 
 def visualize_track_labels_single_plane(track_hits, config, top_tracks_by_charge,
-                                        side_idx=0, plane_idx=0,
+                                        vol_idx=0, plane_idx=0,
                                         max_tracks=15, figsize=(12, 10)):
     """Visualize track labels for a single plane."""
     vp = _extract_viz_params(config)
     num_time = vp['num_time_steps']
     time_step = vp['time_step_us']
-    nw = int(vp['num_wires'][side_idx, plane_idx])
+    nw = int(vp['num_wires'][(vol_idx, plane_idx)])
     max_time = num_time * time_step
 
     colorize, top_tracks, top_color_map, hash_cmap = _build_colorize_fn(
@@ -690,7 +776,7 @@ def visualize_track_labels_single_plane(track_hits, config, top_tracks_by_charge
     fig, ax = plt.subplots(figsize=figsize)
     ax.set_facecolor('black')
 
-    key = (side_idx, plane_idx)
+    key = (vol_idx, plane_idx)
     data = track_hits[key]
     nl = int(data['num_labeled'])
 
@@ -719,7 +805,7 @@ def visualize_track_labels_single_plane(track_hits, config, top_tracks_by_charge
     ax.set_xlim(0, nw)
     ax.set_ylim(0, max_time)
     ax.set_box_aspect(1)
-    ax.set_title(f"{_SIDE_NAMES[side_idx]} {_PLANE_TYPES[plane_idx]}", fontsize=14)
+    ax.set_title(f"{_vol_name(vol_idx)} {_plane_type(plane_idx)}", fontsize=14)
     ax.set_xlabel('Wire Index', fontsize=12)
     ax.set_ylabel('Time (us)', fontsize=12)
 
@@ -730,7 +816,7 @@ def visualize_track_labels_single_plane(track_hits, config, top_tracks_by_charge
 # Bucket debug visualization
 # =========================================================================
 
-def visualize_active_buckets(response_signals, config, figsize=(20, 10)):
+def visualize_active_buckets(response_signals, config, figsize=None):
     """Visualize active bucket occupancy from bucketed simulation output.
 
     Parameters
@@ -746,16 +832,20 @@ def visualize_active_buckets(response_signals, config, figsize=(20, 10)):
     num_wires = vp['num_wires']
     max_time = num_time * time_step
 
+    n_vol = config.n_volumes
+    max_planes = max(v.n_planes for v in config.volumes)
+    if figsize is None:
+        figsize = (20, 5 * n_vol)
     fig = plt.figure(figsize=figsize, facecolor='white')
-    gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.30)
+    gs = gridspec.GridSpec(n_vol, max_planes, figure=fig, hspace=0.35, wspace=0.30)
 
-    for side_idx in range(2):
-        for plane_idx in range(3):
-            ax = fig.add_subplot(gs[side_idx, plane_idx])
+    for vol_idx in range(config.n_volumes):
+        for plane_idx in range(config.volumes[vol_idx].n_planes):
+            ax = fig.add_subplot(gs[vol_idx, plane_idx])
             ax.set_facecolor('#1a1a1a')
-            nw = int(num_wires[side_idx, plane_idx])
-            key = (side_idx, plane_idx)
-            title = f"{_SIDE_NAMES[side_idx]} {_PLANE_TYPES[plane_idx]}"
+            nw = int(num_wires[(vol_idx, plane_idx)])
+            key = (vol_idx, plane_idx)
+            title = f"{_vol_name(vol_idx)} {_plane_type(plane_idx)}"
 
             if key not in response_signals:
                 ax.text(0.5, 0.5, "(No data)", color='grey',
@@ -817,22 +907,30 @@ def visualize_active_buckets(response_signals, config, figsize=(20, 10)):
 # Wire geometry visualization (uses raw detector_config, not SimConfig)
 # =========================================================================
 
-def visualize_wire_planes(detector_config, figsize=(15, 10)):
+def visualize_wire_planes(detector_config, figsize=None):
     """Visualize wire plane geometry colored by wire index.
 
     This function uses the raw detector_config dict (from generate_detector),
     not SimConfig, because it needs wire plane angle/spacing/distance info.
     """
-    dims = detector_config['detector']['dimensions']
-    det_y, det_z = dims['y'], dims['z']
-    sides = detector_config['wire_planes']['sides']
+    volumes = detector_config['volumes']
+    n_vol = len(volumes)
+    max_planes = max(len(v['planes']) for v in volumes)
+    # Use first volume's y/z ranges for display dimensions
+    ranges = volumes[0]['geometry']['ranges']
+    det_y = ranges[1][1] - ranges[1][0]
+    det_z = ranges[2][1] - ranges[2][0]
 
-    fig, axes = plt.subplots(2, 3, figsize=figsize)
+    if figsize is None:
+        figsize = (15, 5 * n_vol)
+    fig, axes = plt.subplots(n_vol, max_planes, figsize=figsize)
+    if n_vol == 1:
+        axes = axes[np.newaxis, :]
     cmap = plt.cm.viridis
 
-    for side_idx, side in enumerate(sides):
-        for plane_idx, plane in enumerate(side['planes']):
-            ax = axes[side_idx, plane_idx]
+    for vol_idx, vol_cfg in enumerate(volumes):
+        for plane_idx, plane in enumerate(vol_cfg['planes']):
+            ax = axes[vol_idx, plane_idx]
             angle_rad = np.radians(plane['angle'])
             spacing = plane['wire_spacing']
 
@@ -876,7 +974,7 @@ def visualize_wire_planes(detector_config, figsize=(15, 10)):
                     ax.plot([p1[1], p2[1]], [p1[0], p2[0]], color=color,
                             linewidth=0.8, alpha=0.7)
 
-            ax.set_title(f"{['West', 'East'][side_idx]} {_PLANE_TYPES[plane_idx]}")
+            ax.set_title(f"Vol {vol_idx} {_plane_type(plane_idx)}")
             ax.set_xlabel('Z (cm)')
             ax.set_ylabel('Y (cm)')
             ax.set_xlim(0, det_z)

@@ -1,0 +1,104 @@
+---
+# ICARUS T600 Detector Configuration (one cryostat = 2 drift volumes)
+# References: NIM A 527 (2004) 329-410, arXiv:2407.12969, arXiv:2010.02042
+#
+# Each cryostat: central cathode (-75 kV), two TPCs drifting in opposite directions
+# Active volume per TPC: 1.48m (x) x 3.16m (y) x 17.95m (z)
+# Full T600 = 2 cryostats = 4 drift volumes (model each cryostat separately)
+# Warm electronics (NOT cold ASIC) -- noise model parameters are MicroBooNE-derived
+# approximations; a full ICARUS simulation would need ICARUS-specific electronics.
+#
+# IMPORTANT: Wire angles differ from SBN convention.
+#   I1 (1st induction): horizontal wires (90 deg in vertical convention)
+#   I2 (2nd induction): +60 deg from horizontal = -30 deg from vertical
+#   Collection: -60 deg from horizontal = +30 deg from vertical
+#
+# Note: Wire counts from this rectangular geometry are approximate.
+# ICARUS has additional corner wires not captured by simple ranges.
+
+volumes:
+  - id: 0
+    description: "TPC West (x < 0, e.g. TPC WW or TPC EW)"
+    geometry:
+      ranges: [[-148.2, 0.0], [-158.0, 158.0], [-897.5, 897.5]]  # cm [x, y, z]
+      drift_direction: -1   # electrons drift toward -x anode
+    planes:
+      - plane_id: 0
+        type: first_induction
+        angle: 90.0  # degrees — horizontal wires (along z-axis)
+        wire_spacing: 0.15  # cm (1.5 mm — finer pitch than I2/C, unshielded plane)
+        distance_from_anode: 0.6  # cm
+        bias_voltage: -220.0  # V
+      - plane_id: 1
+        type: second_induction
+        angle: -30.0  # degrees — wires at +60 deg from horizontal
+        wire_spacing: 0.3  # cm
+        distance_from_anode: 0.3  # cm
+        bias_voltage: 0.0  # V
+      - plane_id: 2
+        type: collection
+        angle: 30.0  # degrees — wires at -60 deg from horizontal
+        wire_spacing: 0.3  # cm
+        distance_from_anode: 0.0  # cm
+        bias_voltage: 280.0  # V
+
+  - id: 1
+    description: "TPC East (x > 0, e.g. TPC WE or TPC EE)"
+    geometry:
+      ranges: [[0.0, 148.2], [-158.0, 158.0], [-897.5, 897.5]]  # cm [x, y, z]
+      drift_direction: 1    # electrons drift toward +x anode
+    planes:
+      - plane_id: 3
+        type: first_induction
+        angle: 90.0  # degrees — horizontal wires
+        wire_spacing: 0.15  # cm (1.5 mm)
+        distance_from_anode: 0.6  # cm
+        bias_voltage: -220.0  # V
+      - plane_id: 4
+        type: second_induction
+        angle: -30.0  # degrees
+        wire_spacing: 0.3  # cm
+        distance_from_anode: 0.3  # cm
+        bias_voltage: 0.0  # V
+      - plane_id: 5
+        type: collection
+        angle: 30.0  # degrees
+        wire_spacing: 0.3  # cm
+        distance_from_anode: 0.0  # cm
+        bias_voltage: 280.0  # V
+
+readout:
+  sampling_rate: 2.5  # MHz (ICARUS uses 400 ns sampling, NOT 2.0 MHz)
+  electrons_per_adc: 75  # electrons per ADC count (ICARUS calibration, arXiv:2407.12969)
+  digitization:
+    n_bits: 12                  # ADC resolution (AD7276BUJZ, 12-bit)
+    pedestal_collection: 410    # Approximate — ICARUS warm electronics differ from cold
+    pedestal_induction: 1843    # Approximate — would need ICARUS-specific calibration
+    gain_scale: 1.0             # Gain rescale factor
+
+simulation:
+  drift:
+    velocity: 1.55  # mm/us (at ~493 V/cm, 89 K — ICARUS operating conditions)
+    longitudinal_diffusion: 7.2  # cm^2/s
+    transverse_diffusion: 7.5  # cm^2/s (ICARUS direct measurement, arXiv:2407.12969 Table 1)
+    electron_lifetime: 6.5  # ms (ICARUS Fermilab achieved, West cryostat)
+  charge_recombination:
+    model: emb  # EMB model was measured IN ICARUS (arXiv:2407.12969)
+    recomb_parameters:
+      alpha: 0.93
+      beta: 0.212
+      alpha_emb: 0.904
+      beta_90: 0.204
+      R_anisotropy: 1.25
+
+medium:
+  type: liquid_argon
+  properties:
+    density: 1.393  # g/cm^3 (ICARUS measured at 89 K, arXiv:2407.12969 Table 1)
+    ionization_energy: 23.6  # eV per ion pair (W_ion)
+    excitation_ratio: 0.21  # N_ex / N_i
+  temperature: 89.0  # K (ICARUS operates warmer than boiling point)
+  pressure: 1.0  # atm
+
+electric_field:
+  field_strength: 493.0  # V/cm (ICARUS measured: 492.6 +/- 8.4, arXiv:2407.12969)

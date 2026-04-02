@@ -15,18 +15,21 @@ Main entry points:
 from tools.config import (
     # Core types
     DepositData,
+    VolumeDeposits,
     SimParams,
     SimConfig,
     ModifiedBoxParams,
     EMBParams,
     SCEOutputs,
-    SideGeometry,
-    SideIntermediates,
+    VolumeGeometry,
+    VolumeIntermediates,
     PlaneIntermediates,
     DiffusionConfig,
     TrackHitsConfig,
     DigitizationConfig,
     ResponseKernel,
+    # Helpers
+    get_volume_deposits,
     # Factories
     create_sim_params,
     create_sim_config,
@@ -37,7 +40,7 @@ from tools.config import (
 )
 
 from tools.geometry import generate_detector
-from tools.loader import load_particle_step_data
+from tools.loader import load_particle_step_data, build_deposit_data, load_event
 from tools.simulation import DetectorSimulator
 from tools.recombination import RECOMB_MODELS, compute_quanta, XI_FN
 from tools.particle_generator import (
@@ -55,13 +58,15 @@ from tools.noise import (
 
 __all__ = [
     # Core types
-    'DepositData', 'SimParams', 'SimConfig', 'ModifiedBoxParams', 'EMBParams',
-    'SCEOutputs', 'SideGeometry', 'SideIntermediates', 'PlaneIntermediates',
+    'DepositData', 'VolumeDeposits', 'SimParams', 'SimConfig',
+    'ModifiedBoxParams', 'EMBParams',
+    'SCEOutputs', 'VolumeGeometry', 'VolumeIntermediates', 'PlaneIntermediates',
     'DiffusionConfig', 'TrackHitsConfig', 'DigitizationConfig', 'ResponseKernel',
     # Recombination
     'RECOMB_MODELS', 'compute_quanta', 'XI_FN',
     # Entry points
-    'generate_detector', 'load_particle_step_data', 'DetectorSimulator',
+    'generate_detector', 'load_particle_step_data', 'build_deposit_data',
+    'load_event', 'get_volume_deposits', 'DetectorSimulator',
     # Factories
     'create_sim_params', 'create_sim_config', 'create_deposit_data',
     'pad_deposit_data',

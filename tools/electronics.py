@@ -328,118 +328,86 @@ def buckets_to_active_wires(buckets, num_active, compact_to_key,
 # FACTORY FUNCTIONS (create closures for use inside JIT)
 # =============================================================================
 
-def _noop_electronics(sig, side_idx, plane_idx, n_wires, n_time):
+def _noop_electronics(sig, plane_idx, n_wires, n_time):
     """Identity — no electronics processing."""
     return sig
 
 
-def _build_dense(cfg, e_kernels, e_chunk, e_fft, e_threshold):
-    """Build per-plane dense electronics closures."""
-    def make_fn(plane_type):
-        kernel = e_kernels[plane_type]
-        def fn(signal, n_wires, n_time):
-            return electronics_response_core(
-                signal, kernel, e_threshold, e_chunk, e_fft, n_time)
-        return fn
-
-    plane_fns = {
-        (s, p): make_fn(cfg.plane_names[s][p])
-        for s in range(2) for p in range(3)
-    }
-
-    def electronics_fn(sig, side_idx, plane_idx, n_wires, n_time):
-        return plane_fns[(side_idx, plane_idx)](sig, n_wires, n_time)
-    return electronics_fn
-
-
-def _build_bucketed(cfg, e_kernels, e_chunk, e_fft, bucket_dims):
-    """Build per-plane bucketed electronics closures (bucket → wire-sparse)."""
-    max_buckets_e = cfg.max_active_buckets
-
-    def make_fn(plane_type):
-        kernel = e_kernels[plane_type]
-        B1, B2 = bucket_dims[plane_type]
-
-        def fn(signal_tuple, num_wires_plane, num_time_steps_plane):
-            buckets, num_active, compact_to_key, _, _ = signal_tuple
-            active_signals, wire_indices, n_active_w = buckets_to_active_wires(
-                buckets, num_active, compact_to_key,
-                B1, B2, num_wires_plane, num_time_steps_plane,
-                e_chunk, max_buckets_e
-            )
-            active_signals = electronics_convolve_active(
-                active_signals, kernel, n_active_w,
-                e_chunk, e_fft, num_time_steps_plane
-            )
-            return (active_signals, wire_indices, n_active_w)
-        return fn
-
-    plane_fns = {
-        (s, p): make_fn(cfg.plane_names[s][p])
-        for s in range(2) for p in range(3)
-    }
-
-    def electronics_fn(sig, side_idx, plane_idx, n_wires, n_time):
-        return plane_fns[(side_idx, plane_idx)](sig, n_wires, n_time)
-    return electronics_fn
-
-
-def create_electronics_fn(cfg, response_kernels,
-                          electronics_chunk_size=None, electronics_threshold=0.0):
-    """Create electronics response closure for use inside JIT.
-
-    Pre-computes kernels, FFT size, and bucket dims internally from
-    SimConfig and response kernels.
+def create_electronics_fn_for_volume(cfg, vol_geom, response_kernels,
+                                      electronics_chunk_size=None,
+                                      electronics_threshold=0.0):
+    """Create electronics response closure for one volume's planes.
 
     Parameters
     ----------
     cfg : SimConfig
         Static simulation config.
+    vol_geom : VolumeGeometry
+        Geometry for this volume.
     response_kernels : dict
-        Loaded response kernels (for bucket dimensions).
+        Loaded response kernels for this volume (keyed by plane type).
     electronics_chunk_size : int, optional
-        Max active wires to process. Defaults to max num_wires across all planes.
+        Max active wires. Defaults to max num_wires in this volume.
     electronics_threshold : float
         Threshold for active wire detection. Default 0.0.
 
     Returns
     -------
     electronics_fn : callable
-        Signature: (sig, side_idx, plane_idx, n_wires, n_time) -> processed signal.
+        Signature: (sig, plane_idx, n_wires, n_time) -> processed signal.
     metadata : dict
-        Pre-computed values for printing/validation:
-        {'e_chunk', 'e_fft', 'e_kernels'}. Empty if electronics disabled.
+        {'e_chunk', 'e_fft'} or empty if disabled.
     """
     if not cfg.include_electronics:
         return _noop_electronics, {}
 
-    # Pre-compute from raw inputs
     _TAU_US = 1000.0
     _N_TAU = 3.0
     raw_kernels = load_electronics_response(
         time_step_us=cfg.time_step_us, tau_us=_TAU_US, n_tau=_N_TAU)
-    e_kernels = {t: jnp.array(raw_kernels[t]) for t in ['U', 'V', 'Y']}
+    plane_names = cfg.plane_names[vol_geom.volume_id]
+    e_kernels = {t: jnp.array(raw_kernels[t]) for t in set(plane_names)}
 
-    R = len(raw_kernels['U'])
+    R = len(list(raw_kernels.values())[0])
     e_fft = compute_fft_size(cfg.num_time_steps, R)
 
     if electronics_chunk_size is None:
-        e_chunk = max(cfg.side_geom[s].num_wires[p]
-                      for s in range(2) for p in range(3))
+        e_chunk = max(vol_geom.num_wires)
     else:
         e_chunk = electronics_chunk_size
 
     metadata = {'e_chunk': e_chunk, 'e_fft': e_fft}
 
     if cfg.use_bucketed:
-        bucket_dims = {}
-        for plane_type in ['U', 'V', 'Y']:
+        max_buckets_e = cfg.max_active_buckets
+        def make_fn(plane_type):
+            kernel = e_kernels[plane_type]
             B1 = 2 * response_kernels[plane_type].num_wires
             B2 = 2 * response_kernels[plane_type].kernel_height
-            bucket_dims[plane_type] = (B1, B2)
-        return _build_bucketed(cfg, e_kernels, e_chunk, e_fft, bucket_dims), metadata
+            def fn(signal_tuple, num_wires_plane, num_time_steps_plane):
+                buckets, num_active, compact_to_key, _, _ = signal_tuple
+                active_signals, wire_indices, n_active_w = buckets_to_active_wires(
+                    buckets, num_active, compact_to_key,
+                    B1, B2, num_wires_plane, num_time_steps_plane,
+                    e_chunk, max_buckets_e)
+                active_signals = electronics_convolve_active(
+                    active_signals, kernel, n_active_w,
+                    e_chunk, e_fft, num_time_steps_plane)
+                return (active_signals, wire_indices, n_active_w)
+            return fn
+    else:
+        def make_fn(plane_type):
+            kernel = e_kernels[plane_type]
+            def fn(signal, n_wires, n_time):
+                return electronics_response_core(
+                    signal, kernel, electronics_threshold, e_chunk, e_fft, n_time)
+            return fn
 
-    return _build_dense(cfg, e_kernels, e_chunk, e_fft, electronics_threshold), metadata
+    plane_fns = [make_fn(plane_names[p]) for p in range(vol_geom.n_planes)]
+
+    def electronics_fn(sig, plane_idx, n_wires, n_time):
+        return plane_fns[plane_idx](sig, n_wires, n_time)
+    return electronics_fn, metadata
 
 
 # =============================================================================
@@ -455,85 +423,25 @@ def _digitize_signal(signal, gain_scale, pedestal, adc_max):
     return unsigned - pedestal
 
 
-def _noop_digitize(sig, side_idx, plane_idx):
+def _noop_digitize(sig, plane_idx):
     """Identity — no digitization."""
     return sig
 
 
-def _build_digitize_dense(cfg, gain, adc_max, ped_collection, ped_induction):
-    """Build per-plane dense digitization closures."""
-    def make_fn(plane_type):
-        ped = ped_collection if plane_type == 'Y' else ped_induction
-        def fn(signal):
-            return _digitize_signal(signal, gain, ped, adc_max)
-        return fn
-
-    plane_fns = {
-        (s, p): make_fn(cfg.plane_names[s][p])
-        for s in range(2) for p in range(3)
-    }
-    def digitize_fn(sig, side_idx, plane_idx):
-        return plane_fns[(side_idx, plane_idx)](sig)
-    return digitize_fn
-
-
-def _build_digitize_bucketed(cfg, gain, adc_max, ped_collection, ped_induction):
-    """Build per-plane bucketed digitization closures."""
-    def make_fn(plane_type):
-        ped = ped_collection if plane_type == 'Y' else ped_induction
-        def fn(signal_tuple):
-            buckets, num_active, compact_to_key, b1, b2 = signal_tuple
-            return (_digitize_signal(buckets, gain, ped, adc_max),
-                    num_active, compact_to_key, b1, b2)
-        return fn
-
-    plane_fns = {
-        (s, p): make_fn(cfg.plane_names[s][p])
-        for s in range(2) for p in range(3)
-    }
-    def digitize_fn(sig, side_idx, plane_idx):
-        return plane_fns[(side_idx, plane_idx)](sig)
-    return digitize_fn
-
-
-def _build_digitize_wire_sparse(cfg, gain, adc_max, ped_collection, ped_induction):
-    """Build per-plane wire-sparse digitization closures."""
-    def make_fn(plane_type):
-        ped = ped_collection if plane_type == 'Y' else ped_induction
-        def fn(signal_tuple):
-            active_signals, wire_indices, n_active = signal_tuple
-            return (_digitize_signal(active_signals, gain, ped, adc_max),
-                    wire_indices, n_active)
-        return fn
-
-    plane_fns = {
-        (s, p): make_fn(cfg.plane_names[s][p])
-        for s in range(2) for p in range(3)
-    }
-    def digitize_fn(sig, side_idx, plane_idx):
-        return plane_fns[(side_idx, plane_idx)](sig)
-    return digitize_fn
-
-
-def create_digitize_fn(cfg, digitization_config=None):
-    """Create digitization closure for use inside JIT.
-
-    If digitization_config is None and cfg.include_digitize is True,
-    builds a default DigitizationConfig.
+def create_digitize_fn_for_volume(cfg, vol_geom, digitization_config=None):
+    """Create digitization closure for one volume's planes.
 
     Parameters
     ----------
     cfg : SimConfig
-        Static simulation config.
+    vol_geom : VolumeGeometry
     digitization_config : DigitizationConfig, optional
-        Explicit digitization parameters. If None, uses defaults.
 
     Returns
     -------
     digitize_fn : callable
-        Signature: (sig, side_idx, plane_idx) -> digitized signal.
+        Signature: (sig, plane_idx) -> digitized signal.
     dig_config : DigitizationConfig or None
-        The resolved config (for printing/inspection).
     """
     if not cfg.include_digitize:
         return _noop_digitize, None
@@ -547,12 +455,33 @@ def create_digitize_fn(cfg, digitization_config=None):
     adc_max = float((1 << dig_cfg.n_bits) - 1)
     ped_collection = float(dig_cfg.pedestal_collection)
     ped_induction = float(dig_cfg.pedestal_induction)
+    plane_names = cfg.plane_names[vol_geom.volume_id]
 
     if cfg.use_bucketed and cfg.include_electronics:
-        return _build_digitize_wire_sparse(
-            cfg, gain, adc_max, ped_collection, ped_induction), digitization_config
+        def make_fn(plane_type):
+            ped = ped_collection if plane_type == 'Y' else ped_induction
+            def fn(signal_tuple):
+                active_signals, wire_indices, n_active = signal_tuple
+                return (_digitize_signal(active_signals, gain, ped, adc_max),
+                        wire_indices, n_active)
+            return fn
     elif cfg.use_bucketed:
-        return _build_digitize_bucketed(
-            cfg, gain, adc_max, ped_collection, ped_induction), digitization_config
-    return _build_digitize_dense(
-        cfg, gain, adc_max, ped_collection, ped_induction), digitization_config
+        def make_fn(plane_type):
+            ped = ped_collection if plane_type == 'Y' else ped_induction
+            def fn(signal_tuple):
+                buckets, num_active, compact_to_key, b1, b2 = signal_tuple
+                return (_digitize_signal(buckets, gain, ped, adc_max),
+                        num_active, compact_to_key, b1, b2)
+            return fn
+    else:
+        def make_fn(plane_type):
+            ped = ped_collection if plane_type == 'Y' else ped_induction
+            def fn(signal):
+                return _digitize_signal(signal, gain, ped, adc_max)
+            return fn
+
+    plane_fns = [make_fn(plane_names[p]) for p in range(vol_geom.n_planes)]
+
+    def digitize_fn(sig, plane_idx):
+        return plane_fns[plane_idx](sig)
+    return digitize_fn, digitization_config

@@ -14,8 +14,9 @@ Main components
   (Δx, Δy, Δz) corrections.
 - ``interpolate_map_3d`` : JIT-compatible trilinear interpolation for
   querying a 3D vector field at arbitrary deposit positions.
-- ``create_dual_interpolation_fn`` : Builds a JIT-compatible function
-  that selects the correct side via ``jnp.where``.
+- ``create_single_interpolation_fn`` : Builds a JIT-compatible interpolation
+  function for one volume's SCE map.
+- ``load_sce_per_volume`` : Loads per-volume SCE maps from HDF5.
 
 Data layout
 -----------
@@ -23,7 +24,7 @@ E-field maps : (Nx, Ny, Nz, 3) float32, channels [Ex, Ey, Ez] in V/cm
 Drift corrections : (Nx, Ny, Nz, 3) float32, channels [Δx, Δy, Δz] in cm
 Grid metadata : origin_cm (3,), spacing_cm (3,)
 
-Each map covers a single TPC side (east: x ∈ [-L, 0], west: x ∈ [0, +L]).
+Each map covers a single volume (e.g., volume 0: x ∈ [-L, 0], volume 1: x ∈ [0, +L]).
 For JIT usage, maps are transposed to (3, Nx, Ny, Nz) channel-first layout
 and passed to ``interpolate_map_3d``.
 """
@@ -73,20 +74,16 @@ def interpolate_map_3d(positions_cm, field_map, origin_cm, spacing_cm):
     return jax.vmap(_interp_one)(field_map).T  # (N, 3)
 
 
-def create_dual_interpolation_fn(east_map, east_origin, east_spacing,
-                                  west_map, west_origin, west_spacing):
+def create_single_interpolation_fn(field_map, origin_cm, spacing_cm):
     """
-    Build a JIT-compatible function that interpolates using per-side maps.
-
-    Queries both side maps and selects the correct result per position
-    based on its x coordinate via ``jnp.where``.
+    Build a JIT-compatible interpolation function for one volume's SCE map.
 
     Parameters
     ----------
-    east_map, west_map : jnp.ndarray, shape (3, Nx, Ny, Nz)
-        Channel-first maps for east (x < 0) and west (x >= 0) sides.
-    east_origin, west_origin : jnp.ndarray, shape (3,)
-    east_spacing, west_spacing : jnp.ndarray, shape (3,)
+    field_map : jnp.ndarray, shape (3, Nx, Ny, Nz)
+        Channel-first vector field map.
+    origin_cm : jnp.ndarray, shape (3,)
+    spacing_cm : jnp.ndarray, shape (3,)
 
     Returns
     -------
@@ -94,15 +91,7 @@ def create_dual_interpolation_fn(east_map, east_origin, east_spacing,
         ``fn(positions_cm) → jnp.ndarray (N, 3)``
     """
     def fn(positions_cm):
-        is_east = positions_cm[:, 0] < 0
-        east_vals = interpolate_map_3d(
-            positions_cm, east_map, east_origin, east_spacing,
-        )
-        west_vals = interpolate_map_3d(
-            positions_cm, west_map, west_origin, west_spacing,
-        )
-        return jnp.where(is_east[:, None], east_vals, west_vals)
-
+        return interpolate_map_3d(positions_cm, field_map, origin_cm, spacing_cm)
     return fn
 
 
@@ -357,43 +346,35 @@ _DEFAULT_SCE_PATH = os.path.join(
 )
 
 
-def load_sce_interpolation_fns(h5_path=_DEFAULT_SCE_PATH):
+def load_sce_per_volume(h5_path=_DEFAULT_SCE_PATH):
     """
-    Load per-side SCE maps and build JIT-compatible interpolation functions.
+    Load per-volume SCE maps and build JIT-compatible interpolation functions.
 
     Parameters
     ----------
     h5_path : str
-        Path to HDF5 written by ``convert_sce_maps.generate_and_save``.
+        Path to HDF5 with volume_0, volume_1, ... groups.
 
     Returns
     -------
-    sce_efield_fn : callable
-        ``fn(positions_cm) -> (N, 3)`` E-field [Ex, Ey, Ez] in V/cm.
-    sce_drift_correction_fn : callable
-        ``fn(positions_cm) -> (N, 3)`` corrections [dx, dy, dz] in cm.
+    list of (efield_fn, corr_fn)
+        Per-volume pairs of interpolation functions.
+        efield_fn: ``fn(positions_cm) -> (N, 3)`` E-field in V/cm.
+        corr_fn: ``fn(positions_cm) -> (N, 3)`` drift corrections in cm.
     """
     from tools.utils import load_sce_data
 
-    sce = load_sce_data(h5_path)
+    volumes = load_sce_data(h5_path)
 
-    def _to_jax(side):
-        efield = jnp.moveaxis(jnp.array(side['efield_map']), -1, 0)
-        corr = jnp.moveaxis(jnp.array(side['drift_correction_map']), -1, 0)
-        origin = jnp.array(side['origin_cm'], dtype=jnp.float32)
-        spacing = jnp.array(side['spacing_cm'], dtype=jnp.float32)
-        return efield, corr, origin, spacing
+    results = []
+    for vol_data in volumes:
+        efield = jnp.moveaxis(jnp.array(vol_data['efield_map']), -1, 0)
+        corr = jnp.moveaxis(jnp.array(vol_data['drift_correction_map']), -1, 0)
+        origin = jnp.array(vol_data['origin_cm'], dtype=jnp.float32)
+        spacing = jnp.array(vol_data['spacing_cm'], dtype=jnp.float32)
 
-    e_efield, e_corr, e_origin, e_spacing = _to_jax(sce['east'])
-    w_efield, w_corr, w_origin, w_spacing = _to_jax(sce['west'])
+        efield_fn = create_single_interpolation_fn(efield, origin, spacing)
+        corr_fn = create_single_interpolation_fn(corr, origin, spacing)
+        results.append((efield_fn, corr_fn))
 
-    sce_efield_fn = create_dual_interpolation_fn(
-        e_efield, e_origin, e_spacing,
-        w_efield, w_origin, w_spacing,
-    )
-    sce_drift_correction_fn = create_dual_interpolation_fn(
-        e_corr, e_origin, e_spacing,
-        w_corr, w_origin, w_spacing,
-    )
-
-    return sce_efield_fn, sce_drift_correction_fn
+    return results

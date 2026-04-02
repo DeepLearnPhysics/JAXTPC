@@ -9,8 +9,8 @@ import jax
 import jax.numpy as jnp
 
 from tools.config import (
-    DepositData, SimParams, SideGeometry, SimConfig,
-    SideIntermediates, PlaneIntermediates, SCEOutputs,
+    VolumeDeposits, SimParams, VolumeGeometry, SimConfig,
+    VolumeIntermediates, PlaneIntermediates, SCEOutputs,
 )
 from tools.drift import compute_drift_to_plane, correct_drift_for_plane, apply_drift_corrections
 from tools.wires import (
@@ -57,13 +57,13 @@ def compute_phi_drift(efield_correction, theta, phi, field_strength_Vcm):
 
 
 # ============================================================================
-# Side-level physics
+# Volume-level physics
 # ============================================================================
 
-def compute_side_physics(
-    deposits, sim_params, side_geom, sce_fn, recomb_fn,
+def compute_volume_physics(
+    deposits, sim_params, vol_geom, sce_fn, recomb_fn,
 ):
-    """Side-level physics: recombination + drift + SCE corrections.
+    """Volume-level physics: recombination + drift + SCE corrections.
 
     Parameters
     ----------
@@ -71,17 +71,17 @@ def compute_side_physics(
         Input deposits (masking via valid_mask).
     sim_params : SimParams
         Physics parameters.
-    side_geom : SideGeometry
-        Static geometry for this side.
+    vol_geom : VolumeGeometry
+        Static geometry for this volume.
     sce_fn : callable
         (positions_cm) -> SCEOutputs(efield_correction, drift_corr_cm).
     recomb_fn : callable
-        (de, dx_cm, phi_drift, e_field_Vcm, recomb_params) -> charges.
+        (de, dx_cm, phi_drift, e_field_Vcm, recomb_params) -> (charges, photons).
 
     Returns
     -------
-    SideIntermediates
-        charges (zeroed for invalid deposits), drift, positions.
+    VolumeIntermediates
+        charges, photons (zeroed for invalid deposits), drift, positions.
     """
     positions_cm = deposits.positions_mm / 10.0
     dx_cm = deposits.dx / 10.0
@@ -98,15 +98,17 @@ def compute_side_physics(
         deposits.de, dx_cm, phi_drift, E_mag, sim_params.recomb_params
     )
 
-    # Apply valid_mask once here — charges/photons=0 for invalid deposits.
-    # No need to propagate valid_mask further.
-    charges = charges * deposits.valid_mask
-    photons = photons * deposits.valid_mask
+    # Zero out padding entries. n_actual is the count of real deposits;
+    # everything beyond that is padding and must not contribute signal.
+    # This is the single masking point — all downstream code trusts charges=0 for padding.
+    padding_mask = jnp.arange(deposits.de.shape[0]) < deposits.n_actual
+    charges = charges * padding_mask
+    photons = photons * padding_mask
 
     # Drift to furthest plane
     drift_dist, drift_time, yz = compute_drift_to_plane(
-        positions_cm, side_geom.half_width_cm,
-        sim_params.velocity_cm_us, side_geom.furthest_plane_dist_cm
+        positions_cm, vol_geom.x_anode_cm, vol_geom.drift_direction,
+        sim_params.velocity_cm_us, vol_geom.furthest_plane_dist_cm
     )
 
     # Apply SCE drift corrections (velocity explicit for gradient flow)
@@ -116,13 +118,14 @@ def compute_side_physics(
         sim_params.velocity_cm_us,
     )
 
-    return SideIntermediates(
+    return VolumeIntermediates(
         charges=charges,
         photons=photons,
         drift_distance_cm=drift_dist,
         drift_time_us=drift_time,
         positions_cm=positions_cm,
         positions_yz_cm=yz,
+        t0_us=deposits.t0_us,
     )
 
 
@@ -130,51 +133,65 @@ def compute_side_physics(
 # Plane-level physics
 # ============================================================================
 
-def compute_plane_physics(side_int, sim_params, side_geom, plane_idx):
+def compute_plane_physics(vol_int, sim_params, vol_geom, plane_idx,
+                          pre_window_us, readout_window_us):
     """Plane-level physics: drift correction + attenuation + wire geometry.
 
     Parameters
     ----------
-    side_int : SideIntermediates
-        From compute_side_physics.
+    vol_int : VolumeIntermediates
+        From compute_volume_physics.
     sim_params : SimParams
         Physics parameters.
-    side_geom : SideGeometry
-        Static geometry for this side.
+    vol_geom : VolumeGeometry
+        Static geometry for this volume.
     plane_idx : int
         Plane index (0, 1, or 2).
+    pre_window_us : float
+        Readout window extension before drift t=0 (μs).
+    readout_window_us : float
+        Total readout window duration (μs) = num_time_steps * time_step_us.
 
     Returns
     -------
     PlaneIntermediates
         Per-plane physics results for downstream response computation.
     """
-    plane_dist_diff = side_geom.furthest_plane_dist_cm - side_geom.plane_distances_cm[plane_idx]
+    plane_dist_diff = vol_geom.furthest_plane_dist_cm - vol_geom.plane_distances_cm[plane_idx]
     drift_dist, drift_time = correct_drift_for_plane(
-        side_int.drift_distance_cm, side_int.drift_time_us,
+        vol_int.drift_distance_cm, vol_int.drift_time_us,
         sim_params.velocity_cm_us, plane_dist_diff
     )
 
     drift_time_safe = jnp.where(jnp.isnan(drift_time), 0.0, drift_time)
     attenuation = jnp.exp(-drift_time_safe / sim_params.lifetime_us)
 
+    # Readout tick = drift time + initial deposit time + pre-window offset
+    tick_us = drift_time + vol_int.t0_us + pre_window_us
+
+    # Zero charges for deposits outside the readout window
+    # (same pattern as padding mask in compute_volume_physics)
+    in_window = (tick_us >= 0.0) & (tick_us < readout_window_us)
+    charges = vol_int.charges * in_window
+
     closest_idx, closest_dist = compute_wire_distances(
-        side_int.positions_yz_cm,
-        side_geom.angles_rad[plane_idx],
-        side_geom.wire_spacings_cm[plane_idx],
-        side_geom.max_wire_indices[plane_idx],
-        side_geom.index_offsets[plane_idx],
+        vol_int.positions_yz_cm,
+        vol_geom.angles_rad[plane_idx],
+        vol_geom.wire_spacings_cm[plane_idx],
+        vol_geom.max_wire_indices[plane_idx],
+        vol_geom.index_offsets[plane_idx],
     )
 
     return PlaneIntermediates(
         drift_distance_cm=drift_dist,
         drift_time_us=drift_time,
+        tick_us=tick_us,
         attenuation=attenuation,
         closest_wire_idx=closest_idx,
         closest_wire_dist=closest_dist,
-        charges=side_int.charges,
-        photons=side_int.photons,
-        positions_cm=side_int.positions_cm,
+        charges=charges,
+        photons=vol_int.photons,
+        positions_cm=vol_int.positions_cm,
     )
 
 
@@ -183,7 +200,7 @@ def compute_plane_physics(side_int, sim_params, side_geom, plane_idx):
 # ============================================================================
 
 def compute_chunk_response(plane_int, response_fn, start, chunk_size,
-                           cfg, side_geom, plane_idx):
+                           cfg, vol_geom, plane_idx):
     """Slice one chunk, prepare deposits, compute response contributions.
 
     Shared by dense, bucketed, and diff paths. Same code always.
@@ -200,8 +217,8 @@ def compute_chunk_response(plane_int, response_fn, start, chunk_size,
         Number of deposits per chunk.
     cfg : SimConfig
         Static simulation config.
-    side_geom : SideGeometry
-        Side geometry.
+    vol_geom : VolumeGeometry
+        Volume geometry.
     plane_idx : int
         Plane index (0, 1, or 2).
 
@@ -217,7 +234,7 @@ def compute_chunk_response(plane_int, response_fn, start, chunk_size,
         Response kernel contributions per deposit.
     """
     b_charges    = jax.lax.dynamic_slice(plane_int.charges, (start,), (chunk_size,))
-    b_drift_time = jax.lax.dynamic_slice(plane_int.drift_time_us, (start,), (chunk_size,))
+    b_tick       = jax.lax.dynamic_slice(plane_int.tick_us, (start,), (chunk_size,))
     b_wire_idx   = jax.lax.dynamic_slice(plane_int.closest_wire_idx, (start,), (chunk_size,))
     b_wire_dist  = jax.lax.dynamic_slice(plane_int.closest_wire_dist, (start,), (chunk_size,))
     b_atten      = jax.lax.dynamic_slice(plane_int.attenuation, (start,), (chunk_size,))
@@ -226,16 +243,16 @@ def compute_chunk_response(plane_int, response_fn, start, chunk_size,
 
     # Prepare deposit data (vmapped scalar function)
     # Pass valid_hit=True always — charges already zeroed for invalid deposits
-    # in compute_side_physics. The function's wire bounds check still runs.
+    # in compute_volume_physics. The function's wire bounds check still runs.
     deposit_data = jax.vmap(
         prepare_deposit_for_response,
         in_axes=(0, 0, 0, 0, 0, None, None, None, None)
     )(
-        b_charges, b_drift_time, b_wire_idx, b_wire_dist, b_atten,
+        b_charges, b_tick, b_wire_idx, b_wire_dist, b_atten,
         True,  # valid_hit — always True (charges handle masking)
-        side_geom.wire_spacings_cm[plane_idx],
+        vol_geom.wire_spacings_cm[plane_idx],
         cfg.time_step_us,
-        side_geom.num_wires[plane_idx],
+        vol_geom.num_wires[plane_idx],
     )
     wire_idx, wire_offsets, time_idx, time_offsets, intensities = deposit_data
 
@@ -250,7 +267,7 @@ def compute_chunk_response(plane_int, response_fn, start, chunk_size,
 # ============================================================================
 
 def compute_plane_signal(plane_int, response_fn, n_actual, chunk_size,
-                         cfg, side_geom, plane_idx, plane_kernel):
+                         cfg, vol_geom, plane_idx, plane_kernel):
     """Dense accumulation: fori_loop(compute_chunk_response → accumulate).
 
     Parameters
@@ -264,8 +281,8 @@ def compute_plane_signal(plane_int, response_fn, n_actual, chunk_size,
         Deposits per fori_loop iteration.
     cfg : SimConfig
         Static simulation config.
-    side_geom : SideGeometry
-        Side geometry.
+    vol_geom : VolumeGeometry
+        Volume geometry.
     plane_idx : int
         Plane index (0, 1, or 2).
     plane_kernel : dict
@@ -280,14 +297,14 @@ def compute_plane_signal(plane_int, response_fn, n_actual, chunk_size,
         n_batches = jnp.minimum(
             (n_actual + chunk_size - 1) // chunk_size, max_safe_batches)
 
-    num_wires = side_geom.num_wires[plane_idx]
+    num_wires = vol_geom.num_wires[plane_idx]
     num_time_steps = cfg.num_time_steps
 
     def body(i, signal_accum):
         start = i * chunk_size
         wire_idx, time_idx, intensities, contributions = \
             compute_chunk_response(plane_int, response_fn, start, chunk_size,
-                                   cfg, side_geom, plane_idx)
+                                   cfg, vol_geom, plane_idx)
         batch = accumulate_response_signals(
             wire_idx, time_idx, intensities, contributions,
             num_wires, num_time_steps,
@@ -305,7 +322,7 @@ def compute_plane_signal(plane_int, response_fn, n_actual, chunk_size,
 
 def compute_plane_signal_bucketed(plane_int, response_fn, n_actual, chunk_size,
                                    point_to_compact, max_buckets, B1, B2,
-                                   cfg, side_geom, plane_idx, plane_kernel):
+                                   cfg, vol_geom, plane_idx, plane_kernel):
     """Bucketed accumulation: fori_loop(compute_chunk_response → scatter).
 
     Production-only (never diff path).
@@ -315,14 +332,14 @@ def compute_plane_signal_bucketed(plane_int, response_fn, n_actual, chunk_size,
         (n_actual + chunk_size - 1) // chunk_size,
         max_safe_batches)
 
-    num_wires = side_geom.num_wires[plane_idx]
+    num_wires = vol_geom.num_wires[plane_idx]
     num_time_steps = cfg.num_time_steps
 
     def body(i, carry_buckets):
         start = i * chunk_size
         wire_idx, time_idx, intensities, contributions = \
             compute_chunk_response(plane_int, response_fn, start, chunk_size,
-                                   cfg, side_geom, plane_idx)
+                                   cfg, vol_geom, plane_idx)
         b_point_to_compact = jax.lax.dynamic_slice(point_to_compact, (start, 0), (chunk_size, 4))
         batch_buckets = scatter_contributions_to_buckets_batched(
             wire_idx, time_idx, intensities, contributions,
@@ -339,17 +356,15 @@ def compute_plane_signal_bucketed(plane_int, response_fn, n_actual, chunk_size,
                               jnp.zeros((max_buckets, B1, B2)))
 
 
-def compute_bucket_maps(deposits, plane_int, side_geom, plane_idx, cfg, plane_kernel):
+def compute_bucket_maps(plane_int, vol_geom, plane_idx, cfg, plane_kernel):
     """Compute wire/time maps and bucket mapping for bucketed accumulation.
 
     Parameters
     ----------
-    deposits : DepositData
-        Input deposits (for valid_mask).
     plane_int : PlaneIntermediates
         Per-plane physics outputs.
-    side_geom : SideGeometry
-        Side geometry.
+    vol_geom : VolumeGeometry
+        Volume geometry.
     plane_idx : int
         Plane index.
     cfg : SimConfig
@@ -360,31 +375,22 @@ def compute_bucket_maps(deposits, plane_int, side_geom, plane_idx, cfg, plane_ke
     Returns
     -------
     point_to_compact : jnp.ndarray
-        Point-to-compact mapping.
     num_active : jnp.ndarray
-        Number of active buckets.
     compact_to_key : jnp.ndarray
-        Compact-to-key mapping.
     B1 : int
-        Bucket wire dimension.
     B2 : int
-        Bucket time dimension.
     """
     B1 = 2 * plane_kernel.num_wires
     B2 = 2 * plane_kernel.kernel_height
-    wire_map = jnp.where(
-        deposits.valid_mask,
-        jnp.clip(plane_int.closest_wire_idx,
-                 0, side_geom.num_wires[plane_idx] - 1),
-        jnp.int32(0))
-    time_map = jnp.where(
-        deposits.valid_mask,
-        jnp.clip(jnp.floor(
-            plane_int.drift_time_us / cfg.time_step_us
-        ).astype(jnp.int32), 0, cfg.num_time_steps - 1),
-        jnp.int32(0))
+    # No valid_mask needed — padding entries have charges=0 (masked after recombination),
+    # so they produce zero contributions regardless of bucket assignment.
+    wire_map = jnp.clip(plane_int.closest_wire_idx,
+                        0, vol_geom.num_wires[plane_idx] - 1)
+    time_map = jnp.clip(jnp.floor(
+        plane_int.tick_us / cfg.time_step_us
+    ).astype(jnp.int32), 0, cfg.num_time_steps - 1)
     point_to_compact, num_active, compact_to_key = build_bucket_mapping(
         wire_map, time_map, B1, B2,
-        side_geom.num_wires[plane_idx], cfg.num_time_steps,
+        vol_geom.num_wires[plane_idx], cfg.num_time_steps,
         cfg.max_active_buckets, plane_kernel.wire_zero_bin, plane_kernel.time_zero_bin)
     return point_to_compact, num_active, compact_to_key, B1, B2

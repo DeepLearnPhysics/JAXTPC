@@ -9,7 +9,7 @@ import h5py
 import jax.numpy as jnp
 import numpy as np
 
-from tools.config import DepositData
+from tools.config import DepositData, VolumeDeposits
 
 
 class ParticleStepExtractor:
@@ -335,23 +335,54 @@ def load_particle_step_data(file_path, event_idx=0, verbose=False):
     n = positions_mm.shape[0]
 
     track_ids = np.asarray(step_data.get('track_id', np.ones((n,))), dtype=np.int32)
-    valid_mask = np.ones(n, dtype=bool)
 
-    # Compute group IDs for segment correspondence
-    group_ids, group_to_track, n_groups = compute_group_ids(
-        positions_mm, track_ids, valid_mask)
+    # GEANT4 stores time in nanoseconds; convert to microseconds
+    t_ns = np.asarray(step_data.get('t', np.zeros((n,))), dtype=np.float32)
+    t0_us = t_ns / 1000.0
 
-    deposit_data = DepositData(
-        positions_mm=positions_mm,
-        de=np.asarray(step_data.get('de', np.zeros((n,))), dtype=np.float32),
-        dx=np.asarray(step_data.get('dx', np.zeros((n,))), dtype=np.float32),
-        valid_mask=valid_mask,
-        theta=np.asarray(step_data.get('theta', np.zeros((n,))), dtype=np.float32),
-        phi=np.asarray(step_data.get('phi', np.zeros((n,))), dtype=np.float32),
-        track_ids=track_ids,
-        group_ids=group_ids,
-    )
-    return deposit_data, group_to_track
+    return {
+        'positions_mm': positions_mm,
+        'de': np.asarray(step_data.get('de', np.zeros((n,))), dtype=np.float32),
+        'dx': np.asarray(step_data.get('dx', np.zeros((n,))), dtype=np.float32),
+        'theta': np.asarray(step_data.get('theta', np.zeros((n,))), dtype=np.float32),
+        'phi': np.asarray(step_data.get('phi', np.zeros((n,))), dtype=np.float32),
+        'track_ids': track_ids,
+        't0_us': t0_us,
+    }
+
+
+def load_event(file_path, sim_config, event_idx=0, verbose=False,
+               group_size=5, gap_threshold_mm=5.0):
+    """Load an event from HDF5 and build simulation-ready DepositData.
+
+    Convenience function combining load_particle_step_data + build_deposit_data.
+
+    Parameters
+    ----------
+    file_path : str
+        Path to HDF5 file.
+    sim_config : SimConfig
+        Simulation config with volume definitions and total_pad.
+    event_idx : int
+        Event index in HDF5 file. Default 0.
+    verbose : bool
+        Print loading info. Default False.
+    group_size : int
+        Consecutive deposits per group. Default 5.
+    gap_threshold_mm : float
+        Spatial gap threshold for group splitting. Default 5.0.
+
+    Returns
+    -------
+    DepositData
+        Multi-volume, padded, grouped, ready for process_event.
+    """
+    raw = load_particle_step_data(file_path, event_idx=event_idx, verbose=verbose)
+    return build_deposit_data(
+        raw['positions_mm'], raw['de'], raw['dx'], sim_config,
+        theta=raw['theta'], phi=raw['phi'], track_ids=raw['track_ids'],
+        t0_us=raw['t0_us'],
+        group_size=group_size, gap_threshold_mm=gap_threshold_mm)
 
 
 def main():
@@ -444,13 +475,10 @@ def compute_group_ids(positions_mm, track_ids, valid_mask,
     gaps[1:] = np.linalg.norm(sorted_pos[1:] - sorted_pos[:-1], axis=1)
     gap_break = gaps > gap_threshold_mm
 
-    # Side change boundary (x < 0 → east, x >= 0 → west)
-    side = (sorted_pos[:, 0] >= 0).astype(np.int8)
-    side_change = np.zeros(n_valid, dtype=bool)
-    side_change[1:] = side[1:] != side[:-1]
-
-    # Contiguous segment starts: track change, spatial gap, or side change
-    seg_start = track_change | gap_break | side_change
+    # Contiguous segment starts: track change or spatial gap
+    # (Volume boundary splitting is handled by split_by_volume — each volume's
+    #  deposits are already separated before compute_group_ids is called.)
+    seg_start = track_change | gap_break
     seg_start[0] = True
 
     # Within-segment position via forward-filled segment start indices
@@ -476,102 +504,168 @@ def compute_group_ids(positions_mm, track_ids, valid_mask,
     return group_ids, group_to_track, n_groups
 
 
-# =============================================================================
-# SPLIT & PAD (numpy host-side, no JIT)
-# =============================================================================
+def build_deposit_data(positions_mm, de, dx, sim_config,
+                       theta=None, phi=None, track_ids=None,
+                       group_ids=None, t0_us=None,
+                       group_size=5, gap_threshold_mm=5.0):
+    """Build simulation-ready DepositData from flat deposit arrays.
 
-def _extract_and_pad(deposit_data, mask, n_valid, pad_size):
-    """Extract masked deposits and pad to fixed size.
-
-    All operations in numpy. Returns DepositData with JAX arrays
-    at the fixed shape (no XLA recompilation).
-    """
-    # Extract valid entries per field
-    arrays = {}
-    for field in deposit_data._fields:
-        arr = np.asarray(getattr(deposit_data, field))
-        extracted = arr[mask]
-
-        if field == 'valid_mask':
-            # Recompute valid_mask for the padded output
-            continue
-
-        pad_width = pad_size - n_valid
-        if pad_width > 0:
-            # dx=1.0 for padding avoids division by zero in recombination
-            pad_val = 1.0 if field == 'dx' else 0
-            if arr.ndim == 2:
-                extracted = np.pad(extracted, ((0, pad_width), (0, 0)),
-                                   constant_values=pad_val)
-            else:
-                extracted = np.pad(extracted, (0, pad_width), constant_values=pad_val)
-        else:
-            extracted = extracted[:pad_size]
-        arrays[field] = extracted
-
-    valid_out = np.arange(pad_size) < n_valid
-
-    return DepositData(
-        positions_mm=jnp.asarray(arrays['positions_mm']),
-        de=jnp.asarray(arrays['de']),
-        dx=jnp.asarray(arrays['dx']),
-        valid_mask=jnp.asarray(valid_out),
-        theta=jnp.asarray(arrays['theta']),
-        phi=jnp.asarray(arrays['phi']),
-        track_ids=jnp.asarray(arrays['track_ids']),
-        group_ids=jnp.asarray(arrays['group_ids']),
-    )
-
-
-def split_and_pad_data(deposit_data, total_pad):
-    """Split deposit data by side and pad to total_pad.
-
-    All operations use numpy to avoid XLA recompilation on variable-length
-    intermediates. The final padded arrays are converted to JAX at the end
-    (fixed total_pad shape -> single JIT compilation for all events).
+    Assigns deposits to volumes by position, computes segment groups
+    per-volume (or uses pre-computed group_ids), pads each volume to
+    total_pad, and converts to JAX arrays.
 
     Parameters
     ----------
-    deposit_data : DepositData
-        Input data (can be any size, will be split and padded).
-    total_pad : int
-        Fixed pad size per side.
+    positions_mm : np.ndarray, shape (N, 3)
+        Deposit positions in mm.
+    de : np.ndarray, shape (N,)
+        Energy deposits in MeV.
+    dx : np.ndarray or float, shape (N,) or scalar
+        Step lengths in mm.
+    sim_config : SimConfig
+        Simulation config with volume definitions and total_pad.
+    theta : np.ndarray, shape (N,), optional
+        Polar angles. Default zeros.
+    phi : np.ndarray, shape (N,), optional
+        Azimuthal angles. Default zeros.
+    track_ids : np.ndarray, shape (N,), optional
+        Particle track IDs. Default zeros (no track info).
+    group_ids : np.ndarray, shape (N,), optional
+        Pre-computed group IDs. If provided, used directly (no auto-grouping).
+        Must not span volume boundaries.
+    group_size : int
+        Consecutive deposits per group for auto-grouping. Default 5.
+    gap_threshold_mm : float
+        Spatial gap threshold for group splitting. Default 5.0.
 
     Returns
     -------
-    east_data : DepositData
-        Padded data for east side (x < 0).
-    west_data : DepositData
-        Padded data for west side (x >= 0).
-    counts : dict
-        Actual counts: n_east, n_west, n_tracks.
+    DepositData
+        Multi-volume deposit data, padded, ready for process_event.
     """
-    positions_mm = np.asarray(deposit_data.positions_mm)
-    valid_mask = np.asarray(deposit_data.valid_mask)
-    track_ids = np.asarray(deposit_data.track_ids)
+    positions_mm = np.asarray(positions_mm, dtype=np.float32)
+    de = np.asarray(de, dtype=np.float32)
+    N = positions_mm.shape[0]
 
-    x_mm = positions_mm[:, 0]
-    east_mask = valid_mask & (x_mm < 0)
-    west_mask = valid_mask & (x_mm >= 0)
+    if np.ndim(dx) == 0:
+        dx = np.full(N, float(dx), dtype=np.float32)
+    else:
+        dx = np.asarray(dx, dtype=np.float32)
 
-    n_east = int(np.sum(east_mask))
-    n_west = int(np.sum(west_mask))
-    n_tracks = int(len(np.unique(track_ids[valid_mask])))
+    theta = np.asarray(theta, dtype=np.float32) if theta is not None else np.zeros(N, dtype=np.float32)
+    phi = np.asarray(phi, dtype=np.float32) if phi is not None else np.zeros(N, dtype=np.float32)
+    track_ids = np.asarray(track_ids, dtype=np.int32) if track_ids is not None else np.zeros(N, dtype=np.int32)
+    t0_us = np.asarray(t0_us, dtype=np.float32) if t0_us is not None else np.zeros(N, dtype=np.float32)
 
-    if n_east > total_pad:
-        print(f"WARNING: n_east ({n_east:,}) > total_pad ({total_pad:,}). Truncating!")
-    if n_west > total_pad:
-        print(f"WARNING: n_west ({n_west:,}) > total_pad ({total_pad:,}). Truncating!")
+    has_precomputed_groups = group_ids is not None
+    if has_precomputed_groups:
+        group_ids = np.asarray(group_ids, dtype=np.int32)
 
-    east_data = _extract_and_pad(
-        deposit_data, east_mask, min(n_east, total_pad), total_pad)
-    west_data = _extract_and_pad(
-        deposit_data, west_mask, min(n_west, total_pad), total_pad)
+    x_cm = positions_mm[:, 0] / 10.0
+    valid_mask = np.ones(N, dtype=bool)
+    total_pad = sim_config.total_pad
 
-    counts = {'n_east': min(n_east, total_pad),
-              'n_west': min(n_west, total_pad),
-              'n_tracks': n_tracks}
-    return east_data, west_data, counts
+    all_fields = {
+        'positions_mm': positions_mm,
+        'de': de,
+        'dx': dx,
+        'theta': theta,
+        'phi': phi,
+        'track_ids': track_ids,
+        't0_us': t0_us,
+    }
+
+    vol_arrays = {field: [] for field in all_fields}
+    vol_arrays['group_ids'] = []
+    vol_n_actuals = []
+    vol_group_to_track = []
+    vol_original_indices = []
+
+    for vol_idx in range(sim_config.n_volumes):
+        vol = sim_config.volumes[vol_idx]
+        x_min, x_max = vol.ranges_cm[0]
+        vol_mask = valid_mask & (x_cm >= x_min) & (x_cm < x_max)
+
+        n_actual = int(np.sum(vol_mask))
+        if n_actual > total_pad:
+            print(f"WARNING: volume {vol_idx} has {n_actual:,} deposits "
+                  f"> total_pad ({total_pad:,}). Truncating!")
+        n_use = min(n_actual, total_pad)
+
+        # Track which original deposits go into this volume
+        vol_original_indices.append(np.where(vol_mask)[0][:n_use])
+
+        # Extract this volume's deposits
+        for field, arr in all_fields.items():
+            vol_arrays[field].append(arr[vol_mask][:n_use])
+
+        # Groups: use pre-computed or compute per-volume
+        if has_precomputed_groups:
+            v_gids = group_ids[vol_mask][:n_use]
+            # Build group_to_track from pre-computed groups
+            v_tids = track_ids[vol_mask][:n_use]
+            max_gid = int(v_gids.max()) if n_use > 0 else 0
+            g2t = np.zeros(max_gid + 1, dtype=np.int32)
+            if n_use > 0:
+                g2t[v_gids] = v_tids
+        else:
+            v_pos = positions_mm[vol_mask][:n_use]
+            v_tids = track_ids[vol_mask][:n_use]
+            v_valid = np.ones(n_use, dtype=bool)
+            v_gids, g2t, _ = compute_group_ids(
+                v_pos, v_tids, v_valid,
+                group_size=group_size, gap_threshold_mm=gap_threshold_mm)
+
+        vol_arrays['group_ids'].append(v_gids)
+
+        vol_n_actuals.append(n_use)
+        vol_group_to_track.append(g2t)
+
+    # Pad and convert to JAX
+    return _build_padded_deposit_data(
+        vol_arrays, vol_n_actuals, vol_group_to_track, vol_original_indices, total_pad)
+
+
+def _build_padded_deposit_data(vol_arrays, vol_n_actuals, vol_group_to_track,
+                                vol_original_indices, total_pad):
+    """Pad per-volume arrays to total_pad and construct DepositData.
+
+    Builds VolumeDeposits for each volume, wraps in DepositData.
+    """
+
+    def _pad(arr, n_use, pad_val=0):
+        pad_size = total_pad - n_use
+        if pad_size <= 0:
+            return jnp.asarray(arr[:total_pad])
+        if arr.ndim == 2:
+            return jnp.asarray(np.pad(arr, ((0, pad_size), (0, 0)),
+                                       constant_values=pad_val))
+        return jnp.asarray(np.pad(arr, (0, pad_size), constant_values=pad_val))
+
+    n_volumes = len(vol_n_actuals)
+    volumes = tuple(
+        VolumeDeposits(
+            positions_mm=_pad(vol_arrays['positions_mm'][v], vol_n_actuals[v]),
+            de=_pad(vol_arrays['de'][v], vol_n_actuals[v]),
+            dx=_pad(vol_arrays['dx'][v], vol_n_actuals[v], pad_val=1.0),
+            theta=_pad(vol_arrays['theta'][v], vol_n_actuals[v]),
+            phi=_pad(vol_arrays['phi'][v], vol_n_actuals[v]),
+            track_ids=_pad(vol_arrays['track_ids'][v], vol_n_actuals[v]),
+            group_ids=_pad(vol_arrays['group_ids'][v], vol_n_actuals[v]),
+            t0_us=_pad(vol_arrays['t0_us'][v], vol_n_actuals[v]),
+            charge=jnp.zeros(total_pad, dtype=jnp.float32),
+            photons=jnp.zeros(total_pad, dtype=jnp.float32),
+            qs_fractions=jnp.zeros(total_pad, dtype=jnp.float32),
+            n_actual=vol_n_actuals[v],
+        )
+        for v in range(n_volumes)
+    )
+
+    return DepositData(
+        volumes=volumes,
+        group_to_track=tuple(vol_group_to_track),
+        original_indices=tuple(vol_original_indices),
+    )
 
 
 if __name__ == "__main__":

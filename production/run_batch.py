@@ -3,7 +3,7 @@ Batch simulation: run events and save to structured HDF5 files.
 
 Produces three file types per batch:
     {dataset}_resp_{NNNN}.h5  — sparse thresholded wire signals
-    {dataset}_seg_{NNNN}.h5   — 3D truth deposits
+    {dataset}_seg_{NNNN}.h5   — 3D truth deposits (per-volume)
     {dataset}_corr_{NNNN}.h5  — 3D→2D correspondence + track labels
 
 See README.md for pipeline details, output schema, and threading architecture.
@@ -33,14 +33,14 @@ import jax.numpy as jnp
 import numpy as np
 
 from tools.simulation import DetectorSimulator
-from tools.config import create_track_hits_config, DepositData
+from tools.config import create_track_hits_config
 from tools.geometry import generate_detector
-from tools.loader import ParticleStepExtractor, compute_group_ids
+from tools.loader import ParticleStepExtractor, build_deposit_data
 
 from production.save import (
     write_config_resp, write_config_seg, write_config_corr,
     save_event_resp, save_event_seg, save_event_corr,
-    encode_correspondence_csr, PLANE_NAMES,
+    encode_correspondence_csr, _plane_label,
 )
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -50,34 +50,37 @@ sys.stdout.reconfigure(line_buffering=True)
 # EVENT LOADING
 # =============================================================================
 
-def load_deposit(extractor, event_idx, group_size=5, gap_threshold_mm=5.0):
-    """Load one event from an open extractor, compute group IDs.
+def load_deposit(extractor, event_idx, sim_config,
+                 group_size=5, gap_threshold_mm=5.0):
+    """Load one event from an open extractor, build DepositData.
 
-    Returns (deposit_data, group_to_track, n_groups).
+    Uses the extractor directly (file stays open across events) then
+    passes raw arrays to build_deposit_data for volume splitting,
+    grouping, and padding.
+
+    Returns DepositData (multi-volume, padded, grouped).
     """
     step_data = extractor.extract_step_arrays(event_idx)
     positions_mm = np.asarray(
         step_data.get('position', np.empty((0, 3))), dtype=np.float32)
     n = positions_mm.shape[0]
 
-    track_ids = np.asarray(step_data.get('track_id', np.ones((n,))), dtype=np.int32)
-    valid_mask = np.ones(n, dtype=bool)
+    # GEANT4 stores time in nanoseconds; convert to microseconds
+    t_ns = np.asarray(step_data.get('t', np.zeros((n,))), dtype=np.float32)
+    t0_us = t_ns / 1000.0
 
-    group_ids, group_to_track, n_groups = compute_group_ids(
-        positions_mm, track_ids, valid_mask,
-        group_size=group_size, gap_threshold_mm=gap_threshold_mm)
-
-    deposit_data = DepositData(
-        positions_mm=positions_mm,
-        de=np.asarray(step_data.get('de', np.zeros((n,))), dtype=np.float32),
-        dx=np.asarray(step_data.get('dx', np.zeros((n,))), dtype=np.float32),
-        valid_mask=valid_mask,
+    return build_deposit_data(
+        positions_mm,
+        np.asarray(step_data.get('de', np.zeros((n,))), dtype=np.float32),
+        np.asarray(step_data.get('dx', np.zeros((n,))), dtype=np.float32),
+        sim_config,
         theta=np.asarray(step_data.get('theta', np.zeros((n,))), dtype=np.float32),
         phi=np.asarray(step_data.get('phi', np.zeros((n,))), dtype=np.float32),
-        track_ids=track_ids,
-        group_ids=group_ids,
+        track_ids=np.asarray(step_data.get('track_id', np.ones((n,))), dtype=np.int32),
+        t0_us=t0_us,
+        group_size=group_size,
+        gap_threshold_mm=gap_threshold_mm,
     )
-    return deposit_data, group_to_track, n_groups
 
 
 def get_num_events(data_path):
@@ -178,9 +181,9 @@ def main():
     )
     t_create = time.time() - t_create
 
-    cfg = simulator._sim_config
+    cfg = simulator.config
     params = simulator.default_sim_params
-    dig_config = simulator.digitization_config  # None if digitization disabled
+    dig_config = getattr(simulator, 'digitization_config', None)
 
     t_warmup = time.time()
     simulator.warm_up()
@@ -192,29 +195,26 @@ def main():
     # ---- Real-data warmup ----
     print("  Real-data warmup...", end='', flush=True)
     t0 = time.time()
-    warmup_dep, _, _ = load_deposit(
-        ParticleStepExtractor(args.data), 0,
+    warmup_dep = load_deposit(
+        ParticleStepExtractor(args.data), 0, cfg,
         args.group_size, args.gap_threshold)
-    warmup_r, _, _ = simulator(warmup_dep, key=jax.random.PRNGKey(0))
+    warmup_r, _, warmup_dep = simulator.process_event(warmup_dep, key=jax.random.PRNGKey(0))
     for a in warmup_r.values():
         jax.block_until_ready(a)
     del warmup_r, warmup_dep
     gc.collect()
     print(f" {time.time() - t0:.1f}s\n")
 
-    # ---- Process events ----
+    # ---- Save helpers ----
     key = jax.random.PRNGKey(args.seed)
     total_start = time.time()
 
-    # ---- Save worker for threaded mode ----
     num_workers = args.workers
     file_lock = threading.Lock()
 
     def save_one_event(f_resp, f_seg, f_corr, item):
         """Save a single event (CSR encode + HDF5 write). Thread-safe."""
-        (event_key, response_np, track_hits_raw, deposit_data,
-         group_to_track, n_groups, qs_frac,
-         n_deposits, n_east, n_west, source_idx) = item
+        (event_key, response_np, track_hits_raw, deposits, source_idx) = item
 
         # CSR encoding (numpy, GIL-free — runs in parallel across workers)
         corr_data = None
@@ -231,30 +231,34 @@ def main():
         # HDF5 write (serialized through file lock)
         with file_lock:
             save_event_resp(f_resp, event_key, response_np, threshold_adc,
-                            source_idx, n_deposits, n_east, n_west,
+                            source_idx, deposits,
                             digitized=include_digitize)
-            save_event_seg(f_seg, event_key, deposit_data, group_to_track,
-                           source_idx, n_east, n_west, qs_fractions=qs_frac)
-            if corr_data is not None:
+            save_event_seg(f_seg, event_key, deposits, source_idx)
+            if corr_data is not None and f_corr is not None:
                 _write_corr_event(f_corr, event_key, corr_data,
-                                  group_to_track, source_idx, n_deposits, n_groups)
+                                  deposits, source_idx)
 
-    def _write_corr_event(f, event_key, corr_data, group_to_track,
-                          source_idx, n_deposits, n_groups):
+    def _write_corr_event(f, event_key, corr_data, deposits, source_idx):
         """Write pre-encoded correspondence to HDF5."""
         evt = f.create_group(event_key)
         evt.attrs['source_event_idx'] = source_idx
-        evt.attrs['n_deposits'] = n_deposits
-        evt.attrs['n_groups'] = n_groups
+        evt.attrs['n_volumes'] = len(deposits.volumes)
         evt.attrs['threshold'] = args.corr_threshold
-        evt.create_dataset('group_to_track', data=group_to_track, compression='gzip')
-        for (si, pi), csr in corr_data.items():
-            name = PLANE_NAMES[(si, pi)]
-            g = evt.create_group(name)
-            for k, arr in csr.items():
-                g.create_dataset(k, data=arr, compression='gzip')
-            g.attrs['n_groups_plane'] = len(csr['group_ids'])
-            g.attrs['n_entries'] = len(csr['delta_wires'])
+
+        for v in range(len(deposits.volumes)):
+            vol_grp = evt.create_group(f'volume_{v}')
+            g2t = deposits.group_to_track[v]
+            if g2t is not None:
+                vol_grp.create_dataset('group_to_track',
+                                       data=g2t, compression='gzip')
+            for (vi, pi), csr in corr_data.items():
+                if vi != v:
+                    continue
+                g = vol_grp.create_group(_plane_label(pi))
+                for k, arr in csr.items():
+                    g.create_dataset(k, data=arr, compression='gzip')
+                g.attrs['n_groups_plane'] = len(csr['group_ids'])
+                g.attrs['n_entries'] = len(csr['delta_wires'])
 
     def save_worker(f_resp, f_seg, f_corr, save_queue):
         """Worker thread: pull items from queue, encode + save."""
@@ -320,34 +324,28 @@ def main():
                         local_idx = idx - event_start
                         event_key = f'event_{local_idx:03d}'
 
-                        # Load
+                        # Load + build DepositData (volume split, group, pad)
                         t_load = time.time()
-                        deposit_data, group_to_track, n_groups = load_deposit(
-                            extractor, idx, args.group_size, args.gap_threshold)
+                        deposits = load_deposit(
+                            extractor, idx, cfg,
+                            args.group_size, args.gap_threshold)
                         t_load = time.time() - t_load
-                        n_deposits = deposit_data.positions_mm.shape[0]
+                        n_deposits = sum(v.n_actual for v in deposits.volumes)
 
                         # Simulate
                         t_sim = time.time()
-                        response_signals, track_hits, qs_fractions = simulator(
-                            deposit_data, key=subkey)
+                        response_signals, track_hits, deposits = \
+                            simulator.process_event(deposits, key=subkey)
                         for arr in response_signals.values():
                             jax.block_until_ready(arr)
                         t_sim = time.time() - t_sim
 
-                        # GPU -> CPU transfer
+                        # GPU → CPU transfer for signals (large arrays)
+                        # track_hits and qs_per_volume convert lazily in save fns
                         response_np = {k: np.asarray(v)
                                        for k, v in response_signals.items()}
-                        x = np.asarray(deposit_data.positions_mm[:, 0])
-                        valid = np.asarray(deposit_data.valid_mask)
-                        n_east = int(np.sum(valid & (x < 0)))
-                        n_west = int(np.sum(valid & (x >= 0)))
 
-                        qs_frac = qs_fractions.astype(np.float16) if qs_fractions is not None else None
-
-                        item = (event_key, response_np, track_hits, deposit_data,
-                                group_to_track, n_groups, qs_frac,
-                                n_deposits, n_east, n_west, idx)
+                        item = (event_key, response_np, track_hits, deposits, idx)
 
                         # Save (serial or queued)
                         t_save = time.time()

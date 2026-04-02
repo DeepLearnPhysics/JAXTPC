@@ -12,15 +12,48 @@ import jax.numpy as jnp
 
 
 class DepositData(NamedTuple):
-    """Padded input data from particle simulation steps."""
-    positions_mm: jnp.ndarray    # (N_pad, 3) - hit positions
-    de: jnp.ndarray              # (N_pad,) - energy deposits in MeV
-    dx: jnp.ndarray              # (N_pad,) - step lengths in mm (converted to cm in simulation)
-    valid_mask: jnp.ndarray      # (N_pad,) - True for real hits
-    theta: jnp.ndarray           # (N_pad,) - polar angle of step direction
-    phi: jnp.ndarray             # (N_pad,) - azimuthal angle of step direction
-    track_ids: jnp.ndarray       # (N_pad,) - particle track ID
-    group_ids: jnp.ndarray       # (N_pad,) - segment group ID for correspondence
+    """Multi-volume padded input data for simulation.
+
+    Holds a tuple of VolumeDeposits (one per volume) plus metadata
+    used outside JIT for post-processing.
+
+    Constructed by build_deposit_data() or load_event().
+    """
+    volumes: tuple          # (VolumeDeposits_0, VolumeDeposits_1, ...) — passed to JIT
+    group_to_track: Any     # tuple of np.ndarray lookups per volume (outside JIT only)
+    original_indices: Any   # tuple of np.ndarray per volume (outside JIT only)
+
+
+class VolumeDeposits(NamedTuple):
+    """Single-volume deposit arrays, extracted from DepositData for physics functions.
+
+    All fields are single JAX arrays (not tuples). Constructed by
+    get_volume_deposits(deposits, vol_idx) inside the JIT volume loop.
+
+    No valid_mask field — padding is zeroed via n_actual:
+        mask = jnp.arange(total_pad) < n_actual
+    Applied once after recombination in compute_volume_physics.
+    """
+    positions_mm: jnp.ndarray    # (total_pad, 3)
+    de: jnp.ndarray              # (total_pad,)
+    dx: jnp.ndarray              # (total_pad,)
+    theta: jnp.ndarray           # (total_pad,)
+    phi: jnp.ndarray             # (total_pad,)
+    track_ids: jnp.ndarray       # (total_pad,)
+    group_ids: jnp.ndarray       # (total_pad,)
+    t0_us: jnp.ndarray           # (total_pad,) initial deposit time in μs
+    charge: jnp.ndarray          # (total_pad,) recombined electrons (zeros on input, filled after sim)
+    photons: jnp.ndarray         # (total_pad,) scintillation photons (zeros on input, filled after sim)
+    qs_fractions: jnp.ndarray    # (total_pad,) group charge fraction (zeros on input, filled after sim)
+    n_actual: int                 # number of real deposits (rest is padding)
+
+
+def get_volume_deposits(deposits, vol_idx):
+    """Extract single-volume VolumeDeposits from DepositData.
+
+    Called inside the JIT volume loop.
+    """
+    return deposits.volumes[vol_idx]
 
 
 class DiffusionConfig(NamedTuple):
@@ -53,6 +86,8 @@ class SimConfig(NamedTuple):
     # Time grid
     num_time_steps: int
     time_step_us: float
+    pre_window_us: float                    # readout window extension before drift t=0
+    post_window_us: float                   # readout window extension after max drift
 
     # Array dimensions / batching
     total_pad: int
@@ -69,11 +104,12 @@ class SimConfig(NamedTuple):
     # Bucketed mode
     max_active_buckets: int
 
-    # Geometry (per-side)
-    side_geom: tuple                    # (SideGeometry, SideGeometry)
+    # Volumes
+    n_volumes: int                      # number of detector volumes
+    volumes: tuple                      # (VolumeGeometry, ...) per volume
 
     # Plane names
-    plane_names: tuple                  # (('U','V','Y'), ('U','V','Y'))
+    plane_names: tuple                  # per-volume: (('U','V','Y'), ('U','V','Y'))
 
     # Output format: 'dense', 'bucketed', or 'wire_sparse'
     output_format: str
@@ -83,7 +119,6 @@ class SimConfig(NamedTuple):
     noise_spectrum_path: str            # Path to noise_spectrum.npz
 
     # Optional (None when disabled/not needed)
-    diffusion: Any                      # DiffusionConfig or None
     track_hits: Any                     # TrackHitsConfig or None
 
 
@@ -122,25 +157,7 @@ def create_digitization_config(
     pedestal_induction: int = 1843,
     gain_scale: float = 1.0,
 ) -> DigitizationConfig:
-    """
-    Create DigitizationConfig with specified parameters.
-
-    Parameters
-    ----------
-    n_bits : int, optional
-        ADC resolution in bits, by default 12.
-    pedestal_collection : int, optional
-        Baseline ADC value for collection (Y) planes, by default 410.
-    pedestal_induction : int, optional
-        Baseline ADC value for induction (U/V) planes, by default 1843.
-    gain_scale : float, optional
-        Gain rescale factor applied before digitization, by default 1.0.
-
-    Returns
-    -------
-    DigitizationConfig
-        Configured digitization parameters.
-    """
+    """Create DigitizationConfig with specified parameters."""
     return DigitizationConfig(
         n_bits=n_bits,
         pedestal_collection=pedestal_collection,
@@ -156,28 +173,7 @@ def create_track_hits_config(
     hits_chunk_size: int = 25000,
     inter_thresh: float = 1.0,
 ) -> TrackHitsConfig:
-    """
-    Create TrackHitsConfig with specified parameters.
-
-    Parameters
-    ----------
-    threshold : float, optional
-        Minimum charge threshold for keeping hits, by default 1.0.
-    max_tracks : int, optional
-        Maximum number of tracks for array pre-allocation, by default 10000.
-    max_keys : int, optional
-        Maximum number of unique (track, wire, time) combinations, by default 1000000.
-    hits_chunk_size : int, optional
-        Number of deposits per fori_loop iteration, by default 25000.
-        Must evenly divide all padding tiers (e.g. 100000, 200000).
-    inter_thresh : float, optional
-        Intermediate pruning threshold applied each merge iteration, by default 1.0.
-
-    Returns
-    -------
-    TrackHitsConfig
-        Configured track hits parameters.
-    """
+    """Create TrackHitsConfig with specified parameters."""
     return TrackHitsConfig(
         threshold=threshold,
         max_tracks=max_tracks,
@@ -194,14 +190,15 @@ def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50
                       track_config=None, include_diffusion=True, num_s=16):
     """Create SimConfig from raw parsed YAML detector configuration.
 
-    Calls geometry functions directly to compute all derived parameters.
+    Reads per-volume geometry from the 'volumes' array in the config.
+    Each volume gets its own VolumeGeometry with per-volume DiffusionConfig.
 
     Parameters
     ----------
     detector_config : dict
         Raw parsed YAML from generate_detector().
     total_pad : int
-        Fixed pad size per side. Default 200,000.
+        Fixed pad size per volume. Default 200,000.
     response_chunk_size : int
         Deposits per fori_loop batch. Must divide total_pad. Default 50,000.
     use_bucketed : bool
@@ -219,84 +216,147 @@ def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50
     track_config : TrackHitsConfig, optional
         Track labeling parameters. Built with defaults if None.
     include_diffusion : bool
-        If True, compute DiffusionConfig (for DKernel/track_hits).
-        False for NN-only paths where diffusion is implicitly encoded.
+        If True, compute DiffusionConfig per volume.
     num_s : int
         Number of diffusion levels for kernel interpolation. Default 16.
     """
     from tools.geometry import (
-        get_detector_dimensions, get_drift_params, get_plane_geometry,
-        calculate_time_params, pre_calculate_all_wire_params,
-        calculate_max_diffusion_sigmas, _calculate_wire_lengths,
+        get_drift_velocity, get_plane_geometry_for_volume,
+        get_single_plane_wire_params, calculate_max_diffusion_sigmas,
+        _calculate_wire_lengths_for_volume,
     )
 
-    # Compute detector geometry from raw YAML
-    dims_cm = get_detector_dimensions(detector_config)
-    half_width, velocity = get_drift_params(detector_config, dims_cm)
-    num_time_steps, time_step_us, _ = calculate_time_params(
-        detector_config, dims_cm, velocity)
-    plane_distances, furthest_indices = get_plane_geometry(detector_config)
-    (angles_rad, wire_spacings_cm, index_offsets,
-     num_wires_actual, max_wire_indices,
-    ) = pre_calculate_all_wire_params(detector_config, dims_cm)
-    wire_lengths_m = _calculate_wire_lengths(
-        dims_cm, angles_rad, wire_spacings_cm, index_offsets,
-        num_wires_actual)
+    volumes_cfg = detector_config['volumes']
+    n_volumes = len(volumes_cfg)
 
-    # Build SideGeometry for each side
-    n_sides = len(detector_config['wire_planes']['sides'])
-    n_planes = len(detector_config['wire_planes']['sides'][0]['planes'])
-    side_geom = tuple(
-        SideGeometry(
-            half_width_cm=half_width,
-            furthest_plane_dist_cm=float(plane_distances[s, int(furthest_indices[s])]),
-            plane_distances_cm=tuple(float(plane_distances[s, p]) for p in range(n_planes)),
-            angles_rad=tuple(float(angles_rad[s, p]) for p in range(n_planes)),
-            wire_spacings_cm=tuple(float(wire_spacings_cm[s, p]) for p in range(n_planes)),
-            index_offsets=tuple(int(index_offsets[s, p]) for p in range(n_planes)),
-            max_wire_indices=tuple(int(max_wire_indices[s, p]) for p in range(n_planes)),
-            num_wires=tuple(int(num_wires_actual[s, p]) for p in range(n_planes)),
-            wire_lengths_m=tuple(wire_lengths_m[(s, p)] for p in range(n_planes)),
-        )
-        for s in range(n_sides)
-    )
+    # Global parameters
+    velocity = get_drift_velocity(detector_config)
+    sampling_rate = float(detector_config['readout']['sampling_rate'])
+    time_step_us = 1.0 / sampling_rate
 
-    # Plane type labels used as kernel keys ('U', 'V', 'Y')
+    # Diffusion coefficients (global, used per-volume with per-volume max_drift)
+    long_diff = float(detector_config['simulation']['drift']['longitudinal_diffusion']) / 1e6
+    trans_diff = float(detector_config['simulation']['drift']['transverse_diffusion']) / 1e6
+
+    # Build VolumeGeometry for each volume
+    all_volumes = []
     _PLANE_LABELS = ('U', 'V', 'Y')
-    plane_names = tuple(_PLANE_LABELS[:n_planes] for _ in range(n_sides))
 
-    # Diffusion config (optional)
-    if include_diffusion:
-        long_diff = float(detector_config['simulation']['drift']['longitudinal_diffusion']) / 1e6
-        trans_diff = float(detector_config['simulation']['drift']['transverse_diffusion']) / 1e6
-        wire_spacing_ref = float(wire_spacings_cm[0, 0])
+    for v, vol_cfg in enumerate(volumes_cfg):
+        geo = vol_cfg['geometry']
+        ranges = geo['ranges']
+        drift_dir = geo['drift_direction']
+        planes_cfg = vol_cfg['planes']
+        n_planes = len(planes_cfg)
 
-        _, _, max_sigma_trans, max_sigma_long = calculate_max_diffusion_sigmas(
-            half_width, velocity, trans_diff, long_diff, wire_spacing_ref, time_step_us)
+        x_min, x_max = ranges[0]
+        # Max drift distance = full x-extent of this volume
+        max_drift = x_max - x_min
+        # Anode: where electrons arrive
+        #   drift_direction == +1 → electrons drift toward +x → anode at x_max
+        #   drift_direction == -1 → electrons drift toward -x → anode at x_min
+        x_anode = x_max if drift_dir == 1 else x_min
 
-        diffusion = DiffusionConfig(
-            long_cm2_us=long_diff,
-            trans_cm2_us=trans_diff,
-            K_wire=max(1, int(np.ceil(3.0 * max_sigma_trans))),
-            K_time=max(1, int(np.ceil(3.0 * max_sigma_long))),
-            velocity_cm_us=velocity,
-            num_s=num_s,
-            max_sigma_trans_unitless=max_sigma_trans,
-            max_sigma_long_unitless=max_sigma_long,
-        )
-    else:
-        diffusion = None
+        # Per-volume dimensions (for wire geometry calculation)
+        dims_cm = {
+            'y': ranges[1][1] - ranges[1][0],
+            'z': ranges[2][1] - ranges[2][0],
+            'x': x_max - x_min,
+        }
 
-    # Track hits config (optional)
+        # Plane geometry
+        plane_distances, furthest_idx = get_plane_geometry_for_volume(planes_cfg)
+
+        # Wire parameters per plane
+        angles = []
+        spacings = []
+        offsets = []
+        n_wires_list = []
+        max_wire_list = []
+        for p, plane_cfg in enumerate(planes_cfg):
+            angle, spacing, offset, n_wires, max_wire = get_single_plane_wire_params(
+                plane_cfg, dims_cm)
+            angles.append(angle)
+            spacings.append(spacing)
+            offsets.append(offset)
+            n_wires_list.append(n_wires)
+            max_wire_list.append(max_wire)
+
+        # Wire lengths
+        wire_lengths = _calculate_wire_lengths_for_volume(
+            dims_cm,
+            angles, spacings, offsets, n_wires_list)
+
+        # Per-volume DiffusionConfig
+        if include_diffusion:
+            wire_spacing_ref = spacings[0]
+            _, _, max_sigma_trans, max_sigma_long = calculate_max_diffusion_sigmas(
+                max_drift, velocity, trans_diff, long_diff,
+                wire_spacing_ref, time_step_us)
+            diffusion = DiffusionConfig(
+                long_cm2_us=long_diff,
+                trans_cm2_us=trans_diff,
+                K_wire=max(1, int(np.ceil(3.0 * max_sigma_trans))),
+                K_time=max(1, int(np.ceil(3.0 * max_sigma_long))),
+                velocity_cm_us=velocity,
+                num_s=num_s,
+                max_sigma_trans_unitless=max_sigma_trans,
+                max_sigma_long_unitless=max_sigma_long,
+            )
+        else:
+            diffusion = None
+
+        all_volumes.append(VolumeGeometry(
+            volume_id=v,
+            ranges_cm=tuple(tuple(r) for r in ranges),
+            drift_direction=drift_dir,
+            x_anode_cm=x_anode,
+            max_drift_cm=max_drift,
+            n_planes=n_planes,
+            furthest_plane_dist_cm=float(plane_distances[furthest_idx]),
+            plane_distances_cm=tuple(float(d) for d in plane_distances),
+            angles_rad=tuple(angles),
+            wire_spacings_cm=tuple(spacings),
+            index_offsets=tuple(offsets),
+            max_wire_indices=tuple(max_wire_list),
+            num_wires=tuple(n_wires_list),
+            wire_lengths_m=tuple(wire_lengths),
+            diffusion=diffusion,
+        ))
+
+    volumes = tuple(all_volumes)
+
+    # Global time params from longest drift across all volumes
+    longest_drift = max(vol.max_drift_cm for vol in volumes)
+    max_drift_time = longest_drift / velocity
+
+    # Readout window extensions (fraction of max drift time)
+    readout_cfg = detector_config.get('readout', {})
+    pre_window_frac = float(readout_cfg.get('pre_window_fraction', 0.0))
+    post_window_frac = float(readout_cfg.get('post_window_fraction', 0.0))
+    pre_window_us = pre_window_frac * max_drift_time
+    post_window_us = post_window_frac * max_drift_time
+    total_window_us = pre_window_us + max_drift_time + post_window_us
+
+    num_time_steps = int(np.ceil(total_window_us / time_step_us)) + 1
+    num_time_steps = max(1, num_time_steps)
+
+    # Plane names per volume
+    plane_names = tuple(
+        tuple(_PLANE_LABELS[:vol.n_planes]) for vol in volumes)
+
+    # Track hits config
     if include_track_hits:
         if track_config is None:
             track_config = create_track_hits_config()
-        max_wires = max(int(np.max(max_wire_indices) + 1), 2000)
+        max_wires = max(
+            w for vol in volumes for w in vol.max_wire_indices) + 1
+        max_wires = max(max_wires, 2000)
     else:
         track_config = None
         max_wires = 0
 
-    # Derive output format from mode flags
+    # Output format
     if use_bucketed and include_electronics:
         output_format = 'wire_sparse'
     elif use_bucketed:
@@ -307,6 +367,8 @@ def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50
     return SimConfig(
         num_time_steps=num_time_steps,
         time_step_us=time_step_us,
+        pre_window_us=pre_window_us,
+        post_window_us=post_window_us,
         total_pad=total_pad,
         response_chunk_size=response_chunk_size,
         max_wires=max_wires,
@@ -316,13 +378,13 @@ def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50
         include_electronics=include_electronics,
         include_digitize=include_digitize,
         max_active_buckets=max_active_buckets,
-        side_geom=side_geom,
+        n_volumes=n_volumes,
+        volumes=volumes,
         plane_names=plane_names,
         output_format=output_format,
         electrons_per_adc=float(detector_config['readout'].get('electrons_per_adc', 182)),
         noise_spectrum_path=str(
             Path(__file__).parent.parent / 'config' / 'noise_spectrum.npz'),
-        diffusion=diffusion,
         track_hits=track_config,
     )
 
@@ -355,8 +417,8 @@ class SimParams(NamedTuple):
     diffusion_trans_cm2_us: jnp.ndarray   # Transverse diffusion coefficient
     diffusion_long_cm2_us: jnp.ndarray    # Longitudinal diffusion coefficient
     recomb_params: Any              # ModifiedBoxParams or EMBParams
-    response_models: Any            # dict {(side_idx, plane_type): eqx.Module} or None
-    sce_models: Any                 # tuple (east_siren, west_siren) or None
+    response_models: Any            # dict {(vol_idx, plane_type): eqx.Module} or None
+    sce_models: Any                 # tuple of per-volume models, or None
 
 
 class SCEOutputs(NamedTuple):
@@ -365,9 +427,14 @@ class SCEOutputs(NamedTuple):
     drift_corr_cm: jnp.ndarray     # (N, 3) drift corrections [dx, dy, dz] in cm
 
 
-class SideGeometry(NamedTuple):
-    """Static geometry for one detector side."""
-    half_width_cm: float
+class VolumeGeometry(NamedTuple):
+    """Static geometry for one detector volume."""
+    volume_id: int                  # 0, 1, ...
+    ranges_cm: tuple                # ((x_min,x_max), (y_min,y_max), (z_min,z_max))
+    drift_direction: int            # +1 or -1
+    x_anode_cm: float               # derived from ranges + drift_direction
+    max_drift_cm: float            # x_max - x_min (max drift distance in this volume)
+    n_planes: int                   # number of readout planes
     furthest_plane_dist_cm: float
     plane_distances_cm: tuple       # (n_planes,) per plane
     angles_rad: tuple               # (n_planes,)
@@ -376,26 +443,29 @@ class SideGeometry(NamedTuple):
     max_wire_indices: tuple         # (n_planes,) int
     num_wires: tuple                # (n_planes,) int
     wire_lengths_m: tuple           # (n_planes,) of np.ndarray, wire lengths in meters
+    diffusion: Any                  # DiffusionConfig or None
 
 
-class SideIntermediates(NamedTuple):
-    """Output of compute_side_physics, input to compute_plane_physics."""
+class VolumeIntermediates(NamedTuple):
+    """Output of compute_volume_physics, input to compute_plane_physics."""
     charges: jnp.ndarray            # (N,) zeroed for invalid deposits (valid_mask applied)
     photons: jnp.ndarray            # (N,) scintillation photons (valid_mask applied)
     drift_distance_cm: jnp.ndarray  # (N,)
     drift_time_us: jnp.ndarray     # (N,)
     positions_cm: jnp.ndarray      # (N, 3) original positions (for NN response)
     positions_yz_cm: jnp.ndarray   # (N, 2) projected (for wire distances)
+    t0_us: jnp.ndarray             # (N,) initial deposit time in μs
 
 
 class PlaneIntermediates(NamedTuple):
     """Output of compute_plane_physics, input to response computation."""
     drift_distance_cm: jnp.ndarray  # (N,) SCE-corrected, plane-corrected
-    drift_time_us: jnp.ndarray     # (N,)
+    drift_time_us: jnp.ndarray     # (N,) pure drift time (for diffusion sigma)
+    tick_us: jnp.ndarray           # (N,) readout tick time = drift + t0 + pre_window
     attenuation: jnp.ndarray       # (N,)
     closest_wire_idx: jnp.ndarray  # (N,) int
     closest_wire_dist: jnp.ndarray # (N,)
-    charges: jnp.ndarray           # (N,) zeroed for invalid deposits
+    charges: jnp.ndarray           # (N,) zeroed for invalid/out-of-window deposits
     photons: jnp.ndarray           # (N,) scintillation photons
     positions_cm: jnp.ndarray      # (N, 3) carried through for response_fn
 
@@ -411,12 +481,12 @@ def create_sim_params(detector_config, recombination_model='modified_box',
     recombination_model : str
         'modified_box' or 'emb'.
     response_models : dict or None
-        {(side_idx, plane_type): eqx.Module} for NN response, or None for DKernel.
+        {(vol_idx, plane_type): eqx.Module} for NN response, or None for DKernel.
     sce_models : tuple or None
-        (east_siren, west_siren) for SIREN SCE, or None for HDF5/nominal.
+        Per-volume tuple of SCE models, or None for HDF5/nominal.
     """
-    from tools.geometry import get_drift_params
-    _, velocity_cm_us = get_drift_params(detector_config)
+    from tools.geometry import get_drift_velocity
+    velocity_cm_us = get_drift_velocity(detector_config)
     lifetime_ms = float(detector_config['simulation']['drift']['electron_lifetime'])
 
     velocity = jnp.array(velocity_cm_us)
@@ -478,46 +548,73 @@ def create_sim_params(detector_config, recombination_model='modified_box',
 
 
 def create_deposit_data(positions_mm, de, dx, theta=None, phi=None,
-                        track_ids=None, group_ids=None):
-    """Convenience constructor for DepositData with sensible defaults.
+                        track_ids=None, group_ids=None, t0_us=None,
+                        n_volumes=1):
+    """Convenience constructor for single-volume DepositData.
+
+    Wraps arrays into 1-element tuples (single volume). For multi-volume
+    data, use prepare_event() from loader.py instead.
 
     Required: positions_mm (N,3), de (N,), dx (N,) or scalar.
-    Optional: theta, phi (default zeros), track_ids, group_ids (default zeros).
-    valid_mask is always ones — caller creates unpadded deposits.
-    forward() handles padding to total_pad internally.
+    Optional: theta, phi (default zeros), track_ids, group_ids, t0_us (default zeros).
     """
     N = positions_mm.shape[0]
+    dx_arr = jnp.full(N, dx) if jnp.ndim(dx) == 0 else dx
+    th = theta if theta is not None else jnp.zeros(N)
+    ph = phi if phi is not None else jnp.zeros(N)
+    tids = track_ids if track_ids is not None else jnp.zeros(N, jnp.int32)
+    gids = group_ids if group_ids is not None else jnp.zeros(N, jnp.int32)
+    t0 = t0_us if t0_us is not None else jnp.zeros(N)
+
+    vol = VolumeDeposits(
+        positions_mm=positions_mm, de=de, dx=dx_arr,
+        theta=th, phi=ph, track_ids=tids, group_ids=gids, t0_us=t0,
+        charge=jnp.zeros(N), photons=jnp.zeros(N), qs_fractions=jnp.zeros(N),
+        n_actual=N,
+    )
+    vols = (vol,) * n_volumes
     return DepositData(
-        positions_mm=positions_mm,
-        de=de,
-        dx=jnp.full(N, dx) if jnp.ndim(dx) == 0 else dx,
-        valid_mask=jnp.ones(N, bool),
-        theta=theta if theta is not None else jnp.zeros(N),
-        phi=phi if phi is not None else jnp.zeros(N),
-        track_ids=track_ids if track_ids is not None else jnp.zeros(N, jnp.int32),
-        group_ids=group_ids if group_ids is not None else jnp.zeros(N, jnp.int32),
+        volumes=vols,
+        group_to_track=(None,) * n_volumes,
+        original_indices=(None,) * n_volumes,
     )
 
 
 
 def pad_deposit_data(deposits, target_size):
-    """Pad DepositData to target_size with valid_mask=False entries.
+    """Pad each volume's VolumeDeposits arrays to target_size.
 
     Used by forward() to pad to total_pad (next multiple of chunk_size).
-    Padding entries have de=0, dx=1 (avoids division by zero in recombination),
-    valid_mask=False (zeroes charges in compute_side_physics).
+    Padding entries have de=0, dx=1 (avoids division by zero in recombination).
+    Padding is zeroed after recombination via n_actual mask in compute_volume_physics.
     """
-    N = deposits.positions_mm.shape[0]
-    pad_size = target_size - N
-    if pad_size <= 0:
-        return deposits
+    def _pad(arr, pad_val=0):
+        N = arr.shape[0]
+        pad_size = target_size - N
+        if pad_size <= 0:
+            return arr
+        if arr.ndim == 2:
+            return jnp.pad(arr, ((0, pad_size), (0, 0)), constant_values=pad_val)
+        return jnp.pad(arr, (0, pad_size), constant_values=pad_val)
+
+    def _pad_vol(vol):
+        return VolumeDeposits(
+            positions_mm=_pad(vol.positions_mm),
+            de=_pad(vol.de),
+            dx=_pad(vol.dx, pad_val=1.0),
+            theta=_pad(vol.theta),
+            phi=_pad(vol.phi),
+            track_ids=_pad(vol.track_ids),
+            group_ids=_pad(vol.group_ids),
+            t0_us=_pad(vol.t0_us),
+            charge=_pad(vol.charge),
+            photons=_pad(vol.photons),
+            qs_fractions=_pad(vol.qs_fractions),
+            n_actual=vol.n_actual,
+        )
+
     return DepositData(
-        positions_mm=jnp.pad(deposits.positions_mm, ((0, pad_size), (0, 0))),
-        de=jnp.pad(deposits.de, (0, pad_size)),
-        dx=jnp.pad(deposits.dx, (0, pad_size), constant_values=1.0),
-        valid_mask=jnp.pad(deposits.valid_mask, (0, pad_size)),  # False for padding
-        theta=jnp.pad(deposits.theta, (0, pad_size)),
-        phi=jnp.pad(deposits.phi, (0, pad_size)),
-        track_ids=jnp.pad(deposits.track_ids, (0, pad_size)),
-        group_ids=jnp.pad(deposits.group_ids, (0, pad_size)),
+        volumes=tuple(_pad_vol(v) for v in deposits.volumes),
+        group_to_track=deposits.group_to_track,
+        original_indices=deposits.original_indices,
     )

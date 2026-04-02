@@ -215,7 +215,7 @@ def add_noise(response_signals, config, threshold_enc=0, key=None):
     Parameters
     ----------
     response_signals : dict
-        Dictionary mapping (side_idx, plane_idx) -> jnp.ndarray in ADC.
+        Dictionary mapping (vol_idx, plane_idx) -> jnp.ndarray in ADC.
         Each array has shape (num_wires, num_time_steps).
     config : SimConfig
         Simulation configuration (from sim.config).
@@ -228,7 +228,7 @@ def add_noise(response_signals, config, threshold_enc=0, key=None):
     Returns
     -------
     noisy_signals : dict
-        Dictionary mapping (side_idx, plane_idx) -> jnp.ndarray with noise added.
+        Dictionary mapping (vol_idx, plane_idx) -> jnp.ndarray with noise added.
     """
     if key is None:
         key = jax.random.PRNGKey(0)
@@ -244,9 +244,9 @@ def add_noise(response_signals, config, threshold_enc=0, key=None):
 
     noisy_signals = {}
 
-    for (side_idx, plane_idx), signal in response_signals.items():
-        num_wires = config.side_geom[side_idx].num_wires[plane_idx]
-        lengths = config.side_geom[side_idx].wire_lengths_m[plane_idx]
+    for (vol_idx, plane_idx), signal in response_signals.items():
+        num_wires = config.volumes[vol_idx].num_wires[plane_idx]
+        lengths = config.volumes[vol_idx].wire_lengths_m[plane_idx]
 
         series_rms = jnp.array(noise_y + noise_z * lengths, dtype=jnp.float32)
 
@@ -261,7 +261,7 @@ def add_noise(response_signals, config, threshold_enc=0, key=None):
         if deadband_adc > 0:
             noisy = jnp.where(jnp.abs(noisy) < deadband_adc, 0.0, noisy)
 
-        noisy_signals[(side_idx, plane_idx)] = noisy
+        noisy_signals[(vol_idx, plane_idx)] = noisy
 
     return noisy_signals
 
@@ -280,7 +280,7 @@ def generate_noise(config, key=None):
     Returns
     -------
     noise_dict : dict
-        Dictionary mapping (side_idx, plane_idx) -> jnp.array (num_wires, num_time_steps).
+        Dictionary mapping (vol_idx, plane_idx) -> jnp.array (num_wires, num_time_steps).
     """
     if key is None:
         key = jax.random.PRNGKey(0)
@@ -295,13 +295,14 @@ def generate_noise(config, key=None):
 
     noise_dict = {}
 
-    for side_idx in range(2):
-        for plane_idx in range(3):
-            num_wires = config.side_geom[side_idx].num_wires[plane_idx]
+    for vol_idx in range(config.n_volumes):
+        vol = config.volumes[vol_idx]
+        for plane_idx in range(vol.n_planes):
+            num_wires = vol.num_wires[plane_idx]
             if num_wires == 0:
                 continue
 
-            lengths = config.side_geom[side_idx].wire_lengths_m[plane_idx]
+            lengths = vol.wire_lengths_m[plane_idx]
             series_rms = jnp.array(noise_y + noise_z * lengths, dtype=jnp.float32)
 
             key, subkey = jax.random.split(key)
@@ -309,7 +310,7 @@ def generate_noise(config, key=None):
                 subkey, num_wires, num_time_ticks,
                 spectrum_jax, series_rms, noise_x
             )
-            noise_dict[(side_idx, plane_idx)] = noise
+            noise_dict[(vol_idx, plane_idx)] = noise
 
     return noise_dict
 
@@ -323,7 +324,7 @@ def generate_noise_bucketed(config, bucketed_signals, key=None):
     config : SimConfig
         Simulation configuration (from sim.config).
     bucketed_signals : dict
-        Dictionary mapping (side_idx, plane_idx) -> (buckets, num_active,
+        Dictionary mapping (vol_idx, plane_idx) -> (buckets, num_active,
         compact_to_key, B1, B2) tuples from bucketed simulation.
     key : jax.Array, optional
         JAX PRNGKey. Default is PRNGKey(0).
@@ -331,7 +332,7 @@ def generate_noise_bucketed(config, bucketed_signals, key=None):
     Returns
     -------
     noise_dict : dict
-        Dictionary mapping (side_idx, plane_idx) -> jnp.array (max_buckets, B1, B2).
+        Dictionary mapping (vol_idx, plane_idx) -> jnp.array (max_buckets, B1, B2).
     """
     if key is None:
         key = jax.random.PRNGKey(0)
@@ -343,14 +344,14 @@ def generate_noise_bucketed(config, bucketed_signals, key=None):
 
     noise_dict = {}
 
-    for (side_idx, plane_idx), signal_tuple in bucketed_signals.items():
+    for (vol_idx, plane_idx), signal_tuple in bucketed_signals.items():
         buckets, num_active, compact_to_key, B1, B2 = signal_tuple
         B1_int = int(B1)
         B2_int = int(B2)
         max_buckets = buckets.shape[0]
-        num_wires = config.side_geom[side_idx].num_wires[plane_idx]
+        num_wires = config.volumes[vol_idx].num_wires[plane_idx]
 
-        all_lengths = jnp.array(config.side_geom[side_idx].wire_lengths_m[plane_idx])
+        all_lengths = jnp.array(config.volumes[vol_idx].wire_lengths_m[plane_idx])
 
         NUM_BUCKETS_T = (num_time_steps + B2_int - 1) // B2_int
         wire_starts = (compact_to_key // NUM_BUCKETS_T) * B1_int
@@ -368,7 +369,7 @@ def generate_noise_bucketed(config, bucketed_signals, key=None):
             subkey, max_buckets, B1_int, B2_int,
             spectrum_jax, bucket_series_rms, noise_x
         )
-        noise_dict[(side_idx, plane_idx)] = noise
+        noise_dict[(vol_idx, plane_idx)] = noise
 
     return noise_dict
 
@@ -377,141 +378,106 @@ def generate_noise_bucketed(config, bucketed_signals, key=None):
 # FACTORY FUNCTION (create closure for use inside JIT)
 # =============================================================================
 
-def _noop_noise(key, sig, side_idx, plane_idx, n_wires, n_time):
+def _noop_noise(key, sig, plane_idx, n_wires, n_time):
     """Identity — no noise."""
     return sig
 
 
-def _build_dense_noise(noise_series_rms, noise_white_rms, spectrum_dense):
-    """Build dense-mode noise closure."""
-    def noise_fn(key, signal, side_idx, plane_idx, n_wires, n_time):
-        series_rms = noise_series_rms[(side_idx, plane_idx)]
-        noise = _noise_core(key, n_wires, n_time, spectrum_dense, series_rms, noise_white_rms)
-        return signal + noise
-    return noise_fn
-
-
-def _build_bucketed_noise(cfg, spectrum_bucketed, bucket_dims,
-                          wire_lengths_jax, noise_x, noise_y, noise_z):
-    """Build bucketed-mode noise closure (noise per bucket)."""
-    def make_fn(plane_type, side_idx, plane_idx):
-        B1, B2 = bucket_dims[plane_type]
-        spectrum = spectrum_bucketed[plane_type]
-        lengths = wire_lengths_jax[(side_idx, plane_idx)]
-
-        def fn(key, signal_tuple, side_idx, plane_idx, n_wires, n_time):
-            buckets, num_active, compact_to_key, _, _ = signal_tuple
-            NUM_BUCKETS_T = (n_time + B2 - 1) // B2
-            wire_starts = (compact_to_key // NUM_BUCKETS_T) * B1
-            wire_indices = wire_starts[:, None] + jnp.arange(B1)
-            wire_indices = jnp.clip(wire_indices, 0, n_wires - 1)
-            bucket_series_rms = noise_y + noise_z * lengths[wire_indices]
-            noise = _generate_noise_for_buckets(
-                key, cfg.max_active_buckets, B1, B2,
-                spectrum, bucket_series_rms, noise_x
-            )
-            active_mask = jnp.arange(cfg.max_active_buckets) < num_active
-            noise = noise * active_mask[:, None, None]
-            return (buckets + noise, num_active, compact_to_key, B1, B2)
-        return fn
-
-    plane_fns = {
-        (s, p): make_fn(cfg.plane_names[s][p], s, p)
-        for s in range(2) for p in range(3)
-    }
-
-    def noise_fn(key, sig, side_idx, plane_idx, n_wires, n_time):
-        return plane_fns[(side_idx, plane_idx)](key, sig, side_idx, plane_idx, n_wires, n_time)
-    return noise_fn
-
-
-def _build_wire_sparse_noise(wire_lengths_jax, noise_x, noise_y, noise_z,
-                             spectrum_dense, e_chunk):
-    """Build wire-sparse-mode noise closure (noise on active wire rows)."""
-    def make_fn(side_idx, plane_idx):
-        lengths = wire_lengths_jax[(side_idx, plane_idx)]
-
-        def fn(key, signal_tuple, side_idx, plane_idx, n_wires, n_time):
-            active_signals, wire_indices, n_active = signal_tuple
-            active_series_rms = noise_y + noise_z * lengths[wire_indices]
-            noise = _noise_core(
-                key, e_chunk, n_time, spectrum_dense,
-                active_series_rms, noise_x
-            )
-            valid = jnp.arange(e_chunk) < n_active
-            return (active_signals + noise * valid[:, None],
-                    wire_indices, n_active)
-        return fn
-
-    plane_fns = {
-        (s, p): make_fn(s, p)
-        for s in range(2) for p in range(3)
-    }
-
-    def noise_fn(key, sig, side_idx, plane_idx, n_wires, n_time):
-        return plane_fns[(side_idx, plane_idx)](key, sig, side_idx, plane_idx, n_wires, n_time)
-    return noise_fn
-
-
-def create_noise_fn(cfg, response_kernels, e_chunk=None):
-    """Create noise generation closure for use inside JIT.
-
-    Pre-computes spectra, wire length arrays, and series RMS from
-    cfg.side_geom[s].wire_lengths_m[p].
+def create_noise_fn_for_volume(cfg, vol_geom, response_kernels, e_chunk=None):
+    """Create noise generation closure for one volume's planes.
 
     Parameters
     ----------
     cfg : SimConfig
-        Static simulation config (includes wire lengths via SideGeometry).
+    vol_geom : VolumeGeometry
     response_kernels : dict
-        Loaded response kernels (for bucket dimensions).
+        Loaded response kernels for this volume (keyed by plane type).
     e_chunk : int, optional
         Electronics chunk size (for wire-sparse mode).
 
     Returns
     -------
     noise_fn : callable
-        Signature: (key, sig, side_idx, plane_idx, n_wires, n_time) -> noisy signal.
+        Signature: (key, sig, plane_idx, n_wires, n_time) -> noisy signal.
     """
     if not cfg.include_noise:
         return _noop_noise
 
-    # Load noise parameters from config path
     noise_x, noise_y, noise_z, emp_freqs, emp_shape = load_noise_params(
         cfg.noise_spectrum_path)
 
     spectrum_dense = jnp.array(
         _get_noise_spectrum_shape(cfg.num_time_steps, emp_freqs, emp_shape))
+    plane_names = cfg.plane_names[vol_geom.volume_id]
 
-    wire_lengths_jax = {
-        (s, p): jnp.array(cfg.side_geom[s].wire_lengths_m[p], dtype=jnp.float32)
-        for s in range(2) for p in range(3)
-    }
+    wire_lengths_jax = [
+        jnp.array(vol_geom.wire_lengths_m[p], dtype=jnp.float32)
+        for p in range(vol_geom.n_planes)
+    ]
 
     if cfg.use_bucketed and cfg.include_electronics:
-        return _build_wire_sparse_noise(
-            wire_lengths_jax, noise_x, noise_y, noise_z,
-            spectrum_dense, e_chunk)
+        # Wire-sparse mode
+        def make_fn(p):
+            lengths = wire_lengths_jax[p]
+            def fn(key, signal_tuple, plane_idx, n_wires, n_time):
+                active_signals, wire_indices, n_active = signal_tuple
+                active_series_rms = noise_y + noise_z * lengths[wire_indices]
+                noise = _noise_core(
+                    key, e_chunk, n_time, spectrum_dense,
+                    active_series_rms, noise_x)
+                valid = jnp.arange(e_chunk) < n_active
+                return (active_signals + noise * valid[:, None],
+                        wire_indices, n_active)
+            return fn
 
     elif cfg.use_bucketed:
+        # Bucketed mode
         bucket_dims = {}
         spectrum_bucketed = {}
-        for plane_type in ['U', 'V', 'Y']:
-            B1 = 2 * response_kernels[plane_type].num_wires
-            B2 = 2 * response_kernels[plane_type].kernel_height
-            bucket_dims[plane_type] = (B1, B2)
-            spectrum_bucketed[plane_type] = jnp.array(
+        for pt in set(plane_names):
+            B1 = 2 * response_kernels[pt].num_wires
+            B2 = 2 * response_kernels[pt].kernel_height
+            bucket_dims[pt] = (B1, B2)
+            spectrum_bucketed[pt] = jnp.array(
                 _get_noise_spectrum_shape(B2, emp_freqs, emp_shape))
-        return _build_bucketed_noise(
-            cfg, spectrum_bucketed, bucket_dims,
-            wire_lengths_jax, noise_x, noise_y, noise_z)
+
+        def make_fn(p):
+            pt = plane_names[p]
+            B1, B2 = bucket_dims[pt]
+            spectrum = spectrum_bucketed[pt]
+            lengths = wire_lengths_jax[p]
+            def fn(key, signal_tuple, plane_idx, n_wires, n_time):
+                buckets, num_active, compact_to_key, _, _ = signal_tuple
+                NUM_BUCKETS_T = (n_time + B2 - 1) // B2
+                wire_starts = (compact_to_key // NUM_BUCKETS_T) * B1
+                w_indices = wire_starts[:, None] + jnp.arange(B1)
+                w_indices = jnp.clip(w_indices, 0, n_wires - 1)
+                bucket_series_rms = noise_y + noise_z * lengths[w_indices]
+                noise = _generate_noise_for_buckets(
+                    key, cfg.max_active_buckets, B1, B2,
+                    spectrum, bucket_series_rms, noise_x)
+                active_mask = jnp.arange(cfg.max_active_buckets) < num_active
+                noise = noise * active_mask[:, None, None]
+                return (buckets + noise, num_active, compact_to_key, B1, B2)
+            return fn
 
     else:
-        noise_series_rms = {
-            (s, p): jnp.array(
-                noise_y + noise_z * cfg.side_geom[s].wire_lengths_m[p],
-                dtype=jnp.float32)
-            for s in range(2) for p in range(3)
-        }
-        return _build_dense_noise(
-            noise_series_rms, noise_x, spectrum_dense)
+        # Dense mode
+        noise_series_rms = [
+            jnp.array(noise_y + noise_z * vol_geom.wire_lengths_m[p],
+                       dtype=jnp.float32)
+            for p in range(vol_geom.n_planes)
+        ]
+        def make_fn(p):
+            series_rms = noise_series_rms[p]
+            def fn(key, signal, plane_idx, n_wires, n_time):
+                noise = _noise_core(key, n_wires, n_time, spectrum_dense,
+                                    series_rms, noise_x)
+                return signal + noise
+            return fn
+
+    plane_fns = [make_fn(p) for p in range(vol_geom.n_planes)]
+
+    def noise_fn(key, sig, plane_idx, n_wires, n_time):
+        return plane_fns[plane_idx](key, sig, plane_idx, n_wires, n_time)
+    return noise_fn

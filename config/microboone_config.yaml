@@ -1,0 +1,73 @@
+---
+# MicroBooNE Detector Configuration (Design: 500 V/cm)
+# References: JINST 12 P02017 (arXiv:1612.05824), arXiv:1705.07341, arXiv:1802.08709
+#
+# Single-drift TPC: cathode at x=256 cm, anode wire planes at x=0
+# Active volume: 2.56m (x) x 2.33m (y) x 10.37m (z) = 85 tonnes LAr
+# Cold electronics: BNL LArASIC (14 mV/fC, 2 us peaking)
+#
+# Note: MicroBooNE operated at 273 V/cm (-70 kV cathode), not the design
+# 500 V/cm. At 273 V/cm: v_drift=1.098 mm/us, D_L=3.74, D_T=5.85 cm^2/s.
+# This config uses design values for consistency with other 500 V/cm detectors.
+
+volumes:
+  - id: 0
+    description: "MicroBooNE TPC (single drift)"
+    geometry:
+      ranges: [[0.0, 256.04], [-116.25, 116.25], [0.0, 1036.8]]  # cm [x, y, z]
+      drift_direction: -1   # electrons drift toward -x (anode at x=0)
+    planes:
+      - plane_id: 0
+        type: first_induction
+        angle: 60.0  # degrees from vertical (z-axis)
+        wire_spacing: 0.3  # cm
+        distance_from_anode: 0.6  # cm
+        bias_voltage: -200.0  # V (design at 500 V/cm; operating: -110 V)
+      - plane_id: 1
+        type: second_induction
+        angle: -60.0  # degrees
+        wire_spacing: 0.3  # cm
+        distance_from_anode: 0.3  # cm
+        bias_voltage: 0.0  # V
+      - plane_id: 2
+        type: collection
+        angle: 0.0  # degrees (vertical wires)
+        wire_spacing: 0.3  # cm
+        distance_from_anode: 0.0  # cm
+        bias_voltage: 440.0  # V (design at 500 V/cm; operating: +230 V)
+
+readout:
+  sampling_rate: 2.0  # MHz
+  electrons_per_adc: 182  # electrons per ADC count (arXiv:1705.07341 Eq 6.1)
+  digitization:
+    n_bits: 12                  # ADC resolution (AD9222)
+    pedestal_collection: 410    # Baseline ADC for Y plane (~200 mV)
+    pedestal_induction: 1843    # Baseline ADC for U/V planes (~900 mV)
+    gain_scale: 1.0             # Gain rescale factor
+
+simulation:
+  drift:
+    velocity: 1.6  # mm/us (design at 500 V/cm; operating: 1.098 at 273 V/cm)
+    longitudinal_diffusion: 7.2  # cm^2/s (at 500 V/cm; operating: 3.74 at 273 V/cm)
+    transverse_diffusion: 12.0  # cm^2/s (at 500 V/cm; operating: 5.85 at 273 V/cm)
+    electron_lifetime: 10.0  # ms (MicroBooNE achieved >18 ms)
+  charge_recombination:
+    model: emb  # Options: 'modified_box' (ArgoNeuT), 'emb' (ICARUS)
+    recomb_parameters:
+      alpha: 0.93
+      beta: 0.212
+      alpha_emb: 0.904
+      beta_90: 0.204
+      R_anisotropy: 1.25
+
+medium:
+  type: liquid_argon
+  properties:
+    density: 1.396  # g/cm^3
+    ionization_energy: 23.6  # eV per ion pair (W_ion)
+    excitation_ratio: 0.21  # N_ex / N_i
+  temperature: 87.0  # K
+  pressure: 1.0  # atm
+
+electric_field:
+  field_strength: 500.0  # V/cm (design; operating: 273 V/cm)

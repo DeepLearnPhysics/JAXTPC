@@ -629,7 +629,7 @@ def finalize_track_hits(track_hits, max_time):
 def compute_qs_fractions(charges, group_ids, num_segments):
     """Compute Q_s fractions: each deposit's share of its group's charge.
 
-    Called inside JIT after compute_side_physics. Uses the already-computed
+    Called inside JIT after compute_volume_physics. Uses the already-computed
     recombined charges (before attenuation). Groups must not span sides
     (enforced by compute_group_ids with side-change splitting).
 
@@ -656,55 +656,54 @@ def compute_qs_fractions(charges, group_ids, num_segments):
 # FACTORY FUNCTION (create closure for use inside JIT)
 # =============================================================================
 
-def _noop_track_hits(track_hits_dict, plane_int, deposits, side_geom,
-                     side_idx, plane_idx, n_actual):
-    """No-op — track hits disabled."""
-    pass
+def _noop_track_hits(plane_int, deposits, vol_geom, plane_idx, n_actual):
+    """No-op — track hits disabled. Returns None."""
+    return None
 
 
-def create_track_hits_fn(cfg):
-    """Create track hits labeling closure for use inside JIT.
+def create_track_hits_fn_for_volume(cfg, vol_geom):
+    """Create track hits labeling closure for one volume.
 
     Parameters
     ----------
     cfg : SimConfig
-        Static simulation config. Must have diffusion and track_hits populated
-        when include_track_hits is True.
+    vol_geom : VolumeGeometry
+        Must have vol_geom.diffusion populated when track_hits enabled.
 
     Returns
     -------
     track_hits_fn : callable
-        Signature: (track_hits_dict, plane_int, deposits, side_geom,
-                     side_idx, plane_idx, n_actual) -> None
-        Stores result to track_hits_dict[(side_idx, plane_idx)].
+        Signature: (plane_int, deposits, vol_geom, plane_idx, n_actual) -> 5-tuple or None.
+        Returns (pk, gid, ch, count, rowsums) tuple. No dict mutation.
     """
     if not cfg.include_track_hits:
         return _noop_track_hits
 
-    K_total = (2 * cfg.diffusion.K_wire + 1) * (2 * cfg.diffusion.K_time + 1)
+    diffusion = vol_geom.diffusion
+    K_total = (2 * diffusion.K_wire + 1) * (2 * diffusion.K_time + 1)
     exp_size = cfg.track_hits.hits_chunk_size * K_total
     SENTINEL_PK = jnp.int32(2**30)
 
     prepare_deposit_vmap_hit = jax.vmap(
         prepare_deposit_with_diffusion,
-        in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None,
+        in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None,
                  None, None, None, None, None),
     )
 
-    def track_hits_fn(track_hits_dict, plane_int, deposits, side_geom,
-                      side_idx, plane_idx, n_actual):
-        # Unpack from NamedTuples
+    def track_hits_fn(plane_int, deposits, vol_geom, plane_idx, n_actual):
         charges = plane_int.charges
         drift_time_us = plane_int.drift_time_us
+        tick_us = plane_int.tick_us
         drift_distance_cm = plane_int.drift_distance_cm
         closest_wire_idx = plane_int.closest_wire_idx
         closest_wire_distances = plane_int.closest_wire_dist
         attenuation_factors = plane_int.attenuation
-        valid_mask = deposits.valid_mask
+        # Derive valid_mask from n_actual (no stored valid_mask field)
+        valid_mask = jnp.arange(charges.shape[0]) < deposits.n_actual
         group_ids = deposits.group_ids
-        spacing_cm = side_geom.wire_spacings_cm[plane_idx]
-        num_wires_plane = side_geom.num_wires[plane_idx]
-        angle_rad = side_geom.angles_rad[plane_idx]
+        spacing_cm = vol_geom.wire_spacings_cm[plane_idx]
+        num_wires_plane = vol_geom.num_wires[plane_idx]
+        angle_rad = vol_geom.angles_rad[plane_idx]
 
         theta_xz, theta_y = compute_deposit_wire_angles_vmap(
             deposits.theta, deposits.phi, angle_rad
@@ -723,6 +722,7 @@ def create_track_hits_fn(cfg):
 
             c_charges = jax.lax.dynamic_slice(charges, (start,), (cfg.track_hits.hits_chunk_size,))
             c_drift_time = jax.lax.dynamic_slice(drift_time_us, (start,), (cfg.track_hits.hits_chunk_size,))
+            c_tick = jax.lax.dynamic_slice(tick_us, (start,), (cfg.track_hits.hits_chunk_size,))
             c_drift_dist = jax.lax.dynamic_slice(drift_distance_cm, (start,), (cfg.track_hits.hits_chunk_size,))
             c_wire_idx = jax.lax.dynamic_slice(closest_wire_idx, (start,), (cfg.track_hits.hits_chunk_size,))
             c_wire_dist = jax.lax.dynamic_slice(closest_wire_distances, (start,), (cfg.track_hits.hits_chunk_size,))
@@ -734,16 +734,15 @@ def create_track_hits_fn(cfg):
             c_gids = jax.lax.dynamic_slice(group_ids, (start,), (cfg.track_hits.hits_chunk_size,))
 
             wire_idx, time_idx, sig_val = prepare_deposit_vmap_hit(
-                c_charges, c_drift_time, c_drift_dist,
+                c_charges, c_drift_time, c_tick, c_drift_dist,
                 c_wire_idx, c_wire_dist, c_atten,
                 c_theta_xz, c_theta_y, c_ang_scale, c_valid,
-                cfg.diffusion.K_wire, cfg.diffusion.K_time, spacing_cm, cfg.time_step_us,
-                cfg.diffusion.long_cm2_us, cfg.diffusion.trans_cm2_us,
-                cfg.diffusion.velocity_cm_us, num_wires_plane,
+                diffusion.K_wire, diffusion.K_time, spacing_cm, cfg.time_step_us,
+                diffusion.long_cm2_us, diffusion.trans_cm2_us,
+                diffusion.velocity_cm_us, num_wires_plane,
                 cfg.num_time_steps
             )
 
-            # Per-deposit row_sum: total diffused charge above threshold
             chunk_rowsums = jnp.sum(
                 jnp.where(sig_val > cfg.track_hits.inter_thresh, sig_val, 0.0),
                 axis=1,
@@ -751,7 +750,6 @@ def create_track_hits_fn(cfg):
             s_rowsums = jax.lax.dynamic_update_slice(
                 s_rowsums, chunk_rowsums, (start,))
 
-            # Flatten + encode pixel_key
             gid_exp = jnp.repeat(c_gids[:, jnp.newaxis], K_total, axis=1)
 
             w_flat = wire_idx.reshape(exp_size).astype(jnp.int32)
@@ -765,7 +763,6 @@ def create_track_hits_fn(cfg):
             chunk_gid = jnp.where(chunk_valid, gid_flat, jnp.int32(0))
             chunk_ch = jnp.where(chunk_valid, ch_flat, 0.0).astype(jnp.float32)
 
-            # Merge by (pixel_key, group_id)
             new_pk, new_gid, new_ch, new_count = merge_chunk_hits(
                 s_pk, s_gid, s_ch,
                 chunk_pk, chunk_gid, chunk_ch,
@@ -786,8 +783,6 @@ def create_track_hits_fn(cfg):
             0, num_chunks, body, init_state
         )
 
-        # Return raw merge state — label_from_groups runs outside JIT
-        track_hits_dict[(side_idx, plane_idx)] = (
-            final_pk, final_gid, final_ch, final_count, final_rowsums)
+        return (final_pk, final_gid, final_ch, final_count, final_rowsums)
 
     return track_hits_fn

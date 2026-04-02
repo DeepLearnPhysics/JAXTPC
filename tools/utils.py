@@ -27,9 +27,18 @@ import h5py
 import numpy as np
 import os
 
+def get_plane_name(vol_idx, plane_idx, plane_names=None):
+    """Get a string label for a (volume, plane) pair."""
+    if plane_names and vol_idx < len(plane_names):
+        ptype = plane_names[vol_idx][plane_idx] if plane_idx < len(plane_names[vol_idx]) else str(plane_idx)
+    else:
+        ptype = str(plane_idx)
+    return f"vol{vol_idx}_{ptype}"
+
+# Default names for the standard 2-volume 3-plane detector
 _PLANE_NAMES = {
-    (0, 0): 'east_U', (0, 1): 'east_V', (0, 2): 'east_Y',
-    (1, 0): 'west_U', (1, 1): 'west_V', (1, 2): 'west_Y',
+    (0, 0): 'vol0_U', (0, 1): 'vol0_V', (0, 2): 'vol0_Y',
+    (1, 0): 'vol1_U', (1, 1): 'vol1_V', (1, 2): 'vol1_Y',
 }
 _NAME_TO_KEY = {v: k for k, v in _PLANE_NAMES.items()}
 
@@ -45,9 +54,9 @@ def save_event(filepath, event_idx, sparse_output, track_hits, detector_config):
     event_idx : int
         Event index (used as group name: event_0, event_1, ...).
     sparse_output : dict
-        Output from process_response(), keyed by (side_idx, plane_idx).
+        Output from process_response(), keyed by (vol_idx, plane_idx).
     track_hits : dict
-        Output from DetectorSimulator(), keyed by (side_idx, plane_idx).
+        Output from DetectorSimulator(), keyed by (vol_idx, plane_idx).
     detector_config : dict
         Detector configuration from generate_detector().
     """
@@ -191,41 +200,32 @@ def _load_side(group):
     }
 
 
-def save_sce_data(filepath, east_efield, east_corrections, east_origin, east_spacing,
-                  west_efield, west_corrections, west_origin, west_spacing,
-                  metadata=None):
+def save_sce_data(filepath, volume_data, metadata=None):
     """
-    Save per-side space charge effect maps to HDF5.
+    Save per-volume space charge effect maps to HDF5.
 
     File layout::
 
-        east/efield_map              (Nx, Ny, Nz, 3) float32
-        east/drift_correction_map    (Nx, Ny, Nz, 3) float32
-        east/origin_cm               (3,) float64
-        east/spacing_cm              (3,) float64
-        west/efield_map              (Nx, Ny, Nz, 3) float32
-        west/drift_correction_map    (Nx, Ny, Nz, 3) float32
-        west/origin_cm               (3,) float64
-        west/spacing_cm              (3,) float64
+        volume_0/efield_map              (Nx, Ny, Nz, 3) float32
+        volume_0/drift_correction_map    (Nx, Ny, Nz, 3) float32
+        volume_0/origin_cm               (3,) float64
+        volume_0/spacing_cm              (3,) float64
+        volume_1/...
 
     Parameters
     ----------
     filepath : str
         Output HDF5 path.
-    east_efield, west_efield : np.ndarray, shape (Nx, Ny, Nz, 3)
-        E-field maps per side.
-    east_corrections, west_corrections : np.ndarray, shape (Nx, Ny, Nz, 3)
-        Drift correction maps per side.
-    east_origin, west_origin : array-like, shape (3,)
-    east_spacing, west_spacing : array-like, shape (3,)
+    volume_data : list of dicts
+        Each dict has 'efield_map', 'drift_correction_map', 'origin_cm', 'spacing_cm'.
     metadata : dict, optional
         Extra key/value pairs stored as file-level HDF5 attributes.
     """
     with h5py.File(filepath, 'w') as f:
-        _save_side(f.create_group('east'),
-                   east_efield, east_corrections, east_origin, east_spacing)
-        _save_side(f.create_group('west'),
-                   west_efield, west_corrections, west_origin, west_spacing)
+        for i, vol in enumerate(volume_data):
+            _save_side(f.create_group(f'volume_{i}'),
+                       vol['efield_map'], vol['drift_correction_map'],
+                       vol['origin_cm'], vol['spacing_cm'])
 
         if metadata:
             for k, v in metadata.items():
@@ -234,7 +234,7 @@ def save_sce_data(filepath, east_efield, east_corrections, east_origin, east_spa
 
 def load_sce_data(filepath):
     """
-    Load per-side space charge effect maps from HDF5.
+    Load per-volume space charge effect maps from HDF5.
 
     Parameters
     ----------
@@ -243,13 +243,9 @@ def load_sce_data(filepath):
 
     Returns
     -------
-    dict
-        ``{'east': {...}, 'west': {...}}`` where each side dict contains
-        ``'efield_map'``, ``'drift_correction_map'``, ``'origin_cm'``,
-        ``'spacing_cm'``.
+    list of dict
+        Each dict contains 'efield_map', 'drift_correction_map',
+        'origin_cm', 'spacing_cm'.
     """
     with h5py.File(filepath, 'r') as f:
-        return {
-            'east': _load_side(f['east']),
-            'west': _load_side(f['west']),
-        }
+        return [_load_side(f[k]) for k in sorted(f.keys())]
