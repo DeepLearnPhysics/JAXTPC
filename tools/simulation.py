@@ -674,16 +674,17 @@ class DetectorSimulator:
     def process_event_light(self, deposits: DepositData, sim_params=None):
         """Compute per-segment charge and scintillation light only.
 
-        Returns per-volume (charges, photons, positions_cm) tuples.
+        Returns DepositData with charge and photons filled (no wire response).
         """
         if sim_params is None:
             sim_params = self._default_sim_params
 
         results = self._light_calculator_jit(sim_params, deposits.volumes)
-        return {
-            vol_idx: results[vol_idx]
-            for vol_idx in range(self._sim_config.n_volumes)
-        }
+        filled_volumes = tuple(
+            vol._replace(charge=results[v][0], photons=results[v][1])
+            for v, vol in enumerate(deposits.volumes)
+        )
+        return deposits._replace(volumes=filled_volumes)
 
     def finalize_track_hits(self, track_hits):
         """Derive track labels from raw group merge state.
@@ -737,6 +738,9 @@ class DetectorSimulator:
             track_ids=jnp.zeros(pad, dtype=jnp.int32),
             group_ids=jnp.zeros(pad, dtype=jnp.int32),
             t0_us=jnp.zeros(pad, dtype=jnp.float32),
+            interaction_ids=jnp.full(pad, -1, dtype=jnp.int16),
+            ancestor_track_ids=jnp.zeros(pad, dtype=jnp.int32),
+            pdg=jnp.zeros(pad, dtype=jnp.int32),
             charge=jnp.zeros(pad, dtype=jnp.float32),
             photons=jnp.zeros(pad, dtype=jnp.float32),
             qs_fractions=jnp.zeros(pad, dtype=jnp.float32),
@@ -815,6 +819,9 @@ class DetectorSimulator:
                 track_ids=padded_tids,
                 group_ids=padded_gids,
                 t0_us=padded_t0,
+                interaction_ids=jnp.full(total_pad, -1, dtype=jnp.int16),
+                ancestor_track_ids=jnp.zeros(total_pad, dtype=jnp.int32),
+                pdg=jnp.zeros(total_pad, dtype=jnp.int32),
                 charge=jnp.zeros(total_pad),
                 photons=jnp.zeros(total_pad),
                 qs_fractions=jnp.zeros(total_pad),

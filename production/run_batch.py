@@ -35,7 +35,7 @@ import numpy as np
 from tools.simulation import DetectorSimulator
 from tools.config import create_track_hits_config
 from tools.geometry import generate_detector
-from tools.loader import ParticleStepExtractor, build_deposit_data
+from tools.loader import ParticleStepExtractor, build_deposit_data, compute_interaction_ids
 
 from production.save import (
     write_config_resp, write_config_seg, write_config_corr,
@@ -61,6 +61,7 @@ def load_deposit(extractor, event_idx, sim_config,
     Returns DepositData (multi-volume, padded, grouped).
     """
     step_data = extractor.extract_step_arrays(event_idx)
+    interaction_ids = compute_interaction_ids(extractor.file, event_idx)
     positions_mm = np.asarray(
         step_data.get('position', np.empty((0, 3))), dtype=np.float32)
     n = positions_mm.shape[0]
@@ -78,6 +79,9 @@ def load_deposit(extractor, event_idx, sim_config,
         phi=np.asarray(step_data.get('phi', np.zeros((n,))), dtype=np.float32),
         track_ids=np.asarray(step_data.get('track_id', np.ones((n,))), dtype=np.int32),
         t0_us=t0_us,
+        interaction_ids=interaction_ids,
+        ancestor_track_ids=np.asarray(step_data.get('ancestor_track_id', np.zeros((n,))), dtype=np.int32),
+        pdg=np.asarray(step_data.get('pdg', np.zeros((n,))), dtype=np.int32),
         group_size=group_size,
         gap_threshold_mm=gap_threshold_mm,
     )

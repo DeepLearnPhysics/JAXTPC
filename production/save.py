@@ -238,6 +238,9 @@ def save_event_seg(f, event_key, deposits, source_event_idx, pos_step_mm=0.3):
         # IDs
         vg.create_dataset('track_ids', data=np.asarray(vol.track_ids[:n]), compression='gzip')
         vg.create_dataset('group_ids', data=np.asarray(vol.group_ids[:n]), compression='gzip')
+        vg.create_dataset('interaction_ids', data=np.asarray(vol.interaction_ids[:n]), compression='gzip')
+        vg.create_dataset('ancestor_track_ids', data=np.asarray(vol.ancestor_track_ids[:n]), compression='gzip')
+        vg.create_dataset('pdg', data=np.asarray(vol.pdg[:n]), compression='gzip')
 
         # Per-volume group_to_track
         g2t = deposits.group_to_track[v]

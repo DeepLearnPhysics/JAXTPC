@@ -6,7 +6,7 @@ import numpy as np
 import jax
 from tools.geometry import generate_detector
 from tools.simulation import DetectorSimulator
-from tools.loader import load_particle_step_data
+from tools.loader import load_event
 
 data_path = sys.argv[1] if len(sys.argv) > 1 else 'out.h5'
 
@@ -17,11 +17,12 @@ sim = DetectorSimulator(
     response_chunk_size=50_000,
     include_track_hits=False,
 )
+cfg = sim.config
 
 # Warm up JIT
-deposit_data, _ = load_particle_step_data(data_path, event_idx=0)
-result = sim.process_event_light(deposit_data)
-jax.block_until_ready(result['east'][0])
+deposits = load_event(data_path, cfg, event_idx=0)
+filled = sim.process_event_light(deposits)
+jax.block_until_ready(filled.volumes[0].charge)
 
 print(f"\n{'Event':>5} {'Segs':>8} {'Load':>8} {'Sim':>8} {'Photons':>14} {'Charge':>14} {'Q/(Q+L)':>8}")
 print("-" * 75)
@@ -31,28 +32,30 @@ sim_times = []
 
 for event_idx in range(20):
     t0 = time.time()
-    deposit_data, _ = load_particle_step_data(data_path, event_idx=event_idx)
+    deposits = load_event(data_path, cfg, event_idx=event_idx)
     t_load = (time.time() - t0) * 1000
 
     t0 = time.time()
-    result = sim.process_event_light(deposit_data)
-    jax.block_until_ready(result['east'][0])
+    filled = sim.process_event_light(deposits)
+    jax.block_until_ready(filled.volumes[0].charge)
     t_sim = (time.time() - t0) * 1000
 
     load_times.append(t_load)
     sim_times.append(t_sim)
 
-    # Move to CPU for reporting only
-    n_e, n_w = result['n_east'], result['n_west']
-    Q_e, L_e, pos_e = [np.asarray(x) for x in result['east']]
-    Q_w, L_w, pos_w = [np.asarray(x) for x in result['west']]
+    total_q = 0.0
+    total_l = 0.0
+    total_n = 0
+    for v in range(cfg.n_volumes):
+        vol = filled.volumes[v]
+        n = vol.n_actual
+        total_q += float(np.asarray(vol.charge[:n]).sum())
+        total_l += float(np.asarray(vol.photons[:n]).sum())
+        total_n += n
 
-    total_q = Q_e[:n_e].sum() + Q_w[:n_w].sum()
-    total_l = L_e[:n_e].sum() + L_w[:n_w].sum()
     q_frac = total_q / (total_q + total_l) if (total_q + total_l) > 0 else 0
-    n = len(deposit_data.de)
 
-    print(f"{event_idx:>5} {n:>8,} {t_load:>7.1f}ms {t_sim:>7.1f}ms "
+    print(f"{event_idx:>5} {total_n:>8,} {t_load:>7.1f}ms {t_sim:>7.1f}ms "
           f"{total_l:>14,.0f} {total_q:>14,.0f} {q_frac:>8.3f}")
 
 print("-" * 75)

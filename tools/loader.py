@@ -12,6 +12,80 @@ import numpy as np
 from tools.config import DepositData, VolumeDeposits
 
 
+def compute_interaction_ids(file, event_idx):
+    """Map each step to its interaction_id via ancestor → primary lookup.
+
+    Uses bulk vectorized approach: resolve unique ancestors first (~50–70),
+    then broadcast to all steps via searchsorted.
+
+    Parameters
+    ----------
+    file : h5py.File
+        Open HDF5 file.
+    event_idx : int
+        Event index.
+
+    Returns
+    -------
+    interaction_ids : np.ndarray, shape (n_steps,), int16
+        Interaction ID per step. -1 for unresolvable (sentinel ancestors).
+    """
+    steps = file['pstep/lar_vol'][event_idx]
+    primaries = file['primary/geant4'][event_idx]
+
+    prim_tids = primaries['track_id'].astype(np.int32)
+    prim_iids = primaries['interaction_id'].astype(np.int32)
+    s_anc = steps['ancestor_track_id'].astype(np.int32)
+
+    # Phase 1: resolve unique ancestors via primary lookup
+    unique_anc = np.unique(s_anc)
+
+    sort_idx = np.argsort(prim_tids)
+    sorted_prim_tids = prim_tids[sort_idx]
+    sorted_prim_iids = prim_iids[sort_idx]
+
+    pos = np.searchsorted(sorted_prim_tids, unique_anc)
+    pos = np.clip(pos, 0, max(len(sorted_prim_tids) - 1, 0))
+    direct_match = (len(sorted_prim_tids) > 0) & (sorted_prim_tids[pos] == unique_anc)
+
+    anc_iid = np.where(direct_match, sorted_prim_iids[pos], -1)
+
+    # Phase 2: resolve orphans (pi0 decay photons) via parent chain
+    orphan_mask = anc_iid == -1
+    if np.any(orphan_mask):
+        particles = file['particle/geant4'][event_idx]
+        p_tids = particles['track_id'].astype(np.int32)
+        p_parents = particles['parent_track_id'].astype(np.int32)
+        p_sort = np.argsort(p_tids)
+        sorted_p_tids = p_tids[p_sort]
+        sorted_p_parents = p_parents[p_sort]
+
+        orphan_ancs = unique_anc[orphan_mask]
+        orphan_indices = np.where(orphan_mask)[0]
+        for i, oid in zip(orphan_indices, orphan_ancs):
+            current = int(oid)
+            for _ in range(10):
+                pidx = np.searchsorted(sorted_prim_tids, current)
+                if pidx < len(sorted_prim_tids) and sorted_prim_tids[pidx] == current:
+                    anc_iid[i] = int(sorted_prim_iids[pidx])
+                    break
+                ppidx = np.searchsorted(sorted_p_tids, current)
+                if ppidx >= len(sorted_p_tids) or sorted_p_tids[ppidx] != current:
+                    break
+                parent = int(sorted_p_parents[p_sort[ppidx]])
+                if parent == -1 or parent == current:
+                    break
+                current = parent
+
+    # Phase 3: broadcast unique ancestor results to all steps
+    sort_ua = np.argsort(unique_anc)
+    sorted_ua = unique_anc[sort_ua]
+    sorted_ua_iid = anc_iid[sort_ua]
+
+    step_pos = np.searchsorted(sorted_ua, s_anc)
+    return sorted_ua_iid[step_pos].astype(np.int16)
+
+
 class ParticleStepExtractor:
     """
     Simplified extractor for particle steps from HDF5 files.
@@ -327,6 +401,8 @@ def load_particle_step_data(file_path, event_idx=0, verbose=False):
     """
     with ParticleStepExtractor(file_path, verbose=verbose) as extractor:
         step_data = extractor.extract_step_arrays(event_idx)
+        # Compute interaction_ids while file is still open
+        interaction_ids = compute_interaction_ids(extractor.file, event_idx)
 
     # Get positions and determine array size (numpy — no XLA compilation)
     positions_mm = np.asarray(
@@ -348,6 +424,9 @@ def load_particle_step_data(file_path, event_idx=0, verbose=False):
         'phi': np.asarray(step_data.get('phi', np.zeros((n,))), dtype=np.float32),
         'track_ids': track_ids,
         't0_us': t0_us,
+        'interaction_ids': interaction_ids,
+        'ancestor_track_ids': np.asarray(step_data.get('ancestor_track_id', np.zeros((n,))), dtype=np.int32),
+        'pdg': np.asarray(step_data.get('pdg', np.zeros((n,))), dtype=np.int32),
     }
 
 
@@ -382,6 +461,9 @@ def load_event(file_path, sim_config, event_idx=0, verbose=False,
         raw['positions_mm'], raw['de'], raw['dx'], sim_config,
         theta=raw['theta'], phi=raw['phi'], track_ids=raw['track_ids'],
         t0_us=raw['t0_us'],
+        interaction_ids=raw['interaction_ids'],
+        ancestor_track_ids=raw['ancestor_track_ids'],
+        pdg=raw['pdg'],
         group_size=group_size, gap_threshold_mm=gap_threshold_mm)
 
 
@@ -507,6 +589,8 @@ def compute_group_ids(positions_mm, track_ids, valid_mask,
 def build_deposit_data(positions_mm, de, dx, sim_config,
                        theta=None, phi=None, track_ids=None,
                        group_ids=None, t0_us=None,
+                       interaction_ids=None, ancestor_track_ids=None,
+                       pdg=None,
                        group_size=5, gap_threshold_mm=5.0):
     """Build simulation-ready DepositData from flat deposit arrays.
 
@@ -533,6 +617,14 @@ def build_deposit_data(positions_mm, de, dx, sim_config,
     group_ids : np.ndarray, shape (N,), optional
         Pre-computed group IDs. If provided, used directly (no auto-grouping).
         Must not span volume boundaries.
+    t0_us : np.ndarray, shape (N,), optional
+        Deposit times in microseconds. Default zeros.
+    interaction_ids : np.ndarray, shape (N,), optional
+        Interaction/vertex IDs. Default -1 (unset).
+    ancestor_track_ids : np.ndarray, shape (N,), optional
+        Primary shower ancestor track IDs. Default zeros.
+    pdg : np.ndarray, shape (N,), optional
+        PDG particle species codes. Default zeros.
     group_size : int
         Consecutive deposits per group for auto-grouping. Default 5.
     gap_threshold_mm : float
@@ -556,6 +648,9 @@ def build_deposit_data(positions_mm, de, dx, sim_config,
     phi = np.asarray(phi, dtype=np.float32) if phi is not None else np.zeros(N, dtype=np.float32)
     track_ids = np.asarray(track_ids, dtype=np.int32) if track_ids is not None else np.zeros(N, dtype=np.int32)
     t0_us = np.asarray(t0_us, dtype=np.float32) if t0_us is not None else np.zeros(N, dtype=np.float32)
+    interaction_ids = np.asarray(interaction_ids, dtype=np.int16) if interaction_ids is not None else np.full(N, -1, dtype=np.int16)
+    ancestor_track_ids = np.asarray(ancestor_track_ids, dtype=np.int32) if ancestor_track_ids is not None else np.full(N, -1, dtype=np.int32)
+    pdg = np.asarray(pdg, dtype=np.int32) if pdg is not None else np.zeros(N, dtype=np.int32)
 
     has_precomputed_groups = group_ids is not None
     if has_precomputed_groups:
@@ -573,6 +668,9 @@ def build_deposit_data(positions_mm, de, dx, sim_config,
         'phi': phi,
         'track_ids': track_ids,
         't0_us': t0_us,
+        'interaction_ids': interaction_ids,
+        'ancestor_track_ids': ancestor_track_ids,
+        'pdg': pdg,
     }
 
     vol_arrays = {field: [] for field in all_fields}
@@ -653,6 +751,9 @@ def _build_padded_deposit_data(vol_arrays, vol_n_actuals, vol_group_to_track,
             track_ids=_pad(vol_arrays['track_ids'][v], vol_n_actuals[v]),
             group_ids=_pad(vol_arrays['group_ids'][v], vol_n_actuals[v]),
             t0_us=_pad(vol_arrays['t0_us'][v], vol_n_actuals[v]),
+            interaction_ids=_pad(vol_arrays['interaction_ids'][v], vol_n_actuals[v], pad_val=-1),
+            ancestor_track_ids=_pad(vol_arrays['ancestor_track_ids'][v], vol_n_actuals[v], pad_val=-1),
+            pdg=_pad(vol_arrays['pdg'][v], vol_n_actuals[v]),
             charge=jnp.zeros(total_pad, dtype=jnp.float32),
             photons=jnp.zeros(total_pad, dtype=jnp.float32),
             qs_fractions=jnp.zeros(total_pad, dtype=jnp.float32),

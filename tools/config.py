@@ -42,6 +42,9 @@ class VolumeDeposits(NamedTuple):
     track_ids: jnp.ndarray       # (total_pad,)
     group_ids: jnp.ndarray       # (total_pad,)
     t0_us: jnp.ndarray           # (total_pad,) initial deposit time in μs
+    interaction_ids: jnp.ndarray # (total_pad,) vertex/interaction label (int16)
+    ancestor_track_ids: jnp.ndarray  # (total_pad,) primary shower ancestor (int32)
+    pdg: jnp.ndarray             # (total_pad,) particle species at step (int32)
     charge: jnp.ndarray          # (total_pad,) recombined electrons (zeros on input, filled after sim)
     photons: jnp.ndarray         # (total_pad,) scintillation photons (zeros on input, filled after sim)
     qs_fractions: jnp.ndarray    # (total_pad,) group charge fraction (zeros on input, filled after sim)
@@ -549,7 +552,8 @@ def create_sim_params(detector_config, recombination_model='modified_box',
 
 def create_deposit_data(positions_mm, de, dx, theta=None, phi=None,
                         track_ids=None, group_ids=None, t0_us=None,
-                        n_volumes=1):
+                        interaction_ids=None, ancestor_track_ids=None,
+                        pdg=None, n_volumes=1):
     """Convenience constructor for single-volume DepositData.
 
     Wraps arrays into 1-element tuples (single volume). For multi-volume
@@ -565,10 +569,14 @@ def create_deposit_data(positions_mm, de, dx, theta=None, phi=None,
     tids = track_ids if track_ids is not None else jnp.zeros(N, jnp.int32)
     gids = group_ids if group_ids is not None else jnp.zeros(N, jnp.int32)
     t0 = t0_us if t0_us is not None else jnp.zeros(N)
+    iids = interaction_ids if interaction_ids is not None else jnp.full(N, -1, jnp.int16)
+    atids = ancestor_track_ids if ancestor_track_ids is not None else jnp.full(N, -1, jnp.int32)
+    pdg_arr = pdg if pdg is not None else jnp.zeros(N, jnp.int32)
 
     vol = VolumeDeposits(
         positions_mm=positions_mm, de=de, dx=dx_arr,
         theta=th, phi=ph, track_ids=tids, group_ids=gids, t0_us=t0,
+        interaction_ids=iids, ancestor_track_ids=atids, pdg=pdg_arr,
         charge=jnp.zeros(N), photons=jnp.zeros(N), qs_fractions=jnp.zeros(N),
         n_actual=N,
     )
@@ -607,6 +615,9 @@ def pad_deposit_data(deposits, target_size):
             track_ids=_pad(vol.track_ids),
             group_ids=_pad(vol.group_ids),
             t0_us=_pad(vol.t0_us),
+            interaction_ids=_pad(vol.interaction_ids, pad_val=-1),
+            ancestor_track_ids=_pad(vol.ancestor_track_ids, pad_val=-1),
+            pdg=_pad(vol.pdg),
             charge=_pad(vol.charge),
             photons=_pad(vol.photons),
             qs_fractions=_pad(vol.qs_fractions),
