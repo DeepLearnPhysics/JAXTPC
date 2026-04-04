@@ -1,0 +1,58 @@
+---
+# JAXTPC Pixel Detector Configuration
+# Same geometry as cubic_wireplane_config but with pixel readout.
+# 4.32mm pixel pitch → 1000 x 1000 pixels covering [-216, 216] cm in y and z.
+
+volumes:
+  - id: 0
+    description: "Pixel TPC East (x < 0)"
+    geometry:
+      ranges: [[-216.0, 0.0], [-216.0, 216.0], [-216.0, 216.0]]  # cm [x, y, z]
+      drift_direction: -1   # electrons drift toward -x anode
+    readout:
+      type: pixel
+      pixel_pitch: 0.432     # cm (= 4.32 mm → 432cm / 0.432 = 1000 pixels)
+      pixel_shape: [1000, 1000]
+
+  - id: 1
+    description: "Pixel TPC West (x > 0)"
+    geometry:
+      ranges: [[0.0, 216.0], [-216.0, 216.0], [-216.0, 216.0]]  # cm [x, y, z]
+      drift_direction: 1    # electrons drift toward +x anode
+    readout:
+      type: pixel
+      pixel_pitch: 0.432     # cm
+      pixel_shape: [1000, 1000]
+
+readout:
+  sampling_rate: 2.0  # MHz
+  electrons_per_adc: 182
+  pre_window_fraction: 0.0
+  post_window_fraction: 0.0
+
+simulation:
+  drift:
+    velocity: 1.6  # mm/μs
+    longitudinal_diffusion: 7.2  # cm²/s
+    transverse_diffusion: 12.0  # cm²/s
+    electron_lifetime: 10.0  # ms
+  charge_recombination:
+    model: emb
+    recomb_parameters:
+      alpha: 0.93
+      beta: 0.212
+      alpha_emb: 0.904
+      beta_90: 0.204
+      R_anisotropy: 1.25
+
+medium:
+  type: liquid_argon
+  properties:
+    density: 1.396  # g/cm³
+    ionization_energy: 23.6  # eV per ion pair
+    excitation_ratio: 0.21
+  temperature: 87.0  # K
+  pressure: 1.0  # atm
+
+electric_field:
+  field_strength: 500.0  # V/cm
