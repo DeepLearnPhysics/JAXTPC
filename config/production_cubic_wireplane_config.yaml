@@ -1,0 +1,10 @@
+# JAXTPC production config — cubic_wireplane_config
+detector_config: config/cubic_wireplane_config.yaml
+total_pad: 300000
+response_chunk: 50000
+hits_chunk: 25000
+max_keys: 4000000
+inter_thresh: 1.0
+threshold_adc: 2.0
+corr_threshold: 25.0
+max_buckets: 50000
