@@ -128,10 +128,14 @@ class SimConfig(NamedTuple):
 class ResponseKernel(NamedTuple):
     """Pre-computed wire response kernel for a single plane type (U, V, or Y).
 
-    The DKernel table is generated from base_kernel via DCT-domain Gaussian
-    blurring at each s_level. The freq_w/freq_t arrays and base_kernel are
-    stored so the table can be regenerated inside JIT with different diffusion
-    constants (enabling differentiable diffusion parameters).
+    The DKernel table is generated from base_kernel via reflect padding +
+    Gaussian convolution at each s_level. kernel_dx/kernel_dy and
+    base_kernel are stored so the table can be regenerated inside JIT
+    with different diffusion constants (enabling differentiable parameters).
+
+    ks_w/ks_t are the static conv filter sizes (in kernel bins) used by
+    generate_dkernel_table. Stored so the differentiable path can reuse
+    them (only the Gaussian width changes, not the filter shape).
     """
     DKernel: jnp.ndarray     # (num_s, kernel_height, kernel_width) diffusion kernel table
     num_wires: int            # Number of output wires the kernel spans
@@ -141,9 +145,36 @@ class ResponseKernel(NamedTuple):
     wire_zero_bin: int        # Wire=0 position in output wire units
     time_zero_bin: int        # t=0 position in output time bins
     base_kernel: jnp.ndarray  # (H, W) raw kernel before diffusion
-    freq_w: jnp.ndarray       # (W,) DCT-II frequency grid, wire axis
-    freq_t: jnp.ndarray       # (H,) DCT-II frequency grid, time axis
+    kernel_dx: float          # Wire axis bin spacing (cm per kernel bin)
+    kernel_dy: float          # Time axis bin spacing (μs per kernel bin)
     s_levels: jnp.ndarray     # (num_s,) diffusion levels from 0 to 1
+    ks_w: int                  # Conv filter size, wire axis (static, for diff path)
+    ks_t: int                  # Conv filter size, time axis (static, for diff path)
+
+
+class PixelResponseKernel(NamedTuple):
+    """Pre-computed pixel response kernel for 3D pixel readout.
+
+    The DKernel table is at native NPZ resolution (fine spatial + time bins).
+    Spatial interpolation maps from NPZ bins to pixel-pitch positions.
+    Time interpolation extracts at NPZ resolution, then output is rebinned
+    to simulation time steps.
+
+    pixel_spacing: NPZ spatial bin / pixel pitch (unitless, like wire_spacing).
+    rebin_factor: simulation_time_step / NPZ_time_bin (int, e.g. 5).
+    """
+    DKernel: jnp.ndarray      # (num_s, Hpy, Hpz, Ht) at NPZ resolution
+    kernel_py: int             # Output pixel y extent (in pixel pitches)
+    kernel_pz: int             # Output pixel z extent (in pixel pitches)
+    kernel_time: int           # Output time bins at simulation resolution
+    pixel_spacing: float       # NPZ_pixel_bin / pixel_pitch (unitless ratio)
+    time_spacing: float        # Simulation time step in us
+    rebin_factor: int          # time_step / npz_time_bin (e.g. 5)
+    py_zero_bin: int           # py=0 in output pixel units
+    pz_zero_bin: int           # pz=0 in output pixel units
+    time_zero_bin: int         # t=0 in output simulation time bins
+    base_kernel: jnp.ndarray   # (Hpy, Hpz, Ht) raw kernel before diffusion
+    s_levels: jnp.ndarray      # (num_s,) diffusion levels from 0 to 1
 
 
 class DigitizationConfig(NamedTuple):
@@ -249,83 +280,137 @@ def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50
         geo = vol_cfg['geometry']
         ranges = geo['ranges']
         drift_dir = geo['drift_direction']
-        planes_cfg = vol_cfg['planes']
-        n_planes = len(planes_cfg)
 
         x_min, x_max = ranges[0]
-        # Max drift distance = full x-extent of this volume
         max_drift = x_max - x_min
-        # Anode: where electrons arrive
-        #   drift_direction == +1 → electrons drift toward +x → anode at x_max
-        #   drift_direction == -1 → electrons drift toward -x → anode at x_min
         x_anode = x_max if drift_dir == 1 else x_min
 
-        # Per-volume dimensions (for wire geometry calculation)
-        dims_cm = {
-            'y': ranges[1][1] - ranges[1][0],
-            'z': ranges[2][1] - ranges[2][0],
-            'x': x_max - x_min,
-        }
+        # Determine readout type
+        readout_cfg = vol_cfg.get('readout', {})
+        readout_type = readout_cfg.get('type', 'wire')
 
-        # Plane geometry
-        plane_distances, furthest_idx = get_plane_geometry_for_volume(planes_cfg)
+        if readout_type == 'pixel':
+            # Pixel volume — no wire planes
+            pixel_pitch = float(readout_cfg['pixel_pitch'])
+            pixel_shape_cfg = readout_cfg['pixel_shape']
+            num_py, num_pz = int(pixel_shape_cfg[0]), int(pixel_shape_cfg[1])
+            # Pixel grid origin = (y_min, z_min) of volume
+            y_origin = float(ranges[1][0])
+            z_origin = float(ranges[2][0])
 
-        # Wire parameters per plane
-        angles = []
-        spacings = []
-        offsets = []
-        n_wires_list = []
-        max_wire_list = []
-        for p, plane_cfg in enumerate(planes_cfg):
-            angle, spacing, offset, n_wires, max_wire = get_single_plane_wire_params(
-                plane_cfg, dims_cm)
-            angles.append(angle)
-            spacings.append(spacing)
-            offsets.append(offset)
-            n_wires_list.append(n_wires)
-            max_wire_list.append(max_wire)
+            # DiffusionConfig for pixels — use pixel_pitch as the spatial reference
+            if include_diffusion:
+                _, _, max_sigma_trans, max_sigma_long = calculate_max_diffusion_sigmas(
+                    max_drift, velocity, trans_diff, long_diff,
+                    pixel_pitch, time_step_us)
+                diffusion = DiffusionConfig(
+                    long_cm2_us=long_diff,
+                    trans_cm2_us=trans_diff,
+                    K_wire=max(1, int(np.ceil(3.0 * max_sigma_trans))),
+                    K_time=max(1, int(np.ceil(3.0 * max_sigma_long))),
+                    velocity_cm_us=velocity,
+                    num_s=num_s,
+                    max_sigma_trans_unitless=max_sigma_trans,
+                    max_sigma_long_unitless=max_sigma_long,
+                )
+            else:
+                diffusion = None
 
-        # Wire lengths
-        wire_lengths = _calculate_wire_lengths_for_volume(
-            dims_cm,
-            angles, spacings, offsets, n_wires_list)
-
-        # Per-volume DiffusionConfig
-        if include_diffusion:
-            wire_spacing_ref = spacings[0]
-            _, _, max_sigma_trans, max_sigma_long = calculate_max_diffusion_sigmas(
-                max_drift, velocity, trans_diff, long_diff,
-                wire_spacing_ref, time_step_us)
-            diffusion = DiffusionConfig(
-                long_cm2_us=long_diff,
-                trans_cm2_us=trans_diff,
-                K_wire=max(1, int(np.ceil(3.0 * max_sigma_trans))),
-                K_time=max(1, int(np.ceil(3.0 * max_sigma_long))),
-                velocity_cm_us=velocity,
-                num_s=num_s,
-                max_sigma_trans_unitless=max_sigma_trans,
-                max_sigma_long_unitless=max_sigma_long,
-            )
+            all_volumes.append(VolumeGeometry(
+                volume_id=v,
+                readout_type='pixel',
+                ranges_cm=tuple(tuple(r) for r in ranges),
+                drift_direction=drift_dir,
+                x_anode_cm=x_anode,
+                max_drift_cm=max_drift,
+                n_planes=0,
+                furthest_plane_dist_cm=0.0,
+                plane_distances_cm=(),
+                angles_rad=(),
+                wire_spacings_cm=(),
+                index_offsets=(),
+                max_wire_indices=(),
+                num_wires=(),
+                wire_lengths_m=(),
+                diffusion=diffusion,
+                yz_center_cm=((ranges[1][0] + ranges[1][1]) / 2.0,
+                              (ranges[2][0] + ranges[2][1]) / 2.0),
+                pixel_shape=(num_py, num_pz),
+                pixel_pitch_cm=pixel_pitch,
+                pixel_origins_cm=(y_origin, z_origin),
+            ))
         else:
-            diffusion = None
+            # Wire volume
+            planes_cfg = vol_cfg['planes']
+            n_planes = len(planes_cfg)
 
-        all_volumes.append(VolumeGeometry(
-            volume_id=v,
-            ranges_cm=tuple(tuple(r) for r in ranges),
-            drift_direction=drift_dir,
-            x_anode_cm=x_anode,
-            max_drift_cm=max_drift,
-            n_planes=n_planes,
-            furthest_plane_dist_cm=float(plane_distances[furthest_idx]),
-            plane_distances_cm=tuple(float(d) for d in plane_distances),
-            angles_rad=tuple(angles),
-            wire_spacings_cm=tuple(spacings),
-            index_offsets=tuple(offsets),
-            max_wire_indices=tuple(max_wire_list),
-            num_wires=tuple(n_wires_list),
-            wire_lengths_m=tuple(wire_lengths),
-            diffusion=diffusion,
-        ))
+            dims_cm = {
+                'y': ranges[1][1] - ranges[1][0],
+                'z': ranges[2][1] - ranges[2][0],
+                'x': x_max - x_min,
+            }
+
+            plane_distances, furthest_idx = get_plane_geometry_for_volume(planes_cfg)
+
+            angles = []
+            spacings = []
+            offsets = []
+            n_wires_list = []
+            max_wire_list = []
+            for p, plane_cfg in enumerate(planes_cfg):
+                angle, spacing, offset, n_wires, max_wire = get_single_plane_wire_params(
+                    plane_cfg, dims_cm)
+                angles.append(angle)
+                spacings.append(spacing)
+                offsets.append(offset)
+                n_wires_list.append(n_wires)
+                max_wire_list.append(max_wire)
+
+            wire_lengths = _calculate_wire_lengths_for_volume(
+                dims_cm,
+                angles, spacings, offsets, n_wires_list)
+
+            if include_diffusion:
+                wire_spacing_ref = spacings[0]
+                _, _, max_sigma_trans, max_sigma_long = calculate_max_diffusion_sigmas(
+                    max_drift, velocity, trans_diff, long_diff,
+                    wire_spacing_ref, time_step_us)
+                diffusion = DiffusionConfig(
+                    long_cm2_us=long_diff,
+                    trans_cm2_us=trans_diff,
+                    K_wire=max(1, int(np.ceil(3.0 * max_sigma_trans))),
+                    K_time=max(1, int(np.ceil(3.0 * max_sigma_long))),
+                    velocity_cm_us=velocity,
+                    num_s=num_s,
+                    max_sigma_trans_unitless=max_sigma_trans,
+                    max_sigma_long_unitless=max_sigma_long,
+                )
+            else:
+                diffusion = None
+
+            all_volumes.append(VolumeGeometry(
+                volume_id=v,
+                readout_type='wire',
+                ranges_cm=tuple(tuple(r) for r in ranges),
+                drift_direction=drift_dir,
+                x_anode_cm=x_anode,
+                max_drift_cm=max_drift,
+                n_planes=n_planes,
+                furthest_plane_dist_cm=float(plane_distances[furthest_idx]),
+                plane_distances_cm=tuple(float(d) for d in plane_distances),
+                angles_rad=tuple(angles),
+                wire_spacings_cm=tuple(spacings),
+                index_offsets=tuple(offsets),
+                max_wire_indices=tuple(max_wire_list),
+                num_wires=tuple(n_wires_list),
+                wire_lengths_m=tuple(wire_lengths),
+                diffusion=diffusion,
+                yz_center_cm=((ranges[1][0] + ranges[1][1]) / 2.0,
+                              (ranges[2][0] + ranges[2][1]) / 2.0),
+                pixel_shape=None,
+                pixel_pitch_cm=None,
+                pixel_origins_cm=None,
+            ))
 
     volumes = tuple(all_volumes)
 
@@ -344,17 +429,23 @@ def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50
     num_time_steps = int(np.ceil(total_window_us / time_step_us)) + 1
     num_time_steps = max(1, num_time_steps)
 
-    # Plane names per volume
+    # Plane names per volume (pixel volumes get ('Pixel',))
     plane_names = tuple(
-        tuple(_PLANE_LABELS[:vol.n_planes]) for vol in volumes)
+        ('Pixel',) if vol.readout_type == 'pixel'
+        else tuple(_PLANE_LABELS[:vol.n_planes])
+        for vol in volumes)
 
     # Track hits config
     if include_track_hits:
         if track_config is None:
             track_config = create_track_hits_config()
-        max_wires = max(
-            w for vol in volumes for w in vol.max_wire_indices) + 1
-        max_wires = max(max_wires, 2000)
+        wire_volumes = [vol for vol in volumes if vol.readout_type == 'wire']
+        if wire_volumes:
+            max_wires = max(
+                w for vol in wire_volumes for w in vol.max_wire_indices) + 1
+            max_wires = max(max_wires, 2000)
+        else:
+            max_wires = 2000
     else:
         track_config = None
         max_wires = 0
@@ -431,13 +522,22 @@ class SCEOutputs(NamedTuple):
 
 
 class VolumeGeometry(NamedTuple):
-    """Static geometry for one detector volume."""
+    """Static geometry for one detector volume.
+
+    Supports both wire readout (n_planes angled wire planes) and pixel readout
+    (single 2D pixel grid). The readout_type field selects which fields are used.
+
+    Wire volumes: n_planes, angles_rad, wire_spacings_cm, num_wires, etc.
+    Pixel volumes: pixel_shape, pixel_pitch_cm, pixel_origins_cm.
+    """
     volume_id: int                  # 0, 1, ...
+    readout_type: str               # 'wire' or 'pixel'
     ranges_cm: tuple                # ((x_min,x_max), (y_min,y_max), (z_min,z_max))
     drift_direction: int            # +1 or -1
     x_anode_cm: float               # derived from ranges + drift_direction
     max_drift_cm: float            # x_max - x_min (max drift distance in this volume)
-    n_planes: int                   # number of readout planes
+    # Wire-specific (None for pixel volumes)
+    n_planes: int                   # number of readout planes (0 for pixel)
     furthest_plane_dist_cm: float
     plane_distances_cm: tuple       # (n_planes,) per plane
     angles_rad: tuple               # (n_planes,)
@@ -447,6 +547,11 @@ class VolumeGeometry(NamedTuple):
     num_wires: tuple                # (n_planes,) int
     wire_lengths_m: tuple           # (n_planes,) of np.ndarray, wire lengths in meters
     diffusion: Any                  # DiffusionConfig or None
+    yz_center_cm: tuple             # (y_center, z_center) in cm — volume center for wire centering
+    # Pixel-specific (None for wire volumes)
+    pixel_shape: Any                # (num_py, num_pz) or None
+    pixel_pitch_cm: Any             # float or None
+    pixel_origins_cm: Any           # (y_origin_cm, z_origin_cm) or None
 
 
 class VolumeIntermediates(NamedTuple):
@@ -470,6 +575,20 @@ class PlaneIntermediates(NamedTuple):
     closest_wire_dist: jnp.ndarray # (N,)
     charges: jnp.ndarray           # (N,) zeroed for invalid/out-of-window deposits
     photons: jnp.ndarray           # (N,) scintillation photons
+    positions_cm: jnp.ndarray      # (N, 3) carried through for response_fn
+
+
+class PixelIntermediates(NamedTuple):
+    """Output of compute_pixel_physics, input to pixel response computation."""
+    drift_distance_cm: jnp.ndarray  # (N,) SCE-corrected
+    drift_time_us: jnp.ndarray     # (N,) pure drift time
+    tick_us: jnp.ndarray           # (N,) readout tick = drift + t0 + pre_window
+    attenuation: jnp.ndarray       # (N,)
+    pixel_y_idx: jnp.ndarray       # (N,) int32, center pixel y index
+    pixel_z_idx: jnp.ndarray       # (N,) int32, center pixel z index
+    pixel_y_offset: jnp.ndarray    # (N,) fractional offset in pixel y [-0.5, 0.5)
+    pixel_z_offset: jnp.ndarray    # (N,) fractional offset in pixel z [-0.5, 0.5)
+    charges: jnp.ndarray           # (N,) zeroed for invalid/out-of-window
     positions_cm: jnp.ndarray      # (N, 3) carried through for response_fn
 
 

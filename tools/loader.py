@@ -679,7 +679,10 @@ def build_deposit_data(positions_mm, de, dx, sim_config,
     if has_precomputed_groups:
         group_ids = np.asarray(group_ids, dtype=np.int32)
 
-    x_cm = positions_mm[:, 0] / 10.0
+    pos_cm = positions_mm / 10.0
+    x_cm = pos_cm[:, 0]
+    y_cm = pos_cm[:, 1]
+    z_cm = pos_cm[:, 2]
     valid_mask = np.ones(N, dtype=bool)
     total_pad = sim_config.total_pad
 
@@ -705,12 +708,18 @@ def build_deposit_data(positions_mm, de, dx, sim_config,
     for vol_idx in range(sim_config.n_volumes):
         vol = sim_config.volumes[vol_idx]
         x_min, x_max = vol.ranges_cm[0]
-        vol_mask = valid_mask & (x_cm >= x_min) & (x_cm < x_max)
+        y_min, y_max = vol.ranges_cm[1]
+        z_min, z_max = vol.ranges_cm[2]
+        vol_mask = (valid_mask
+                    & (x_cm >= x_min) & (x_cm < x_max)
+                    & (y_cm >= y_min) & (y_cm < y_max)
+                    & (z_cm >= z_min) & (z_cm < z_max))
 
         n_actual = int(np.sum(vol_mask))
         if n_actual > total_pad:
-            print(f"WARNING: volume {vol_idx} has {n_actual:,} deposits "
-                  f"> total_pad ({total_pad:,}). Truncating!")
+            raise RuntimeError(
+                f"Volume {vol_idx} has {n_actual:,} deposits > total_pad ({total_pad:,}). "
+                f"Increase --total-pad or run profiler.setup_production.")
         n_use = min(n_actual, total_pad)
 
         # Track which original deposits go into this volume
@@ -719,6 +728,21 @@ def build_deposit_data(positions_mm, de, dx, sim_config,
         # Extract this volume's deposits
         for field, arr in all_fields.items():
             vol_arrays[field].append(arr[vol_mask][:n_use])
+
+        # Transform positions to volume-local coordinates:
+        #   x_local = drift_dir * (x_anode - x_global)  (distance from anode, ≥ 0)
+        #   y_local = y_global - y_center
+        #   z_local = z_global - z_center
+        if n_use > 0:
+            vol_pos = vol_arrays['positions_mm'][-1]
+            x_anode_mm = vol.x_anode_cm * 10.0
+            y_center_mm = vol.yz_center_cm[0] * 10.0
+            z_center_mm = vol.yz_center_cm[1] * 10.0
+            vol_pos_local = vol_pos.copy()
+            vol_pos_local[:, 0] = vol.drift_direction * (x_anode_mm - vol_pos[:, 0])
+            vol_pos_local[:, 1] -= y_center_mm
+            vol_pos_local[:, 2] -= z_center_mm
+            vol_arrays['positions_mm'][-1] = vol_pos_local
 
         # Groups: use pre-computed or compute per-volume
         if has_precomputed_groups:
@@ -730,7 +754,7 @@ def build_deposit_data(positions_mm, de, dx, sim_config,
             if n_use > 0:
                 g2t[v_gids] = v_tids
         else:
-            v_pos = positions_mm[vol_mask][:n_use]
+            v_pos = vol_arrays['positions_mm'][-1] if n_use > 0 else positions_mm[vol_mask][:n_use]
             v_tids = track_ids[vol_mask][:n_use]
             v_valid = np.ones(n_use, dtype=bool)
             v_gids, g2t, _ = compute_group_ids(

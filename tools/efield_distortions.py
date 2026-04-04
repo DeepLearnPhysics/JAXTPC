@@ -346,14 +346,21 @@ _DEFAULT_SCE_PATH = os.path.join(
 )
 
 
-def load_sce_per_volume(h5_path=_DEFAULT_SCE_PATH):
+def load_sce_per_volume(h5_path=_DEFAULT_SCE_PATH, volumes=None):
     """
     Load per-volume SCE maps and build JIT-compatible interpolation functions.
+
+    Maps are converted to volume-local coordinates if ``volumes`` is provided:
+    x_local = drift_dir * (x_anode - x_global), yz centered on volume.
+    The returned functions then accept local-frame positions directly.
 
     Parameters
     ----------
     h5_path : str
         Path to HDF5 with volume_0, volume_1, ... groups.
+    volumes : tuple of VolumeGeometry, optional
+        Per-volume geometry for local-frame conversion. If None, maps are
+        returned in their original (global) coordinate system.
 
     Returns
     -------
@@ -364,17 +371,41 @@ def load_sce_per_volume(h5_path=_DEFAULT_SCE_PATH):
     """
     from tools.utils import load_sce_data
 
-    volumes = load_sce_data(h5_path)
+    vol_data_list = load_sce_data(h5_path)
 
     results = []
-    for vol_data in volumes:
-        efield = jnp.moveaxis(jnp.array(vol_data['efield_map']), -1, 0)
-        corr = jnp.moveaxis(jnp.array(vol_data['drift_correction_map']), -1, 0)
-        origin = jnp.array(vol_data['origin_cm'], dtype=jnp.float32)
-        spacing = jnp.array(vol_data['spacing_cm'], dtype=jnp.float32)
+    for i, vol_data in enumerate(vol_data_list):
+        efield = np.array(vol_data['efield_map'])           # (Nx, Ny, Nz, 3)
+        corr = np.array(vol_data['drift_correction_map'])
+        origin = np.array(vol_data['origin_cm'], dtype=np.float32)
+        spacing = np.array(vol_data['spacing_cm'], dtype=np.float32)
 
-        efield_fn = create_single_interpolation_fn(efield, origin, spacing)
-        corr_fn = create_single_interpolation_fn(corr, origin, spacing)
+        # Convert to local coordinates if volume geometry provided
+        if volumes is not None and i < len(volumes):
+            vol = volumes[i]
+            dd = vol.drift_direction
+
+            if dd == 1:
+                # Flip x-axis grid to local frame (anode at x_max → x_local=0)
+                efield = efield[::-1, :, :, :].copy()
+                corr = corr[::-1, :, :, :].copy()
+
+            # Transform vector x-components to local frame
+            efield[:, :, :, 0] *= -dd
+            corr[:, :, :, 0] *= -dd
+
+            # Origin in local frame: x starts at 0, yz centered
+            origin = np.array([
+                0.0,
+                origin[1] - vol.yz_center_cm[0],
+                origin[2] - vol.yz_center_cm[1]], dtype=np.float32)
+
+        efield_jnp = jnp.moveaxis(jnp.array(efield), -1, 0)
+        corr_jnp = jnp.moveaxis(jnp.array(corr), -1, 0)
+        origin_jnp = jnp.array(origin, dtype=jnp.float32)
+
+        efield_fn = create_single_interpolation_fn(efield_jnp, origin_jnp, spacing)
+        corr_fn = create_single_interpolation_fn(corr_jnp, origin_jnp, spacing)
         results.append((efield_fn, corr_fn))
 
     return results

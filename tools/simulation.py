@@ -1,16 +1,19 @@
 """
 LArTPC detector simulation with modular physics pipeline.
 
-Two execution paths:
+Deposits are transformed to volume-local coordinates by the loader:
+    x_local = drift_dir * (x_anode - x_global), y/z centered on volume.
+All volumes are geometrically identical in local frame — one scan/vmap
+body handles any number of volumes.
+
+Execution paths:
     - process_event(deposits, sim_params): Production path with fori_loop
       batching, optional noise/electronics/track_hits/digitization.
     - forward(params, deposits): Differentiable path with remat, gradients
-      through all SimParams fields (velocity, lifetime, recomb, NN models).
+      through SimParams fields (velocity, lifetime, diffusion, recomb).
 
-Both paths share the same physics functions (compute_volume_physics,
-compute_plane_physics) and response function (response_fn with unified
-signature). SimParams is a JIT argument — changing physics values does
-NOT trigger recompilation.
+SimParams is a JIT argument — changing physics values does NOT trigger
+recompilation. Volume iteration uses lax.scan (default) or vmap.
 """
 
 import os
@@ -24,7 +27,6 @@ from tools.config import (
     DepositData, VolumeDeposits, SCEOutputs,
     create_sim_params, create_sim_config,
     create_deposit_data, pad_deposit_data,
-    get_volume_deposits,
 )
 
 # Data construction
@@ -33,10 +35,11 @@ from tools.loader import build_deposit_data, load_event
 # Response kernels (loaded at __init__, used by shared factory)
 from tools.kernels import (
     load_response_kernels, apply_diffusion_response, generate_dkernel_table,
+    load_pixel_response_kernel, apply_pixel_diffusion_response,
 )
 
 # Track labeling factory + post-processing
-from tools.track_hits import create_track_hits_fn_for_volume, finalize_track_hits, compute_qs_fractions
+from tools.track_hits import create_track_hits_fn_for_volume, compute_qs_fractions
 
 # Recombination
 from tools.recombination import RECOMB_MODELS
@@ -47,6 +50,22 @@ from tools.electronics import create_electronics_fn_for_volume, create_digitize_
 
 
 # =============================================================================
+# VOLUME ITERATION STRATEGIES
+# =============================================================================
+
+def scan_over(fn, xs):
+    """Iterate fn over leading-axis arrays using lax.scan (sequential)."""
+    def body(carry, inputs):
+        return carry, fn(*inputs)
+    _, outputs = jax.lax.scan(body, None, xs)
+    return outputs
+
+def vmap_over(fn, xs):
+    """Iterate fn over leading-axis arrays using vmap (parallel)."""
+    return jax.vmap(lambda *args: fn(*args))(*xs)
+
+
+# =============================================================================
 # DETECTOR SIMULATOR CLASS
 # =============================================================================
 
@@ -54,9 +73,9 @@ class DetectorSimulator:
     """
     LArTPC detector simulation with fixed-size padding.
 
-    Two execution paths:
-        - process_event(): Production path (fori_loop batching, post-processing).
-        - forward(): Differentiable path (remat, gradients through SimParams).
+    All volumes share identical structural geometry (validated at init).
+    Deposits arrive in local coordinates (anode at x=0, yz centered).
+    Volume iteration via lax.scan (default) or vmap.
     """
 
     def __init__(
@@ -80,6 +99,7 @@ class DetectorSimulator:
         digitization_config=None,
         differentiable=False,
         n_segments=None,
+        iterate_mode='scan',
     ):
         print("--- Creating DetectorSimulator ---")
 
@@ -144,62 +164,106 @@ class DetectorSimulator:
             recombination_model=self.recomb_model,
         )
 
-        # Load SCE maps (per-volume)
+        # Load SCE maps (per-volume, converted to local frame)
         sce_per_volume = self._load_sce(include_electric_dist, electric_dist_path)
         self._include_sce = sce_per_volume is not None
 
-        # Load response kernels per volume
+        # Volume iteration mode
+        self._iterate = scan_over if iterate_mode == 'scan' else vmap_over
+        self._volume_mode = iterate_mode
+
+        # Readout type (all volumes must match)
+        vol_geom = cfg.volumes[0]
+        self._readout_type = vol_geom.readout_type
+        for v in cfg.volumes[1:]:
+            if v.readout_type != self._readout_type:
+                raise ValueError(
+                    f"Mixed readout types not supported: volume 0 is "
+                    f"'{self._readout_type}', volume {v.volume_id} is '{v.readout_type}'")
+
+        # Pixel readout requires bucketed accumulation (dense is too large)
+        if self._readout_type == 'pixel' and not cfg.use_bucketed:
+            print("   NOTE: pixel readout forces bucketed accumulation")
+            buckets = cfg.max_active_buckets if cfg.max_active_buckets else 1000
+            self._sim_config = cfg._replace(use_bucketed=True,
+                                            max_active_buckets=buckets)
+            cfg = self._sim_config
+
+        # Load response kernels (once, shared across all volumes)
         print("   Loading response kernels...")
-        self.response_kernels = []
-        for vol in cfg.volumes:
-            d = vol.diffusion
-            self.response_kernels.append(load_response_kernels(
+        from tools.geometry import calculate_max_diffusion_sigmas
+        d = vol_geom.diffusion
+        global_max_drift = max(v.max_drift_cm for v in cfg.volumes)
+        self._global_max_drift = global_max_drift
+
+        if self._readout_type == 'pixel':
+            pixel_response_path = os.path.join(
+                os.path.dirname(__file__), '..', 'config', 'pixel_response.npz')
+            if response_path is not None:
+                candidate = os.path.join(response_path, 'pixel_response.npz')
+                if os.path.exists(candidate):
+                    pixel_response_path = candidate
+            pixlar_path = '/tmp/pixlar-detsim-jax/pixlar/data/pixel_response_shielded.npz'
+            if not os.path.exists(pixel_response_path) and os.path.exists(pixlar_path):
+                pixel_response_path = pixlar_path
+            self.response_kernels = load_pixel_response_kernel(
+                pixel_response_path,
+                num_s=d.num_s,
+                time_spacing=cfg.time_step_us,
+                pixel_pitch_cm=vol_geom.pixel_pitch_cm,
+                max_sigma_trans_unitless=d.max_sigma_trans_unitless,
+                max_sigma_long_unitless=d.max_sigma_long_unitless,
+            )
+        else:
+            _, _, global_sigma_trans, global_sigma_long = calculate_max_diffusion_sigmas(
+                global_max_drift, d.velocity_cm_us, d.trans_cm2_us, d.long_cm2_us,
+                vol_geom.wire_spacings_cm[0], cfg.time_step_us)
+            self.response_kernels = load_response_kernels(
                 response_path=response_path,
                 num_s=d.num_s,
                 time_spacing=cfg.time_step_us,
-                max_sigma_trans_unitless=d.max_sigma_trans_unitless,
-                max_sigma_long_unitless=d.max_sigma_long_unitless,
-            ))
+                max_sigma_trans_unitless=global_sigma_trans,
+                max_sigma_long_unitless=global_sigma_long,
+            )
 
         # Build shared factories
-        sce_factories, _build_response_fn, _build_response_fn_diff, _recomb_fn = \
+        sce_factory, _build_response_fn, _build_response_fn_diff, _recomb_fn = \
             self._setup_shared_factories(sce_per_volume)
 
-        # Build per-volume post-processing factories
-        vol_electronics_fns = []
-        vol_noise_fns = []
-        vol_digitize_fns = []
-        vol_track_hits_fns = []
+        # Build post-processing factories (once, shared)
         self.electronics_chunk_size = None
         self._electronics_fft_size = None
 
-        for vol_idx, vol in enumerate(cfg.volumes):
-            vol_kernels = self.response_kernels[vol_idx]
+        e_fn, e_meta = create_electronics_fn_for_volume(
+            cfg, vol_geom, self.response_kernels if self._readout_type == 'wire' else None,
+            electronics_chunk_size=electronics_chunk_size,
+            electronics_threshold=electronics_threshold)
+        if e_meta.get('e_chunk'):
+            self.electronics_chunk_size = e_meta['e_chunk']
+            self._electronics_fft_size = e_meta.get('e_fft')
 
-            e_fn, e_meta = create_electronics_fn_for_volume(
-                cfg, vol, vol_kernels,
-                electronics_chunk_size=electronics_chunk_size,
-                electronics_threshold=electronics_threshold)
-            if e_meta.get('e_chunk'):
-                self.electronics_chunk_size = e_meta['e_chunk']
-                self._electronics_fft_size = e_meta.get('e_fft')
-            vol_electronics_fns.append(e_fn)
+        noise_fn = create_noise_fn_for_volume(
+            cfg, vol_geom,
+            self.response_kernels if self._readout_type == 'wire' else None,
+            e_chunk=self.electronics_chunk_size)
 
-            vol_noise_fns.append(create_noise_fn_for_volume(
-                cfg, vol, vol_kernels, e_chunk=self.electronics_chunk_size))
+        d_fn, dig_cfg = create_digitize_fn_for_volume(cfg, vol_geom, digitization_config)
+        if dig_cfg:
+            self.digitization_config = dig_cfg
 
-            d_fn, dig_cfg = create_digitize_fn_for_volume(cfg, vol, digitization_config)
-            if dig_cfg:
-                self.digitization_config = dig_cfg
-            vol_digitize_fns.append(d_fn)
+        th_fn, th_zero, th_decode = create_track_hits_fn_for_volume(cfg, vol_geom)
 
-            vol_track_hits_fns.append(create_track_hits_fn_for_volume(cfg, vol))
+        # Populate spatial decode fns for finalize_track_hits
+        self._spatial_decode_fns = {}
+        n_readouts = vol_geom.n_planes if self._readout_type == 'wire' else 1
+        for vi in range(cfg.n_volumes):
+            for pi in range(n_readouts):
+                self._spatial_decode_fns[(vi, pi)] = th_decode
 
         # Build JIT-compiled calculators
-        self._build_jit_functions(
-            sce_factories, _build_response_fn, _build_response_fn_diff,
-            _recomb_fn, vol_electronics_fns, vol_noise_fns,
-            vol_digitize_fns, vol_track_hits_fns,
+        self._build_jit(
+            _recomb_fn, sce_factory, _build_response_fn, _build_response_fn_diff,
+            e_fn, noise_fn, d_fn, th_fn,
         )
 
         self._print_summary()
@@ -213,7 +277,7 @@ class DetectorSimulator:
             electric_dist_path = os.path.join(
                 os.path.dirname(os.path.dirname(__file__)), 'config', 'sce_jaxtpc.h5')
         print(f"   Loading SCE maps from {electric_dist_path}...")
-        return load_sce_per_volume(electric_dist_path)
+        return load_sce_per_volume(electric_dist_path, volumes=self._sim_config.volumes)
 
     def _print_summary(self):
         """Print configuration summary after initialization."""
@@ -239,390 +303,312 @@ class DetectorSimulator:
             dig_cfg = self.digitization_config
             print(f"   Digitization: ENABLED ({dig_cfg.n_bits}-bit)")
         print(f"   Track labeling: {'ENABLED' if cfg.include_track_hits else 'DISABLED'}")
-        print(f"   Volumes: {cfg.n_volumes}")
+        print(f"   Readout: {self._readout_type}")
+        print(f"   Volumes: {cfg.n_volumes} (iterate={self._volume_mode})")
         print("--- DetectorSimulator Ready ---")
 
     def _setup_shared_factories(self, sce_per_volume):
-        """Build per-volume SCE, response, and recombination factories."""
+        """Build SCE, response, and recombination factories (shared across volumes)."""
         from tools.recombination import compute_quanta, XI_FN
 
         cfg = self._sim_config
         _nominal_field = float(self._default_sim_params.recomb_params.field_strength_Vcm)
 
-        # ── Per-volume SCE factories ──
-        sce_factories = []
-        for vol_idx in range(cfg.n_volumes):
-            vol_geom = cfg.volumes[vol_idx]
-            if sce_per_volume is not None:
-                efield_fn, corr_fn = sce_per_volume[vol_idx]
-                def _make_sce(ef=efield_fn, cf=corr_fn, nf=_nominal_field):
-                    def _sce(positions_cm):
-                        E_local = ef(positions_cm)
-                        E_normalized = E_local / nf
-                        drift_corr = cf(positions_cm)
-                        return SCEOutputs(efield_correction=E_normalized, drift_corr_cm=drift_corr)
-                    return _sce
-                sce_factories.append(_make_sce)
-            else:
-                drift_dir = float(vol_geom.drift_direction)
-                def _make_nominal(d=drift_dir):
-                    def _sce(pos):
-                        N = pos.shape[0]
-                        corr = jnp.broadcast_to(
-                            jnp.array([-d, 0.0, 0.0]), (N, 3))
-                        return SCEOutputs(
-                            efield_correction=corr,
-                            drift_corr_cm=jnp.zeros((N, 3)))
-                    return _sce
-                sce_factories.append(_make_nominal)
+        # ── SCE factory (local frame) ──
+        if sce_per_volume is not None:
+            # Real SCE — maps already in local frame from load_sce_per_volume.
+            # For scan, all volumes must share one factory. Use volume 0's maps.
+            # (Different per-volume SCE requires stacking maps — future work.)
+            efield_fn, corr_fn = sce_per_volume[0]
+            def sce_factory(ef=efield_fn, cf=corr_fn, nf=_nominal_field):
+                def _sce(positions_cm):
+                    E_local = ef(positions_cm)
+                    E_normalized = E_local / nf
+                    drift_corr = cf(positions_cm)
+                    return SCEOutputs(efield_correction=E_normalized, drift_corr_cm=drift_corr)
+                return _sce
+        else:
+            # Nominal SCE — identical for all volumes in local frame
+            def sce_factory():
+                def _sce(pos):
+                    N = pos.shape[0]
+                    corr = jnp.broadcast_to(
+                        jnp.array([1.0, 0.0, 0.0]), (N, 3))
+                    return SCEOutputs(
+                        efield_correction=corr,
+                        drift_corr_cm=jnp.zeros((N, 3)))
+                return _sce
 
         # ── Response factories ──
-        response_kernels = self.response_kernels
-        volumes = cfg.volumes
+        kernels = self.response_kernels
+        _global_max_drift = self._global_max_drift
 
-        def _build_response_fn(sim_params, vol_idx, plane_type):
-            """Production response — uses pre-computed DKernel table."""
-            kernel = response_kernels[vol_idx][plane_type]
-            max_drift = volumes[vol_idx].max_drift_cm
-            dkernel = kernel.DKernel
-            def response_fn(positions_cm, drift_distance_cm, wire_offsets, time_offsets):
-                s_values = jnp.clip(drift_distance_cm / max_drift, 0.0, 1.0)
-                return apply_diffusion_response(
-                    dkernel, s_values, wire_offsets, time_offsets,
-                    kernel.wire_spacing, kernel.num_wires)
-            return response_fn
+        if self._readout_type == 'pixel':
+            pk = kernels  # PixelResponseKernel
+            def _build_response_fn(sim_params):
+                dkernel = pk.DKernel
+                def response_fn(positions_cm, drift_distance_cm,
+                                py_offsets, pz_offsets, time_offsets):
+                    s_values = jnp.clip(jnp.sqrt(drift_distance_cm / _global_max_drift), 0.0, 1.0)
+                    return apply_pixel_diffusion_response(
+                        dkernel, s_values, py_offsets, pz_offsets, time_offsets,
+                        pk.pixel_spacing, pk.kernel_py, pk.kernel_pz, pk.rebin_factor)
+                return response_fn
+            _build_response_fn_diff = _build_response_fn  # TODO: pixel diff response
+        else:
+            def _build_response_fn(sim_params, plane_type):
+                kernel = kernels[plane_type]
+                dkernel = kernel.DKernel
+                def response_fn(positions_cm, drift_distance_cm, wire_offsets, time_offsets):
+                    s_values = jnp.clip(jnp.sqrt(drift_distance_cm / _global_max_drift), 0.0, 1.0)
+                    return apply_diffusion_response(
+                        dkernel, s_values, wire_offsets, time_offsets,
+                        kernel.wire_spacing, kernel.num_wires)
+                return response_fn
 
-        def _build_response_fn_diff(sim_params, vol_idx, plane_type):
-            """Diff response — recomputes DKernel from SimParams diffusion."""
-            kernel = response_kernels[vol_idx][plane_type]
-            max_drift = volumes[vol_idx].max_drift_cm
-            max_drift_time = max_drift / sim_params.velocity_cm_us
-            sigma_trans_max_cm = jnp.sqrt(
-                2.0 * sim_params.diffusion_trans_cm2_us * max_drift_time)
-            sigma_long_max_us = jnp.sqrt(
-                2.0 * (sim_params.diffusion_long_cm2_us
-                       / sim_params.velocity_cm_us**2) * max_drift_time)
-            dkernel = generate_dkernel_table(
-                sigma_trans_max_cm, sigma_long_max_us,
-                kernel.base_kernel, kernel.freq_w, kernel.freq_t,
-                kernel.s_levels)
-            def response_fn(positions_cm, drift_distance_cm, wire_offsets, time_offsets):
-                s_values = jnp.clip(drift_distance_cm / max_drift, 0.0, 1.0)
-                return apply_diffusion_response(
-                    dkernel, s_values, wire_offsets, time_offsets,
-                    kernel.wire_spacing, kernel.num_wires)
-            return response_fn
+            def _build_response_fn_diff(sim_params, plane_type):
+                """Diff response — recomputes DKernel from SimParams diffusion.
+                Conv filter sizes (ks_w, ks_t) are static from ResponseKernel."""
+                kernel = kernels[plane_type]
+                max_drift_time = _global_max_drift / sim_params.velocity_cm_us
+                sigma_trans_max_cm = jnp.sqrt(
+                    2.0 * sim_params.diffusion_trans_cm2_us * max_drift_time)
+                sigma_long_max_us = jnp.sqrt(
+                    2.0 * (sim_params.diffusion_long_cm2_us
+                           / sim_params.velocity_cm_us**2) * max_drift_time)
+                dkernel = generate_dkernel_table(
+                    sigma_trans_max_cm, sigma_long_max_us,
+                    kernel.base_kernel, kernel.kernel_dx, kernel.kernel_dy,
+                    kernel.s_levels, ks_w=kernel.ks_w, ks_t=kernel.ks_t)
+                def response_fn(positions_cm, drift_distance_cm, wire_offsets, time_offsets):
+                    s_values = jnp.clip(jnp.sqrt(drift_distance_cm / _global_max_drift), 0.0, 1.0)
+                    return apply_diffusion_response(
+                        dkernel, s_values, wire_offsets, time_offsets,
+                        kernel.wire_spacing, kernel.num_wires)
+                return response_fn
 
         # ── Recombination ──
         _xi_fn = XI_FN[self.recomb_model]
         def _recomb_fn(de, dx, phi_drift, e_field_Vcm, params):
             return compute_quanta(de, dx, phi_drift, e_field_Vcm, params, _xi_fn)
 
-        return sce_factories, _build_response_fn, _build_response_fn_diff, _recomb_fn
+        return sce_factory, _build_response_fn, _build_response_fn_diff, _recomb_fn
 
-    def _build_jit_functions(self, sce_factories, _build_response_fn,
-                             _build_response_fn_diff, _recomb_fn,
-                             vol_electronics_fns, vol_noise_fns,
-                             vol_digitize_fns, vol_track_hits_fns):
-        """Build JIT-compiled calculators from per-volume factories."""
+    def _build_jit(self, _recomb_fn, sce_factory, _build_response_fn,
+                   _build_response_fn_diff,
+                   electronics_fn, noise_fn, digitize_fn, track_hits_fn):
+        """Build all JIT-compiled calculators using scan/vmap."""
         from tools.physics import (
             compute_volume_physics, compute_plane_physics,
             compute_plane_signal, compute_plane_signal_bucketed,
             compute_bucket_maps,
+            compute_pixel_physics, compute_pixel_bucket_maps,
+            compute_pixel_signal_bucketed,
         )
 
         cfg = self._sim_config
-        response_kernels = self.response_kernels
-        n_volumes = cfg.n_volumes
+        vol_geom = cfg.volumes[0]
+        kernels = self.response_kernels
         total_pad = cfg.total_pad
+        n_volumes = cfg.n_volumes
+        iterate = self._iterate
+        include_track_hits = cfg.include_track_hits
 
-        # ── Production JIT ──
-        # Define _process_volume and _skip_volume at closure-definition time.
-        # Track_hits on/off is resolved here — no if-guards inside traced functions.
+        # ── Build process_one_volume body ──
+        if self._readout_type == 'pixel':
+            pk = kernels  # PixelResponseKernel
 
-        if cfg.include_track_hits:
-            def _make_process_volume(vol_idx):
-                vol_geom = cfg.volumes[vol_idx]
-                sce_fn_factory = sce_factories[vol_idx]
-                electronics_fn = vol_electronics_fns[vol_idx]
-                noise_fn = vol_noise_fns[vol_idx]
-                digitize_fn = vol_digitize_fns[vol_idx]
-                track_hits_fn = vol_track_hits_fns[vol_idx]
-                vol_kernels = response_kernels[vol_idx]
+            def process_one_volume(vol_deps, vol_key, sim_params):
+                sce_fn = sce_factory()
+                vol_int = compute_volume_physics(
+                    vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
 
-                def _process(vol_deps, sim_params, vol_key):
-                    vol_signals = {}
-                    vol_hits = {}
-                    plane_keys = jax.random.split(vol_key, vol_geom.n_planes)
+                readout_window_us = cfg.num_time_steps * cfg.time_step_us
+                pixel_response_fn = _build_response_fn(sim_params)
 
-                    sce_fn = sce_fn_factory()
-                    vol_int = compute_volume_physics(
-                        vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
+                pixel_int = compute_pixel_physics(
+                    vol_int, sim_params, vol_geom,
+                    cfg.pre_window_us, readout_window_us,
+                    vol_geom.pixel_pitch_cm,
+                    jnp.array(vol_geom.pixel_origins_cm),
+                    vol_geom.pixel_shape[0], vol_geom.pixel_shape[1])
 
+                ptc, num_active, ctk, B1, B2, B3 = compute_pixel_bucket_maps(
+                    pixel_int, vol_geom.pixel_shape[0], vol_geom.pixel_shape[1],
+                    cfg.num_time_steps, cfg.time_step_us,
+                    cfg.max_active_buckets,
+                    pk.kernel_py, pk.kernel_pz, pk.kernel_time,
+                    pk.py_zero_bin, pk.pz_zero_bin, pk.time_zero_bin)
+
+                response_buckets = compute_pixel_signal_bucketed(
+                    pixel_int, pixel_response_fn, vol_deps.n_actual,
+                    cfg.response_chunk_size,
+                    ptc, cfg.max_active_buckets, B1, B2, B3,
+                    cfg.time_step_us,
+                    vol_geom.pixel_shape[0], vol_geom.pixel_shape[1],
+                    cfg.num_time_steps,
+                    pk.kernel_py, pk.kernel_pz, pk.kernel_time,
+                    pk.py_zero_bin, pk.pz_zero_bin, pk.time_zero_bin)
+
+                # Single readout plane
+                stacked_signal = (response_buckets[None], num_active[None], ctk[None])
+
+                if include_track_hits:
                     vol_qs = compute_qs_fractions(
                         vol_int.charges, vol_deps.group_ids, total_pad)
+                    hits = track_hits_fn(
+                        pixel_int, vol_deps, vol_geom, 0, vol_deps.n_actual)
+                    stacked_hits = tuple(h[None] for h in hits)
+                else:
+                    vol_qs = jnp.zeros(total_pad, dtype=jnp.float32)
+                    stacked_hits = ()
 
-                    readout_window_us = cfg.num_time_steps * cfg.time_step_us
-                    for plane_idx in range(vol_geom.n_planes):
-                        plane_type = cfg.plane_names[vol_idx][plane_idx]
-                        plane_int = compute_plane_physics(
-                            vol_int, sim_params, vol_geom, plane_idx,
-                            cfg.pre_window_us, readout_window_us)
-
-                        vol_hits[plane_idx] = track_hits_fn(
-                            plane_int, vol_deps, vol_geom, plane_idx, vol_deps.n_actual)
-
-                        response_fn = _build_response_fn(sim_params, vol_idx, plane_type)
-                        plane_kernel = vol_kernels[plane_type]
-
-                        if cfg.use_bucketed:
-                            ptc, num_active, ctk, B1, B2 = compute_bucket_maps(
-                                plane_int, vol_geom, plane_idx, cfg, plane_kernel)
-                            response_buckets = compute_plane_signal_bucketed(
-                                plane_int, response_fn, vol_deps.n_actual,
-                                cfg.response_chunk_size,
-                                ptc, cfg.max_active_buckets, B1, B2,
-                                cfg, vol_geom, plane_idx, plane_kernel)
-                            response_signal = (response_buckets, num_active, ctk, B1, B2)
-                        else:
-                            response_signal = compute_plane_signal(
-                                plane_int, response_fn, vol_deps.n_actual,
-                                cfg.response_chunk_size,
-                                cfg, vol_geom, plane_idx, plane_kernel)
-
-                        response_signal = electronics_fn(
-                            response_signal, plane_idx,
-                            vol_geom.num_wires[plane_idx], cfg.num_time_steps)
-
-                        response_signal = noise_fn(
-                            plane_keys[plane_idx], response_signal, plane_idx,
-                            vol_geom.num_wires[plane_idx], cfg.num_time_steps)
-
-                        response_signal = digitize_fn(response_signal, plane_idx)
-                        vol_signals[plane_idx] = response_signal
-
-                    return vol_signals, vol_hits, vol_qs, vol_int.charges, vol_int.photons
-                return _process
-
-            def _make_skip_volume(vol_idx):
-                vol_geom = cfg.volumes[vol_idx]
-                vol_kernels = response_kernels[vol_idx]
-
-                # Pre-build zero pytrees matching _process output
-                zero_signals = {}
-                zero_hits = {}
-                for p in range(vol_geom.n_planes):
-                    plane_type = cfg.plane_names[vol_idx][p]
-                    pk = vol_kernels[plane_type]
-                    if cfg.use_bucketed and cfg.include_electronics:
-                        e_chunk = max(vol_geom.num_wires)
-                        zero_signals[p] = (
-                            jnp.zeros((e_chunk, cfg.num_time_steps)),
-                            jnp.zeros(e_chunk, dtype=jnp.int32),
-                            jnp.int32(0))
-                    elif cfg.use_bucketed:
-                        B1, B2 = 2 * pk.num_wires, 2 * pk.kernel_height
-                        zero_signals[p] = (
-                            jnp.zeros((cfg.max_active_buckets, B1, B2)),
-                            jnp.int32(0),
-                            jnp.zeros(cfg.max_active_buckets, dtype=jnp.int32),
-                            B1, B2)
-                    else:
-                        zero_signals[p] = jnp.zeros(
-                            (vol_geom.num_wires[p], cfg.num_time_steps))
-
-                    # Track hits zero tuple (5-tuple matching track_hits_fn output)
-                    SENTINEL_PK = jnp.int32(2**30)
-                    zero_hits[p] = (
-                        jnp.full(cfg.track_hits.max_keys, SENTINEL_PK, dtype=jnp.int32),
-                        jnp.zeros(cfg.track_hits.max_keys, dtype=jnp.int32),
-                        jnp.zeros(cfg.track_hits.max_keys, dtype=jnp.float32),
-                        jnp.int32(0),
-                        jnp.zeros(total_pad, dtype=jnp.float32))
-
-                zero_qs = jnp.zeros(total_pad, dtype=jnp.float32)
-                zero_charges = jnp.zeros(total_pad, dtype=jnp.float32)
-                zero_photons = jnp.zeros(total_pad, dtype=jnp.float32)
-
-                def _skip(vol_deps, sim_params, vol_key):
-                    return zero_signals, zero_hits, zero_qs, zero_charges, zero_photons
-                return _skip
+                return stacked_signal, stacked_hits, vol_qs, vol_int.charges, vol_int.photons
 
         else:
-            # Track hits disabled — simpler process/skip without track_hits or qs
-            def _make_process_volume(vol_idx):
-                vol_geom = cfg.volumes[vol_idx]
-                sce_fn_factory = sce_factories[vol_idx]
-                electronics_fn = vol_electronics_fns[vol_idx]
-                noise_fn = vol_noise_fns[vol_idx]
-                digitize_fn = vol_digitize_fns[vol_idx]
-                vol_kernels = response_kernels[vol_idx]
+            # Wire readout
+            n_planes = vol_geom.n_planes
+            _PLANE_LABELS = tuple(cfg.plane_names[0])
 
-                def _process(vol_deps, sim_params, vol_key):
-                    vol_signals = {}
-                    plane_keys = jax.random.split(vol_key, vol_geom.n_planes)
-
-                    sce_fn = sce_fn_factory()
-                    vol_int = compute_volume_physics(
-                        vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
-
-                    readout_window_us = cfg.num_time_steps * cfg.time_step_us
-                    for plane_idx in range(vol_geom.n_planes):
-                        plane_type = cfg.plane_names[vol_idx][plane_idx]
-                        plane_int = compute_plane_physics(
-                            vol_int, sim_params, vol_geom, plane_idx,
-                            cfg.pre_window_us, readout_window_us)
-
-                        response_fn = _build_response_fn(sim_params, vol_idx, plane_type)
-                        plane_kernel = vol_kernels[plane_type]
-
-                        if cfg.use_bucketed:
-                            ptc, num_active, ctk, B1, B2 = compute_bucket_maps(
-                                plane_int, vol_geom, plane_idx, cfg, plane_kernel)
-                            response_buckets = compute_plane_signal_bucketed(
-                                plane_int, response_fn, vol_deps.n_actual,
-                                cfg.response_chunk_size,
-                                ptc, cfg.max_active_buckets, B1, B2,
-                                cfg, vol_geom, plane_idx, plane_kernel)
-                            response_signal = (response_buckets, num_active, ctk, B1, B2)
-                        else:
-                            response_signal = compute_plane_signal(
-                                plane_int, response_fn, vol_deps.n_actual,
-                                cfg.response_chunk_size,
-                                cfg, vol_geom, plane_idx, plane_kernel)
-
-                        response_signal = electronics_fn(
-                            response_signal, plane_idx,
-                            vol_geom.num_wires[plane_idx], cfg.num_time_steps)
-
-                        response_signal = noise_fn(
-                            plane_keys[plane_idx], response_signal, plane_idx,
-                            vol_geom.num_wires[plane_idx], cfg.num_time_steps)
-
-                        response_signal = digitize_fn(response_signal, plane_idx)
-                        vol_signals[plane_idx] = response_signal
-
-                    return vol_signals, {}, jnp.zeros(total_pad), vol_int.charges, vol_int.photons
-                return _process
-
-            def _make_skip_volume(vol_idx):
-                vol_geom = cfg.volumes[vol_idx]
-                vol_kernels = response_kernels[vol_idx]
-
-                zero_signals = {}
-                for p in range(vol_geom.n_planes):
-                    plane_type = cfg.plane_names[vol_idx][p]
-                    pk = vol_kernels[plane_type]
-                    if cfg.use_bucketed and cfg.include_electronics:
-                        e_chunk = max(vol_geom.num_wires)
-                        zero_signals[p] = (
-                            jnp.zeros((e_chunk, cfg.num_time_steps)),
-                            jnp.zeros(e_chunk, dtype=jnp.int32),
-                            jnp.int32(0))
-                    elif cfg.use_bucketed:
-                        B1, B2 = 2 * pk.num_wires, 2 * pk.kernel_height
-                        zero_signals[p] = (
-                            jnp.zeros((cfg.max_active_buckets, B1, B2)),
-                            jnp.int32(0),
-                            jnp.zeros(cfg.max_active_buckets, dtype=jnp.int32),
-                            B1, B2)
-                    else:
-                        zero_signals[p] = jnp.zeros(
-                            (vol_geom.num_wires[p], cfg.num_time_steps))
-
-                def _skip(vol_deps, sim_params, vol_key):
-                    return zero_signals, {}, jnp.zeros(total_pad), jnp.zeros(total_pad), jnp.zeros(total_pad)
-                return _skip
-
-        # Build per-volume process/skip closures
-        process_fns = [_make_process_volume(v) for v in range(n_volumes)]
-        skip_fns = [_make_skip_volume(v) for v in range(n_volumes)]
-
-        @jax.jit
-        def _calculate_signals_jit(sim_params, all_vol_deposits, noise_key):
-            """Production JIT. Receives tuple of VolumeDeposits."""
-            response_signals = {}
-            track_hits = {}
-            qs_per_volume = []
-            charges_per_volume = []
-            photons_per_volume = []
-            vol_keys = jax.random.split(noise_key, n_volumes)
-
-            for vol_idx in range(n_volumes):
-                vol_deps = all_vol_deposits[vol_idx]
-                vol_key = vol_keys[vol_idx]
-
-                vol_signals, vol_hits, vol_qs, vol_charges, vol_photons = jax.lax.cond(
-                    vol_deps.n_actual > 0,
-                    process_fns[vol_idx],
-                    skip_fns[vol_idx],
-                    vol_deps, sim_params, vol_key)
-
-                for p in vol_signals:
-                    response_signals[(vol_idx, p)] = vol_signals[p]
-                for p in vol_hits:
-                    track_hits[(vol_idx, p)] = vol_hits[p]
-                qs_per_volume.append(vol_qs)
-                charges_per_volume.append(vol_charges)
-                photons_per_volume.append(vol_photons)
-
-            return response_signals, track_hits, qs_per_volume, charges_per_volume, photons_per_volume
-
-        self._calculator_jit_raw = _calculate_signals_jit
-
-        # ── Light-only JIT ──
-        @jax.jit
-        def _calculate_light_jit(sim_params, all_vol_deposits):
-            results = []
-            for vol_idx in range(n_volumes):
-                vol_deps = all_vol_deposits[vol_idx]
-                sce_fn = sce_factories[vol_idx]()
+            def process_one_volume(vol_deps, vol_key, sim_params):
+                sce_fn = sce_factory()
                 vol_int = compute_volume_physics(
-                    vol_deps, sim_params, cfg.volumes[vol_idx], sce_fn, _recomb_fn)
-                results.append((vol_int.charges, vol_int.photons, vol_int.positions_cm))
-            return results
+                    vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
 
-        self._light_calculator_jit = _calculate_light_jit
+                readout_window_us = cfg.num_time_steps * cfg.time_step_us
+                plane_keys = jax.random.split(vol_key, n_planes)
 
-        # ── Differentiable path ──
-        if self.n_segments is not None:
-            n_segments = self.n_segments
+                plane_signals = []
+                plane_intermediates = []
+                for plane_idx in range(n_planes):
+                    plane_type = _PLANE_LABELS[plane_idx]
+                    plane_int = compute_plane_physics(
+                        vol_int, sim_params, vol_geom, plane_idx,
+                        cfg.pre_window_us, readout_window_us)
 
-            @jax.remat
-            def _forward_diff(params, all_vol_deposits):
-                """Same pipeline as production but with static fori_loop bounds.
+                    if include_track_hits:
+                        plane_intermediates.append(plane_int)
 
-                n_segments is closure-captured Python int → static fori_loop
-                bound → reverse-mode differentiable.
-                """
-                response_signals = {}
+                    response_fn = _build_response_fn(sim_params, plane_type)
+                    plane_kernel = kernels[plane_type]
 
-                for vol_idx in range(n_volumes):
-                    vol_deps = all_vol_deposits[vol_idx]
-                    vol_geom = cfg.volumes[vol_idx]
-
-                    sce_fn = sce_factories[vol_idx]()
-                    vol_int = compute_volume_physics(
-                        vol_deps, params, vol_geom, sce_fn, _recomb_fn)
-
-                    readout_window_us = cfg.num_time_steps * cfg.time_step_us
-                    for plane_idx in range(vol_geom.n_planes):
-                        plane_type = cfg.plane_names[vol_idx][plane_idx]
-                        plane_int = compute_plane_physics(
-                            vol_int, params, vol_geom, plane_idx,
-                            cfg.pre_window_us, readout_window_us)
-
-                        response_fn = _build_response_fn_diff(params, vol_idx, plane_type)
-                        plane_kernel = response_kernels[vol_idx][plane_type]
-
-                        response_signals[(vol_idx, plane_idx)] = compute_plane_signal(
-                            plane_int, response_fn, n_segments,
+                    if cfg.use_bucketed:
+                        ptc, num_active, ctk, B1, B2 = compute_bucket_maps(
+                            plane_int, vol_geom, plane_idx, cfg, plane_kernel)
+                        response_buckets = compute_plane_signal_bucketed(
+                            plane_int, response_fn, vol_deps.n_actual,
+                            cfg.response_chunk_size,
+                            ptc, cfg.max_active_buckets, B1, B2,
+                            cfg, vol_geom, plane_idx, plane_kernel)
+                        response_signal = (response_buckets, num_active, ctk, B1, B2)
+                    else:
+                        response_signal = compute_plane_signal(
+                            plane_int, response_fn, vol_deps.n_actual,
                             cfg.response_chunk_size,
                             cfg, vol_geom, plane_idx, plane_kernel)
 
-                return response_signals
+                    response_signal = electronics_fn(
+                        response_signal, plane_idx,
+                        vol_geom.num_wires[plane_idx], cfg.num_time_steps)
+                    response_signal = noise_fn(
+                        plane_keys[plane_idx], response_signal, plane_idx,
+                        vol_geom.num_wires[plane_idx], cfg.num_time_steps)
+                    response_signal = digitize_fn(response_signal, plane_idx)
+                    plane_signals.append(response_signal)
+
+                # Stack plane signals
+                if cfg.use_bucketed:
+                    stacked_signal = (
+                        jnp.stack([s[0] for s in plane_signals]),
+                        jnp.stack([s[1] for s in plane_signals]),
+                        jnp.stack([s[2] for s in plane_signals]))
+                else:
+                    # Pad to max wires so planes can be stacked
+                    max_w = max(vol_geom.num_wires)
+                    padded = [jnp.pad(s, ((0, max_w - s.shape[0]), (0, 0)))
+                              for s in plane_signals]
+                    stacked_signal = (jnp.stack(padded),)
+
+                # Track hits
+                if include_track_hits:
+                    vol_qs = compute_qs_fractions(
+                        vol_int.charges, vol_deps.group_ids, total_pad)
+                    hits_list = []
+                    for plane_idx in range(n_planes):
+                        hits = track_hits_fn(
+                            plane_intermediates[plane_idx], vol_deps, vol_geom,
+                            plane_idx, vol_deps.n_actual)
+                        hits_list.append(hits)
+                    stacked_hits = tuple(
+                        jnp.stack([h[i] for h in hits_list])
+                        for i in range(len(hits_list[0])))
+                else:
+                    vol_qs = jnp.zeros(total_pad, dtype=jnp.float32)
+                    stacked_hits = ()
+
+                return stacked_signal, stacked_hits, vol_qs, vol_int.charges, vol_int.photons
+
+        # ── Production JIT ──
+        @jax.jit
+        def _calculator_jit(sim_params, stacked_deps, noise_key):
+            vol_keys = jax.random.split(noise_key, n_volumes)
+            fn = lambda deps, key: process_one_volume(deps, key, sim_params)
+            return iterate(fn, (stacked_deps, vol_keys))
+
+        self._calculator_jit = _calculator_jit
+
+        # ── Light-only JIT ──
+        def light_one_volume(vol_deps, sim_params):
+            sce_fn = sce_factory()
+            vol_int = compute_volume_physics(
+                vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
+            return vol_int.charges, vol_int.photons, vol_int.positions_cm
+
+        @jax.jit
+        def _light_calculator_jit(sim_params, stacked_deps):
+            fn = lambda deps: light_one_volume(deps, sim_params)
+            return iterate(fn, (stacked_deps,))
+
+        self._light_calculator_jit = _light_calculator_jit
+
+        # ── Differentiable path ──
+        if self.n_segments is not None and self._readout_type == 'wire':
+            n_segments = self.n_segments
+
+            def diff_one_volume(vol_deps, sim_params):
+                sce_fn = sce_factory()
+                vol_int = compute_volume_physics(
+                    vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
+
+                readout_window_us = cfg.num_time_steps * cfg.time_step_us
+                plane_signals = []
+                for plane_idx in range(vol_geom.n_planes):
+                    plane_type = _PLANE_LABELS[plane_idx]
+                    plane_int = compute_plane_physics(
+                        vol_int, sim_params, vol_geom, plane_idx,
+                        cfg.pre_window_us, readout_window_us)
+                    response_fn = _build_response_fn_diff(sim_params, plane_type)
+                    plane_kernel = kernels[plane_type]
+                    signal = compute_plane_signal(
+                        plane_int, response_fn, n_segments,
+                        cfg.response_chunk_size,
+                        cfg, vol_geom, plane_idx, plane_kernel)
+                    plane_signals.append(signal)
+                max_w = max(vol_geom.num_wires)
+                padded = [jnp.pad(s, ((0, max_w - s.shape[0]), (0, 0)))
+                          for s in plane_signals]
+                return jnp.stack(padded)
+
+            @jax.remat
+            def _forward_diff(params, stacked_deps):
+                fn = lambda deps: diff_one_volume(deps, params)
+                return iterate(fn, (stacked_deps,))
 
             self._forward_diff = _forward_diff
+
+    # =====================================================================
+    # PUBLIC API
+    # =====================================================================
 
     def __call__(self, deposits: DepositData, key=None):
         return self.process_event(deposits, key=key)
@@ -634,6 +620,7 @@ class DetectorSimulator:
         ----------
         deposits : DepositData
             Pre-split, padded, grouped deposits from build_deposit_data or load_event.
+            Positions must be in local coordinates.
         sim_params : SimParams, optional
         key : jax PRNGKey, optional
 
@@ -644,30 +631,93 @@ class DetectorSimulator:
         track_hits : dict
             Keyed by (vol_idx, plane_idx). Contains raw merge state.
         deposits : DepositData
-            Input deposits with charge, photons, qs_fractions filled from simulation.
+            Input deposits with charge, photons, qs_fractions filled.
         """
         if sim_params is None:
             sim_params = self._default_sim_params
 
         noise_key = key if key is not None else jax.random.PRNGKey(0)
+        cfg = self._sim_config
+        n_volumes = cfg.n_volumes
+        n_readouts = cfg.volumes[0].n_planes if self._readout_type == 'wire' else 1
 
-        response_signals, track_hits, qs_per_vol, charges_per_vol, photons_per_vol = \
-            self._calculator_jit_raw(sim_params, deposits.volumes, noise_key)
+        # Stack and run
+        stacked_deps = jax.tree.map(lambda *xs: jnp.stack(xs), *deposits.volumes)
+        raw_out = self._calculator_jit(sim_params, stacked_deps, noise_key)
+        stacked_signal, stacked_hits, all_qs, all_charges, all_photons = raw_out
 
-        # Stitch Q, L, qs back into VolumeDeposits
+        # Unstack signals
+        response_signals = {}
+        if cfg.use_bucketed:
+            out_buckets, out_num_active, out_ctk = stacked_signal
+            if self._readout_type == 'wire':
+                pk = self.response_kernels[cfg.plane_names[0][0]]
+                B1 = 2 * pk.num_wires
+                B2 = 2 * pk.kernel_height
+                for v in range(n_volumes):
+                    for p in range(n_readouts):
+                        response_signals[(v, p)] = (
+                            out_buckets[v, p], out_num_active[v, p],
+                            out_ctk[v, p], B1, B2)
+            else:
+                pk = self.response_kernels
+                B1 = 2 * pk.kernel_py
+                B2 = 2 * pk.kernel_pz
+                B3 = 2 * pk.kernel_time
+                for v in range(n_volumes):
+                    response_signals[(v, 0)] = (
+                        out_buckets[v, 0], out_num_active[v, 0],
+                        out_ctk[v, 0], B1, B2, B3)
+
+            # Check for max_active_buckets overflow
+            for (v, p), sig in response_signals.items():
+                na = int(sig[1])
+                if na >= cfg.max_active_buckets:
+                    raise RuntimeError(
+                        f"Bucket overflow vol {v} plane {p}: "
+                        f"num_active={na:,} >= max_active_buckets={cfg.max_active_buckets:,}. "
+                        f"Increase --max-buckets.")
+        else:
+            (out_dense,) = stacked_signal
+            vol_geom = cfg.volumes[0]
+            for v in range(n_volumes):
+                for p in range(n_readouts):
+                    n_wires = vol_geom.num_wires[p] if self._readout_type == 'wire' else vol_geom.pixel_shape[0]
+                    response_signals[(v, p)] = out_dense[v, p, :n_wires]
+
+        # Unstack track hits
+        track_hits = {}
+        if cfg.include_track_hits and len(stacked_hits) > 0:
+            for v in range(n_volumes):
+                for p in range(n_readouts):
+                    track_hits[(v, p)] = tuple(
+                        stacked_hits[i][v, p] for i in range(len(stacked_hits)))
+            track_hits['group_to_track'] = deposits.group_to_track
+
+            # Check for max_keys overflow
+            if cfg.track_hits is not None:
+                max_keys = cfg.track_hits.max_keys
+                for key, raw in track_hits.items():
+                    if not isinstance(key, tuple):
+                        continue
+                    v, p = key
+                    count = int(raw[4])
+                    if count >= max_keys:
+                        raise RuntimeError(
+                            f"track_hits overflow vol {v} plane {p}: "
+                            f"count={count:,} >= max_keys={max_keys:,}. "
+                            f"Increase --max-keys or run profiler.setup_production.")
+
+        # Rebuild filled deposits
         filled_volumes = tuple(
             vol._replace(
-                charge=charges_per_vol[v],
-                photons=photons_per_vol[v],
-                qs_fractions=qs_per_vol[v],
+                charge=all_charges[v],
+                photons=all_photons[v],
+                qs_fractions=all_qs[v],
             )
             for v, vol in enumerate(deposits.volumes)
         )
         filled_deposits = deposits._replace(volumes=filled_volumes)
-
-        # Bundle per-volume group_to_track for finalize_track_hits
-        if self._sim_config.include_track_hits:
-            track_hits['group_to_track'] = deposits.group_to_track
 
         return response_signals, track_hits, filled_deposits
 
@@ -679,28 +729,28 @@ class DetectorSimulator:
         if sim_params is None:
             sim_params = self._default_sim_params
 
-        results = self._light_calculator_jit(sim_params, deposits.volumes)
+        stacked_deps = jax.tree.map(lambda *xs: jnp.stack(xs), *deposits.volumes)
+        all_charges, all_photons, all_positions = self._light_calculator_jit(
+            sim_params, stacked_deps)
+
         filled_volumes = tuple(
-            vol._replace(charge=results[v][0], photons=results[v][1])
+            vol._replace(charge=all_charges[v], photons=all_photons[v])
             for v, vol in enumerate(deposits.volumes)
         )
         return deposits._replace(volumes=filled_volumes)
 
     def finalize_track_hits(self, track_hits):
-        """Derive track labels from raw group merge state.
-
-        Uses per-volume group_to_track from DepositData (stored in track_hits
-        by process_event).
-        """
+        """Derive track labels from raw group merge state."""
         group_to_track_per_vol = track_hits.pop('group_to_track')
         result = {}
         for (vol_idx, plane_idx), raw in track_hits.items():
             g2t = group_to_track_per_vol[vol_idx]
             from tools.track_hits import label_from_groups
-            state_pk, state_gid, state_ch, state_count, row_sums = raw
+            state_sk, state_tk, state_gk, state_ch, state_count, row_sums = raw
+            decode_fn = self._spatial_decode_fns.get((vol_idx, plane_idx))
             labeled = label_from_groups(
-                state_pk, state_gid, state_ch, state_count,
-                g2t, self._sim_config.num_time_steps)
+                state_sk, state_tk, state_gk, state_ch, state_count,
+                g2t, decode_spatial_fn=decode_fn)
             labeled['row_sums'] = row_sums
             result[(vol_idx, plane_idx)] = labeled
         return result
@@ -746,10 +796,14 @@ class DetectorSimulator:
             qs_fractions=jnp.zeros(pad, dtype=jnp.float32),
             n_actual=0,
         )
-        dummy_volumes = tuple(dummy_vol for _ in range(n_vol))
-        _ = self._calculator_jit_raw(
-            self._default_sim_params, dummy_volumes, jax.random.PRNGKey(0))
-        print(f"JIT compilation finished (total_pad={pad:,}).")
+        stacked_dummy = jax.tree.map(
+            lambda x: jnp.broadcast_to(
+                jnp.asarray(x)[None],
+                (n_vol,) + jnp.asarray(x).shape),
+            dummy_vol)
+        _ = self._calculator_jit(
+            self._default_sim_params, stacked_dummy, jax.random.PRNGKey(0))
+        print(f"JIT compilation finished (total_pad={pad:,}, iterate={self._volume_mode}).")
 
     def forward(self, params, deposits):
         """Differentiable forward pass.
@@ -758,26 +812,27 @@ class DetectorSimulator:
         ----------
         params : SimParams
         deposits : DepositData
-            From build_deposit_data or create_deposit_data. Must be padded
-            to total_pad.
+            Must be in local coordinates and padded to total_pad.
 
         Returns
         -------
         tuple of signal arrays, one per (vol_idx, plane_idx).
         """
-        deposits = pad_deposit_data(deposits, self._sim_config.total_pad)
-        response_signals = self._forward_diff(params, deposits.volumes)
+        cfg = self._sim_config
+        deposits = pad_deposit_data(deposits, cfg.total_pad)
+        stacked_deps = jax.tree.map(lambda *xs: jnp.stack(xs), *deposits.volumes)
+        all_signals = self._forward_diff(params, stacked_deps)
+        # all_signals shape: (n_volumes, n_planes, num_wires, num_time)
         return tuple(
-            response_signals[(v, p)]
-            for v in range(self._sim_config.n_volumes)
-            for p in range(self._sim_config.volumes[v].n_planes))
+            all_signals[v, p]
+            for v in range(cfg.n_volumes)
+            for p in range(cfg.volumes[v].n_planes))
 
     def forward_segments(self, params, positions_mm, de, dx):
         """Lightweight differentiable forward for segment-like data.
 
-        Can be called inside jax.grad — uses JAX ops for volume assignment
-        (no numpy splitting). Each volume sees all deposits but masks by
-        position range. Padding via n_actual mask after recombination.
+        Positions are in GLOBAL coordinates — transformed to local per volume
+        internally. Can be called inside jax.grad.
         """
         cfg = self._sim_config
         total_pad = cfg.total_pad
@@ -794,42 +849,43 @@ class DetectorSimulator:
         padded_pos = _pad(positions_mm)
         padded_de = _pad(de)
         padded_dx = _pad(dx_arr, pad_val=1.0)
-        padded_theta = jnp.zeros(total_pad)
-        padded_phi = jnp.zeros(total_pad)
-        padded_tids = jnp.full(total_pad, -1, dtype=jnp.int32)
-        padded_gids = jnp.zeros(total_pad, dtype=jnp.int32)
-        padded_t0 = jnp.zeros(total_pad)
 
-        # Build per-volume VolumeDeposits using position-based masking
-        # Each volume sees ALL deposits but masks de to zero for out-of-range positions
+        # Build per-volume deposits with local coordinate transform
         x_cm = padded_pos[:, 0] / 10.0
         volumes = []
         for vol_idx in range(cfg.n_volumes):
             vol = cfg.volumes[vol_idx]
             x_min, x_max = vol.ranges_cm[0]
             vol_mask = (x_cm >= x_min) & (x_cm < x_max)
-            # Mask de — out-of-range deposits get de=0, producing zero charges
             masked_de = padded_de * vol_mask
+
+            # Transform to local coordinates
+            x_local = vol.drift_direction * (vol.x_anode_cm * 10.0 - padded_pos[:, 0])
+            y_local = padded_pos[:, 1] - vol.yz_center_cm[0] * 10.0
+            z_local = padded_pos[:, 2] - vol.yz_center_cm[1] * 10.0
+            local_pos = jnp.stack([x_local, y_local, z_local], axis=1)
+
             volumes.append(VolumeDeposits(
-                positions_mm=padded_pos,
+                positions_mm=local_pos,
                 de=masked_de,
                 dx=padded_dx,
-                theta=padded_theta,
-                phi=padded_phi,
-                track_ids=padded_tids,
-                group_ids=padded_gids,
-                t0_us=padded_t0,
+                theta=jnp.zeros(total_pad),
+                phi=jnp.zeros(total_pad),
+                track_ids=jnp.full(total_pad, -1, dtype=jnp.int32),
+                group_ids=jnp.zeros(total_pad, dtype=jnp.int32),
+                t0_us=jnp.zeros(total_pad),
                 interaction_ids=jnp.full(total_pad, -1, dtype=jnp.int16),
                 ancestor_track_ids=jnp.full(total_pad, -1, dtype=jnp.int32),
                 pdg=jnp.zeros(total_pad, dtype=jnp.int32),
                 charge=jnp.zeros(total_pad),
                 photons=jnp.zeros(total_pad),
                 qs_fractions=jnp.zeros(total_pad),
-                n_actual=total_pad,  # static — process all (masking handles zeros)
+                n_actual=total_pad,
             ))
 
-        response_signals = self._forward_diff(params, tuple(volumes))
+        stacked_deps = jax.tree.map(lambda *xs: jnp.stack(xs), *volumes)
+        all_signals = self._forward_diff(params, stacked_deps)
         return tuple(
-            response_signals[(v, p)]
+            all_signals[v, p]
             for v in range(cfg.n_volumes)
             for p in range(cfg.volumes[v].n_planes))

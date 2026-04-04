@@ -17,6 +17,7 @@ Usage (from project root):
 
 import argparse
 import os
+import subprocess
 import sys
 import time
 import gc
@@ -40,10 +41,26 @@ from tools.loader import ParticleStepExtractor, build_deposit_data, compute_inte
 from production.save import (
     write_config_resp, write_config_seg, write_config_corr,
     save_event_resp, save_event_seg, save_event_corr,
-    encode_correspondence_csr, _plane_label,
+    encode_correspondence_csr, encode_correspondence_csr_pixel, _plane_label,
 )
 
 sys.stdout.reconfigure(line_buffering=True)
+
+
+def _get_git_info():
+    """Get repo URL, commit hash, and dirty status from git."""
+    def _run(cmd):
+        try:
+            return subprocess.check_output(
+                cmd, stderr=subprocess.DEVNULL, cwd=os.path.dirname(__file__)
+            ).decode().strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return None
+    repo = _run(['git', 'remote', 'get-url', 'origin'])
+    commit = _run(['git', 'rev-parse', 'HEAD'])
+    dirty_output = _run(['git', 'status', '--porcelain'])
+    dirty = dirty_output is not None and len(dirty_output) > 0
+    return repo, commit, dirty
 
 
 # =============================================================================
@@ -117,6 +134,12 @@ def main():
     parser.add_argument('--electronics', action='store_true', help='Enable electronics response')
     parser.add_argument('--no-digitize', action='store_true', help='Disable ADC digitization')
     parser.add_argument('--no-track-hits', action='store_true', help='Disable track correspondence')
+    parser.add_argument('--max-keys', type=int, default=4_000_000,
+                        help='Max unique hits for track labeling (default: 4M)')
+    parser.add_argument('--hits-chunk', type=int, default=25_000,
+                        help='Deposits per track-hits fori_loop chunk (must divide total-pad)')
+    parser.add_argument('--inter-thresh', type=float, default=1.0,
+                        help='Track hits intermediate pruning threshold (default: 1.0)')
     parser.add_argument('--sce', default=None, help='Path to SCE HDF5 map for E-field distortions')
     # Grouping
     parser.add_argument('--group-size', type=int, default=5)
@@ -125,10 +148,24 @@ def main():
     parser.add_argument('--corr-threshold', type=float, default=25.0,
                         help='Charge threshold in electrons for correspondence entries (default: 25)')
     parser.add_argument('--total-pad', type=int, default=500_000)
+    parser.add_argument('--response-chunk', type=int, default=50_000,
+                        help='Deposits per fori_loop batch (must divide total-pad)')
+    parser.add_argument('--bucketed', action='store_true', help='Use bucketed accumulation')
+    parser.add_argument('--max-buckets', type=int, default=1000,
+                        help='Max active buckets per plane (bucketed mode)')
     parser.add_argument('--workers', type=int, default=2,
                         help='Number of save worker threads (0=serial, default: 2)')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--production-config', default=None,
+                        help='Load optimized params from profiler config YAML')
     args = parser.parse_args()
+
+    # Apply production config (overrides defaults, CLI args re-override)
+    if args.production_config:
+        from profiler.production_config import load_config, apply_to_args
+        prod_cfg = load_config(args.production_config)
+        apply_to_args(args, prod_cfg)
+        print(f'  Loaded production config: {args.production_config}')
 
     include_noise = args.noise
     include_electronics = args.electronics
@@ -167,6 +204,7 @@ def main():
     print(f'  Track hits:    {"ON" if include_track_hits else "OFF"}')
     print(f'  Group size:    {args.group_size}')
     print(f'  Total pad:     {args.total_pad:,}')
+    print(f'  Bucketed:      {"ON (max_buckets=" + str(args.max_buckets) + ")" if args.bucketed else "OFF"}')
     print(f'  Workers:       {args.workers} {"(serial)" if args.workers == 0 else "(threaded)"}')
     print(f'  Device:        {jax.devices()[0]}')
     print(f'  Output:        {args.outdir}/{{resp,seg,corr}}/')
@@ -174,13 +212,19 @@ def main():
 
     # ---- Create simulator ----
     detector_config = generate_detector(args.config)
-    track_config = create_track_hits_config() if include_track_hits else None
+    track_config = create_track_hits_config(
+        max_keys=args.max_keys, hits_chunk_size=args.hits_chunk,
+        inter_thresh=args.inter_thresh,
+    ) if include_track_hits else None
 
     t_create = time.time()
     simulator = DetectorSimulator(
         detector_config,
         track_config=track_config,
         total_pad=args.total_pad,
+        response_chunk_size=args.response_chunk,
+        use_bucketed=args.bucketed,
+        max_active_buckets=args.max_buckets,
         include_noise=include_noise,
         include_electronics=include_electronics,
         include_track_hits=include_track_hits,
@@ -214,6 +258,22 @@ def main():
     gc.collect()
     print(f" {time.time() - t0:.1f}s\n")
 
+    # ---- Run ID (unique per invocation) ----
+    run_id = int(time.time())
+    run_timestamp = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(run_id))
+    print(f'  Run ID:        {run_id} ({run_timestamp} UTC)')
+
+    # ---- Git provenance ----
+    git_repo, git_commit, git_dirty = _get_git_info()
+    git_info = {}
+    if git_repo:
+        git_info['git_repo'] = git_repo
+    if git_commit:
+        git_info['git_commit'] = git_commit
+    git_info['git_dirty'] = git_dirty
+    print(f'  Git commit:    {git_commit[:12] if git_commit else "unknown"}'
+          f'{"  (dirty)" if git_dirty else ""}')
+
     # ---- Save helpers ----
     key = jax.random.PRNGKey(args.seed)
     total_start = time.time()
@@ -232,17 +292,25 @@ def main():
             for plane_key, raw in track_hits_raw.items():
                 if not isinstance(plane_key, tuple):
                     continue
-                pk, gid, ch, count, _ = raw
-                corr_data[plane_key] = encode_correspondence_csr(
-                    pk, gid, ch, count, cfg.num_time_steps,
-                    threshold=args.corr_threshold)
+                vol_idx, plane_idx = plane_key
+                sk, tk, gid, ch, count, _ = raw
+                if cfg.volumes[vol_idx].readout_type == 'pixel':
+                    num_pz = cfg.volumes[vol_idx].pixel_shape[1]
+                    corr_data[plane_key] = encode_correspondence_csr_pixel(
+                        sk, tk, gid, ch, count, num_pz,
+                        threshold=args.corr_threshold)
+                else:
+                    pk = sk * cfg.num_time_steps + tk
+                    corr_data[plane_key] = encode_correspondence_csr(
+                        pk, gid, ch, count, cfg.num_time_steps,
+                        threshold=args.corr_threshold)
 
         # HDF5 write (serialized through file lock)
         with file_lock:
             save_event_resp(f_resp, event_key, response_np, threshold_adc,
-                            source_idx, deposits,
+                            source_idx, deposits, cfg=cfg,
                             digitized=include_digitize)
-            save_event_seg(f_seg, event_key, deposits, source_idx)
+            save_event_seg(f_seg, event_key, deposits, source_idx, cfg=cfg)
             if corr_data is not None and f_corr is not None:
                 _write_corr_event(f_corr, event_key, corr_data,
                                   deposits, source_idx)
@@ -263,11 +331,13 @@ def main():
             for (vi, pi), csr in corr_data.items():
                 if vi != v:
                     continue
-                g = vol_grp.create_group(_plane_label(pi))
+                g = vol_grp.create_group(_plane_label(pi, vi, cfg))
                 for k, arr in csr.items():
                     g.create_dataset(k, data=arr, compression='gzip')
                 g.attrs['n_groups_plane'] = len(csr['group_ids'])
-                g.attrs['n_entries'] = len(csr['delta_wires'])
+                # delta key name differs: wire uses 'delta_wires', pixel uses 'delta_py'
+                delta_key = 'delta_py' if 'delta_py' in csr else 'delta_wires'
+                g.attrs['n_entries'] = len(csr[delta_key])
 
     def save_worker(f_resp, f_seg, f_corr, save_queue):
         """Worker thread: pull items from queue, encode + save."""
@@ -304,16 +374,19 @@ def main():
                         f_resp, cfg, params, simulator.recomb_model,
                         dataset_name, file_idx, args.data,
                         n_in_file, event_start, threshold_adc,
-                        digitization_config=dig_config)
+                        digitization_config=dig_config,
+                        run_id=run_id, git_info=git_info)
                     write_config_seg(
                         f_seg, cfg, dataset_name, file_idx, args.data,
                         n_in_file, event_start,
-                        args.group_size, args.gap_threshold)
+                        args.group_size, args.gap_threshold,
+                        run_id=run_id, git_info=git_info)
                     if f_corr_ctx:
                         write_config_corr(
                             f_corr_ctx, cfg, dataset_name, file_idx, args.data,
                             n_in_file, event_start,
-                            args.group_size, args.gap_threshold)
+                            args.group_size, args.gap_threshold,
+                            run_id=run_id, git_info=git_info)
 
                     # Start workers (if threaded)
                     save_queue = None
@@ -349,10 +422,18 @@ def main():
                             jax.block_until_ready(arr)
                         t_sim = time.time() - t_sim
 
-                        # GPU → CPU transfer for signals (large arrays)
-                        # track_hits and qs_per_volume convert lazily in save fns
-                        response_np = {k: np.asarray(v)
-                                       for k, v in response_signals.items()}
+                        # Convert all formats → sparse before saving
+                        from tools.output import to_sparse
+                        response_signals = to_sparse(
+                            response_signals, cfg, threshold_adc=threshold_adc)
+
+                        # GPU → CPU transfer for signals
+                        response_np = {}
+                        for k, v in response_signals.items():
+                            if isinstance(v, dict):
+                                response_np[k] = {fk: np.asarray(fv) for fk, fv in v.items()}
+                            else:
+                                response_np[k] = np.asarray(v)
 
                         item = (event_key, response_np, track_hits, deposits, idx)
 
