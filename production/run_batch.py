@@ -208,10 +208,13 @@ def main():
     print(f'  Workers:       {args.workers} {"(serial)" if args.workers == 0 else "(threaded)"}')
     print(f'  Device:        {jax.devices()[0]}')
     print(f'  Output:        {args.outdir}/{{resp,seg,corr}}/')
-    print()
 
     # ---- Create simulator ----
     detector_config = generate_detector(args.config)
+    readout_type = detector_config['volumes'][0].get('readout', {}).get('type', 'wire')
+    print(f'  Readout:       {readout_type}')
+    print()
+
     track_config = create_track_hits_config(
         max_keys=args.max_keys, hits_chunk_size=args.hits_chunk,
         inter_thresh=args.inter_thresh,

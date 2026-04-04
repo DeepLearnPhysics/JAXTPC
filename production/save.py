@@ -61,6 +61,7 @@ def write_config_resp(f, cfg, params, recomb_model, dataset_name, file_index,
     g.attrs['include_digitize'] = cfg.include_digitize
     g.attrs['threshold_adc'] = threshold_adc
     g.attrs['n_volumes'] = cfg.n_volumes
+    g.attrs['readout_type'] = cfg.volumes[0].readout_type
     # Store num_wires per (volume, plane)
     max_planes = max(v.n_planes for v in cfg.volumes)
     num_wires = np.zeros((cfg.n_volumes, max_planes), dtype=np.int32)
@@ -105,6 +106,7 @@ def write_config_seg(f, cfg, dataset_name, file_index, source_file,
     g.attrs['group_size'] = group_size
     g.attrs['gap_threshold_mm'] = gap_threshold_mm
     g.attrs['n_volumes'] = cfg.n_volumes
+    g.attrs['readout_type'] = cfg.volumes[0].readout_type
     max_planes = max(v.n_planes for v in cfg.volumes)
     num_wires = np.zeros((cfg.n_volumes, max_planes), dtype=np.int32)
     for v in range(cfg.n_volumes):
@@ -138,6 +140,7 @@ def write_config_corr(f, cfg, dataset_name, file_index, source_file,
     g.attrs['pre_window_us'] = cfg.pre_window_us
     g.attrs['post_window_us'] = cfg.post_window_us
     g.attrs['n_volumes'] = cfg.n_volumes
+    g.attrs['readout_type'] = cfg.volumes[0].readout_type
     max_planes = max(v.n_planes for v in cfg.volumes)
     num_wires = np.zeros((cfg.n_volumes, max_planes), dtype=np.int32)
     for v in range(cfg.n_volumes):

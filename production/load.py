@@ -66,6 +66,7 @@ def build_viz_config(resp_path):
     Only requires the response file — no YAML or generate_detector needed.
     """
     meta = load_config(resp_path)
+    readout_type = meta.get('readout_type', 'wire')
     nw = meta['num_wires_arr']
     n_vol = nw.shape[0]
     n_planes = nw.shape[1]
@@ -78,7 +79,9 @@ def build_viz_config(resp_path):
     )
     _PLANE_LABELS = ('U', 'V', 'Y')
     plane_names = tuple(
-        tuple(_PLANE_LABELS[:vol.n_planes]) for vol in volumes)
+        ('Pixel',) if readout_type == 'pixel'
+        else tuple(_PLANE_LABELS[:vol.n_planes])
+        for vol in volumes)
     return _ConfigMin(
         volumes=volumes,
         n_volumes=n_vol,
