@@ -18,6 +18,7 @@ from tools.wires import (
     compute_angular_scaling_vmap,
     compute_deposit_wire_angles_vmap,
     prepare_deposit_with_diffusion,
+    prepare_pixel_deposit_with_diffusion,
 )
 
 
@@ -234,29 +235,35 @@ def label_hits(hits_by_track, num_stored, track_ids_at_boundaries,
     return labeled_hits, num_labeled
 
 
-def merge_chunk_hits(state_pk, state_tr, state_ch,
-                     chunk_pk, chunk_tr, chunk_ch,
-                     inter_thresh):
+def merge_chunk_sensor_hits(state_sk, state_tk, state_gk, state_ch,
+                            chunk_sk, chunk_tk, chunk_gk, chunk_ch,
+                            inter_thresh):
     """
     Merge a chunk of expanded hits into running state via sort-aggregate-compact.
 
-    Uses two-pass stable sort (int32) to achieve (pixel_key, track) ordering,
-    then segment_sum to aggregate charges, followed by compaction.
+    Uses three-pass stable sort (all int32) to achieve (spatial_key, time_key,
+    group_id) lexicographic ordering. Works for both wire and pixel readout:
+      wire:  spatial_key = wire_idx
+      pixel: spatial_key = py * max_pz + pz
 
     Called from within JIT context (not separately decorated).
 
     Parameters
     ----------
-    state_pk : jnp.ndarray, shape (max_keys,), int32
-        Running pixel keys (wire * max_time + time). Sentinels = 2^30.
-    state_tr : jnp.ndarray, shape (max_keys,), int32
-        Running track IDs.
+    state_sk : jnp.ndarray, shape (max_keys,), int32
+        Running spatial keys. Sentinels = 2^30.
+    state_tk : jnp.ndarray, shape (max_keys,), int32
+        Running time indices.
+    state_gk : jnp.ndarray, shape (max_keys,), int32
+        Running group IDs.
     state_ch : jnp.ndarray, shape (max_keys,), float32
         Running charges.
-    chunk_pk : jnp.ndarray, shape (exp_size,), int32
-        New chunk pixel keys.
-    chunk_tr : jnp.ndarray, shape (exp_size,), int32
-        New chunk track IDs.
+    chunk_sk : jnp.ndarray, shape (exp_size,), int32
+        New chunk spatial keys.
+    chunk_tk : jnp.ndarray, shape (exp_size,), int32
+        New chunk time indices.
+    chunk_gk : jnp.ndarray, shape (exp_size,), int32
+        New chunk group IDs.
     chunk_ch : jnp.ndarray, shape (exp_size,), float32
         New chunk charges.
     inter_thresh : float
@@ -264,30 +271,35 @@ def merge_chunk_hits(state_pk, state_tr, state_ch,
 
     Returns
     -------
-    new_pk, new_tr, new_ch : jnp.ndarray, shape (max_keys,)
+    new_sk, new_tk, new_gk, new_ch : jnp.ndarray, shape (max_keys,)
         Compacted state arrays.
     count : jnp.int32
         Number of valid entries in compacted state.
     """
-    SENTINEL_PK = jnp.int32(2**30)
-    max_keys = state_pk.shape[0]
-    merge_size = max_keys + chunk_pk.shape[0]
+    SENTINEL = jnp.int32(2**30)
+    max_keys = state_sk.shape[0]
+    merge_size = max_keys + chunk_sk.shape[0]
 
-    all_pk = jnp.concatenate([state_pk, chunk_pk])
-    all_tr = jnp.concatenate([state_tr, chunk_tr])
+    all_sk = jnp.concatenate([state_sk, chunk_sk])
+    all_tk = jnp.concatenate([state_tk, chunk_tk])
+    all_gk = jnp.concatenate([state_gk, chunk_gk])
     all_ch = jnp.concatenate([state_ch, chunk_ch])
 
-    # Two-pass stable sort: by track (secondary), then pixel_key (primary)
-    _, idx = jax.lax.sort_key_val(all_tr, jnp.arange(merge_size, dtype=jnp.int32))
-    _, sidx = jax.lax.sort_key_val(all_pk[idx], idx)
-    sorted_pk = all_pk[sidx]
-    sorted_tr = all_tr[sidx]
-    sorted_ch = all_ch[sidx]
+    # Three-pass stable sort: group (tertiary) → time (secondary) → spatial (primary)
+    _, idx1 = jax.lax.sort_key_val(all_gk, jnp.arange(merge_size, dtype=jnp.int32))
+    _, idx2 = jax.lax.sort_key_val(all_tk[idx1], idx1)
+    _, idx3 = jax.lax.sort_key_val(all_sk[idx2], idx2)
 
-    # Boundary: new segment where pixel_key or track changes
+    sorted_sk = all_sk[idx3]
+    sorted_tk = all_tk[idx3]
+    sorted_gk = all_gk[idx3]
+    sorted_ch = all_ch[idx3]
+
+    # Boundary: new segment where any key changes
     boundaries = jnp.ones(merge_size, dtype=bool).at[1:].set(
-        (sorted_pk[1:] != sorted_pk[:-1]) |
-        (sorted_tr[1:] != sorted_tr[:-1])
+        (sorted_sk[1:] != sorted_sk[:-1]) |
+        (sorted_tk[1:] != sorted_tk[:-1]) |
+        (sorted_gk[1:] != sorted_gk[:-1])
     )
     seg_ids = jnp.cumsum(boundaries) - 1
     summed = jax.ops.segment_sum(sorted_ch, seg_ids, num_segments=merge_size)
@@ -295,18 +307,19 @@ def merge_chunk_hits(state_pk, state_tr, state_ch,
 
     # Filter: segment ends, exclude sentinels, apply intermediate threshold
     seg_ends = jnp.roll(boundaries, -1).at[-1].set(True)
-    valid_entry = seg_ends & (sorted_pk < SENTINEL_PK) & (agg > inter_thresh)
+    valid_entry = seg_ends & (sorted_sk < SENTINEL) & (agg > inter_thresh)
 
     # Compact into max_keys
     compact_idx = jnp.where(valid_entry, size=max_keys, fill_value=0)[0]
     count = jnp.sum(valid_entry).astype(jnp.int32)
     vmask = jnp.arange(max_keys) < count
 
-    new_pk = jnp.where(vmask, sorted_pk[compact_idx], SENTINEL_PK)
-    new_tr = jnp.where(vmask, sorted_tr[compact_idx], jnp.int32(0))
+    new_sk = jnp.where(vmask, sorted_sk[compact_idx], SENTINEL)
+    new_tk = jnp.where(vmask, sorted_tk[compact_idx], jnp.int32(0))
+    new_gk = jnp.where(vmask, sorted_gk[compact_idx], jnp.int32(0))
     new_ch = jnp.where(vmask, agg[compact_idx], 0.0).astype(jnp.float32)
 
-    return new_pk, new_tr, new_ch, count
+    return new_sk, new_tk, new_gk, new_ch, count
 
 
 def label_merged_hits(state_pk, state_tr, state_ch, state_count,
@@ -453,27 +466,32 @@ def sparse_hits_to_dense(track_hit_result, num_wires, num_time_steps):
     return dense
 
 
-def label_from_groups(state_pk, state_gid, state_ch, state_count,
-                      group_to_track, max_time):
+def label_from_groups(state_sk, state_tk, state_gk, state_ch, state_count,
+                      group_to_track, decode_spatial_fn=None):
     """Derive track hits from group merge state (postprocessing, outside JIT).
 
-    Maps groups → tracks, aggregates per (pixel, track), finds dominant
-    track per pixel. All entries already passed inter_thresh during merge.
+    Maps groups → tracks, aggregates per (sensor_pos, track), finds dominant
+    track per sensor position. Works for both wire and pixel readout.
 
     Parameters
     ----------
-    state_pk : jnp.ndarray, shape (max_keys,), int32
-        Final pixel keys (wire * max_time + time).
-    state_gid : jnp.ndarray, shape (max_keys,), int32
+    state_sk : jnp.ndarray, shape (max_keys,), int32
+        Final spatial keys (wire_idx for wire, py*max_pz+pz for pixel).
+    state_tk : jnp.ndarray, shape (max_keys,), int32
+        Final time indices.
+    state_gk : jnp.ndarray, shape (max_keys,), int32
         Final group IDs.
     state_ch : jnp.ndarray, shape (max_keys,), float32
-        Final charges per (pixel, group).
+        Final charges per (sensor_pos, time, group).
     state_count : jnp.int32
         Number of valid entries.
     group_to_track : np.ndarray, shape (n_groups,), int32
         Lookup: group_to_track[group_id] = track_id.
-    max_time : int
-        Time dimension for decoding pixel_key.
+    decode_spatial_fn : callable, optional
+        Decodes spatial_key → coordinate columns for output.
+        Wire (default): sk → [wire] (1 column).
+        Pixel: sk → [py, pz] (2 columns).
+        Returns np.ndarray of shape (N, n_spatial_dims).
 
     Returns
     -------
@@ -483,61 +501,75 @@ def label_from_groups(state_pk, state_gid, state_ch, state_count,
     import numpy as np_host
 
     count = int(state_count)
-    pks = np_host.asarray(state_pk[:count])
-    gids = np_host.asarray(state_gid[:count])
+    sks = np_host.asarray(state_sk[:count])
+    tks = np_host.asarray(state_tk[:count])
+    gids = np_host.asarray(state_gk[:count])
     chs = np_host.asarray(state_ch[:count])
     g2t = np_host.asarray(group_to_track)
+
+    # Default decode: wire (spatial_key = wire_idx, 1 column)
+    if decode_spatial_fn is None:
+        decode_spatial_fn = lambda sk: sk[:, None]
+
+    if count == 0:
+        n_cols = 3  # minimum: [spatial..., time, charge]
+        empty = np_host.zeros((0, n_cols), dtype=np_host.float32)
+        return {
+            'labeled_hits': empty,
+            'labeled_track_ids': np_host.zeros((0,), dtype=np_host.int32),
+            'num_labeled': 0,
+            'hits_by_track': empty,
+            'num_hits': 0,
+            'group_correspondence': (state_sk[:count], state_tk[:count],
+                                     state_gk[:count], state_ch[:count], count),
+        }
 
     # Map group → track
     tids = g2t[gids]
 
-    # Decode pixel keys
-    wires = pks // max_time
-    times = pks % max_time
-    n_valid = len(pks)
+    # Composite pixel key for boundary detection: spatial * large_prime + time
+    # Only used for sorting/grouping, not stored
+    composite_pk = sks.astype(np_host.int64) * 100000 + tks.astype(np_host.int64)
 
-    if n_valid == 0:
-        empty3 = np_host.zeros((0, 3), dtype=np_host.float32)
-        return {
-            'labeled_hits': empty3,
-            'labeled_track_ids': np_host.zeros((0,), dtype=np_host.int32),
-            'num_labeled': 0,
-            'hits_by_track': empty3,
-            'num_hits': 0,
-            'group_correspondence': (state_pk[:count], state_gid[:count],
-                                     state_ch[:count], count),
-        }
-
-    # Aggregate by (pixel, track): sum group charges per track at each pixel
-    # Two-pass stable sort: by track (secondary), then pixel (primary)
+    # Aggregate by (sensor_pos, time, track): sum group charges per track
+    # Two-pass stable sort: by track (secondary), then composite pixel (primary)
     order1 = np_host.argsort(tids, kind='stable')
-    order2 = np_host.argsort(pks[order1], kind='stable')
+    order2 = np_host.argsort(composite_pk[order1], kind='stable')
     order = order1[order2]
-    s_pks = pks[order]
+    s_sks = sks[order]
+    s_tks = tks[order]
     s_tids = tids[order]
     s_chs = chs[order]
-    s_wires = wires[order]
-    s_times = times[order]
+    s_cpk = composite_pk[order]
 
     # (pixel, track) boundaries
+    n_valid = len(sks)
     pt_boundary = np_host.ones(n_valid, dtype=bool)
-    pt_boundary[1:] = (s_pks[1:] != s_pks[:-1]) | (s_tids[1:] != s_tids[:-1])
+    pt_boundary[1:] = (s_cpk[1:] != s_cpk[:-1]) | (s_tids[1:] != s_tids[:-1])
     pt_starts = np_host.where(pt_boundary)[0]
     n_pt = len(pt_starts)
 
-    # Sum charges within each (pixel, track) group
+    # Sum charges within each (sensor_pos, time, track) group
     pt_charges = np_host.add.reduceat(s_chs, pt_starts)
-    pt_wires = s_wires[pt_starts]
-    pt_times = s_times[pt_starts]
+    pt_sks = s_sks[pt_starts]
+    pt_tks = s_tks[pt_starts]
     pt_tracks = s_tids[pt_starts]
-    pt_pks = s_pks[pt_starts]
+    pt_cpks = s_cpk[pt_starts]
 
-    hits_by_track = np_host.stack(
-        [pt_wires, pt_times, pt_charges], axis=1).astype(np_host.float32)
+    # Decode spatial keys to coordinate columns
+    spatial_cols = decode_spatial_fn(pt_sks)  # (n_pt, n_spatial_dims)
+    time_col = pt_tks.astype(np_host.float32)
+    charge_col = pt_charges.astype(np_host.float32)
 
-    # Find dominant track per pixel
+    hits_by_track = np_host.column_stack([
+        spatial_cols.astype(np_host.float32),
+        time_col[:, None],
+        charge_col[:, None],
+    ])
+
+    # Find dominant track per sensor position (unique composite pixel key)
     px_boundary = np_host.ones(n_pt, dtype=bool)
-    px_boundary[1:] = pt_pks[1:] != pt_pks[:-1]
+    px_boundary[1:] = pt_cpks[1:] != pt_cpks[:-1]
     px_starts = np_host.where(px_boundary)[0]
     n_pixels = len(px_starts)
 
@@ -557,11 +589,7 @@ def label_from_groups(state_pk, state_gid, state_ch, state_count,
             winner_idx[pid] = pos
             seen[pid] = True
 
-    labeled_hits = np_host.stack([
-        pt_wires[winner_idx],
-        pt_times[winner_idx],
-        pt_charges[winner_idx],
-    ], axis=1).astype(np_host.float32)
+    labeled_hits = hits_by_track[winner_idx]
     labeled_track_ids = pt_tracks[winner_idx].astype(np_host.int32)
 
     return {
@@ -570,16 +598,16 @@ def label_from_groups(state_pk, state_gid, state_ch, state_count,
         'num_labeled': n_pixels,
         'hits_by_track': hits_by_track,
         'num_hits': n_pt,
-        'group_correspondence': (state_pk[:count], state_gid[:count],
-                                 state_ch[:count], count),
+        'group_correspondence': (state_sk[:count], state_tk[:count],
+                                 state_gk[:count], state_ch[:count], count),
     }
 
 
-def finalize_track_hits(track_hits, max_time):
+def finalize_track_hits(track_hits, decode_fns=None):
     """Derive track labels from raw group merge state.
 
     Applies label_from_groups to each plane's raw
-    (pk, gid, ch, count, row_sums) tuple. The group_to_track
+    (sk, tk, gk, ch, count, row_sums) 6-tuple. The group_to_track
     lookup is stored in track_hits['group_to_track'].
 
     Call after moving response_signals off GPU to avoid memory pressure.
@@ -587,25 +615,27 @@ def finalize_track_hits(track_hits, max_time):
     Parameters
     ----------
     track_hits : dict
-        From process_event(). Plane keys map to raw 5-tuples.
+        From process_event(). Plane keys map to raw 6-tuples.
         Contains 'group_to_track' metadata key.
-    max_time : int
-        Time dimension for decoding pixel_key (cfg.num_time_steps).
+    decode_fns : dict, optional
+        Maps plane_key → decode_spatial_fn for label_from_groups.
+        If None, uses default wire decode (spatial_key = wire_idx).
 
     Returns
     -------
     track_hits : dict
-        Keyed by (side, plane) with labeled_hits, hits_by_track,
+        Keyed by (vol, plane) with labeled_hits, hits_by_track,
         group_correspondence, row_sums per plane.
     """
     group_to_track = track_hits.pop('group_to_track')
     max_keys = None
 
     for plane_key, raw in list(track_hits.items()):
-        state_pk, state_gid, state_ch, state_count, row_sums = raw
+        state_sk, state_tk, state_gk, state_ch, state_count, row_sums = raw
+        decode_fn = decode_fns.get(plane_key) if decode_fns else None
         result = label_from_groups(
-            state_pk, state_gid, state_ch, state_count,
-            group_to_track, max_time)
+            state_sk, state_tk, state_gk, state_ch, state_count,
+            group_to_track, decode_spatial_fn=decode_fn)
         result['row_sums'] = row_sums
         track_hits[plane_key] = result
 
@@ -614,7 +644,7 @@ def finalize_track_hits(track_hits, max_time):
         if gp is not None:
             count_val = int(gp[-1])
             if max_keys is None:
-                max_keys = state_pk.shape[0]
+                max_keys = state_sk.shape[0]
             if count_val >= max_keys:
                 print(f"ERROR: Plane {plane_key}: group merge count ({count_val:,}) >= "
                       f"max_keys ({max_keys:,}). Correspondence data TRUNCATED!")
@@ -656,29 +686,179 @@ def compute_qs_fractions(charges, group_ids, num_segments):
 # FACTORY FUNCTION (create closure for use inside JIT)
 # =============================================================================
 
-def _noop_track_hits(plane_int, deposits, vol_geom, plane_idx, n_actual):
-    """No-op — track hits disabled. Returns None."""
-    return None
+def _make_noop_track_hits(max_keys, total_pad):
+    """Build a no-op track hits function that returns matching zero 6-tuple."""
+    SENTINEL_PK = jnp.int32(2**30)
+    zero_hits = (
+        jnp.full(max_keys, SENTINEL_PK, dtype=jnp.int32),
+        jnp.zeros(max_keys, dtype=jnp.int32),
+        jnp.zeros(max_keys, dtype=jnp.int32),
+        jnp.zeros(max_keys, dtype=jnp.float32),
+        jnp.int32(0),
+        jnp.zeros(total_pad, dtype=jnp.float32),
+    )
+    def noop(intermediates, deposits, vol_geom, plane_idx, n_actual):
+        return zero_hits
+    return noop, zero_hits
+
+
+def create_pixel_track_hits_fn(cfg, vol_geom):
+    """Create pixel track hits labeling closure for one volume.
+
+    Uses 3D CDF-integrated diffusion kernel (py, pz, time) and
+    the unified 3-pass merge.
+
+    Parameters
+    ----------
+    cfg : SimConfig
+    vol_geom : VolumeGeometry (readout_type='pixel')
+
+    Returns
+    -------
+    track_hits_fn : callable
+        (pixel_int, deposits, vol_geom, plane_idx, n_actual) -> 6-tuple
+    """
+    diffusion = vol_geom.diffusion
+    K_py = diffusion.K_wire
+    K_pz = diffusion.K_wire
+    K_time = diffusion.K_time
+    K_total = (2 * K_py + 1) * (2 * K_pz + 1) * (2 * K_time + 1)
+    exp_size = cfg.track_hits.hits_chunk_size * K_total
+    SENTINEL_PK = jnp.int32(2**30)
+
+    num_py, num_pz = vol_geom.pixel_shape
+    pixel_pitch = vol_geom.pixel_pitch_cm
+
+    prepare_pixel_vmap = jax.vmap(
+        prepare_pixel_deposit_with_diffusion,
+        in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0,
+                 None, None, None, None, None, None, None, None, None, None, None),
+    )
+
+    def track_hits_fn(pixel_int, deposits, vol_geom, plane_idx, n_actual):
+        charges = pixel_int.charges
+        drift_time_us = pixel_int.drift_time_us
+        tick_us = pixel_int.tick_us
+        attenuation_factors = pixel_int.attenuation
+        py_idx = pixel_int.pixel_y_idx
+        pz_idx = pixel_int.pixel_z_idx
+        py_offset = pixel_int.pixel_y_offset
+        pz_offset = pixel_int.pixel_z_offset
+        valid_mask = jnp.arange(charges.shape[0]) < deposits.n_actual
+        group_ids = deposits.group_ids
+
+        max_safe_chunks = charges.shape[0] // cfg.track_hits.hits_chunk_size
+        num_chunks = jnp.minimum(
+            (n_actual + cfg.track_hits.hits_chunk_size - 1) // cfg.track_hits.hits_chunk_size,
+            max_safe_chunks
+        )
+
+        def body(i, state):
+            s_sk, s_tk, s_gk, s_ch, s_count, s_rowsums = state
+            start = i * cfg.track_hits.hits_chunk_size
+            cs = cfg.track_hits.hits_chunk_size
+
+            c_charges = jax.lax.dynamic_slice(charges, (start,), (cs,))
+            c_drift_time = jax.lax.dynamic_slice(drift_time_us, (start,), (cs,))
+            c_tick = jax.lax.dynamic_slice(tick_us, (start,), (cs,))
+            c_py = jax.lax.dynamic_slice(py_idx, (start,), (cs,))
+            c_pz = jax.lax.dynamic_slice(pz_idx, (start,), (cs,))
+            c_py_off = jax.lax.dynamic_slice(py_offset, (start,), (cs,))
+            c_pz_off = jax.lax.dynamic_slice(pz_offset, (start,), (cs,))
+            c_atten = jax.lax.dynamic_slice(attenuation_factors, (start,), (cs,))
+            c_valid = jax.lax.dynamic_slice(valid_mask, (start,), (cs,))
+            c_gids = jax.lax.dynamic_slice(group_ids, (start,), (cs,))
+
+            spatial_keys, time_idx, sig_val = prepare_pixel_vmap(
+                c_charges, c_drift_time, c_tick, c_py, c_pz,
+                c_py_off, c_pz_off, c_atten, c_valid,
+                K_py, K_pz, K_time, pixel_pitch, cfg.time_step_us,
+                diffusion.trans_cm2_us, diffusion.long_cm2_us,
+                diffusion.velocity_cm_us, num_py, num_pz,
+                cfg.num_time_steps
+            )
+
+            chunk_rowsums = jnp.sum(
+                jnp.where(sig_val > cfg.track_hits.inter_thresh, sig_val, 0.0),
+                axis=1)
+            s_rowsums = jax.lax.dynamic_update_slice(
+                s_rowsums, chunk_rowsums, (start,))
+
+            gid_exp = jnp.repeat(c_gids[:, jnp.newaxis], K_total, axis=1)
+
+            sk_flat = spatial_keys.reshape(exp_size).astype(jnp.int32)
+            t_flat = time_idx.reshape(exp_size).astype(jnp.int32)
+            gid_flat = gid_exp.reshape(exp_size).astype(jnp.int32)
+            ch_flat = sig_val.reshape(exp_size)
+
+            chunk_valid = ch_flat > 0.0
+            chunk_sk = jnp.where(chunk_valid, sk_flat, SENTINEL_PK)
+            chunk_tk = jnp.where(chunk_valid, t_flat, jnp.int32(0))
+            chunk_gk = jnp.where(chunk_valid, gid_flat, jnp.int32(0))
+            chunk_ch = jnp.where(chunk_valid, ch_flat, 0.0).astype(jnp.float32)
+
+            new_sk, new_tk, new_gk, new_ch, new_count = merge_chunk_sensor_hits(
+                s_sk, s_tk, s_gk, s_ch,
+                chunk_sk, chunk_tk, chunk_gk, chunk_ch,
+                cfg.track_hits.inter_thresh
+            )
+            return (new_sk, new_tk, new_gk, new_ch, new_count, s_rowsums)
+
+        init_state = (
+            jnp.full(cfg.track_hits.max_keys, SENTINEL_PK, dtype=jnp.int32),
+            jnp.zeros(cfg.track_hits.max_keys, dtype=jnp.int32),
+            jnp.zeros(cfg.track_hits.max_keys, dtype=jnp.int32),
+            jnp.zeros(cfg.track_hits.max_keys, dtype=jnp.float32),
+            jnp.int32(0),
+            jnp.zeros(charges.shape[0], dtype=jnp.float32),
+        )
+
+        final_sk, final_tk, final_gk, final_ch, final_count, final_rowsums = \
+            jax.lax.fori_loop(0, num_chunks, body, init_state)
+
+        return (final_sk, final_tk, final_gk, final_ch, final_count, final_rowsums)
+
+    return track_hits_fn
 
 
 def create_track_hits_fn_for_volume(cfg, vol_geom):
     """Create track hits labeling closure for one volume.
 
-    Parameters
-    ----------
-    cfg : SimConfig
-    vol_geom : VolumeGeometry
-        Must have vol_geom.diffusion populated when track_hits enabled.
+    Dispatches to wire or pixel factory based on readout_type.
 
     Returns
     -------
     track_hits_fn : callable
-        Signature: (plane_int, deposits, vol_geom, plane_idx, n_actual) -> 5-tuple or None.
-        Returns (pk, gid, ch, count, rowsums) tuple. No dict mutation.
+        (intermediates, deposits, vol_geom, plane_idx, n_actual) -> 6-tuple
+    zero_hits : tuple
+        Pre-allocated zero 6-tuple matching output shape.
+    decode_fn : callable or None
+        spatial_key -> coordinate columns for finalize_track_hits.
     """
-    if not cfg.include_track_hits:
-        return _noop_track_hits
+    import numpy as np_host
 
+    if not cfg.include_track_hits:
+        noop, zero_hits = _make_noop_track_hits(
+            cfg.track_hits.max_keys if cfg.track_hits is not None else 1,
+            cfg.total_pad)
+        return noop, zero_hits, None
+
+    SENTINEL_PK = jnp.int32(2**30)
+    zero_hits = (
+        jnp.full(cfg.track_hits.max_keys, SENTINEL_PK, dtype=jnp.int32),
+        jnp.zeros(cfg.track_hits.max_keys, dtype=jnp.int32),
+        jnp.zeros(cfg.track_hits.max_keys, dtype=jnp.int32),
+        jnp.zeros(cfg.track_hits.max_keys, dtype=jnp.float32),
+        jnp.int32(0),
+        jnp.zeros(cfg.total_pad, dtype=jnp.float32),
+    )
+
+    if vol_geom.readout_type == 'pixel':
+        num_pz = vol_geom.pixel_shape[1]
+        decode_fn = lambda sk, _npz=num_pz: np_host.column_stack([sk // _npz, sk % _npz])
+        return create_pixel_track_hits_fn(cfg, vol_geom), zero_hits, decode_fn
+
+    # Wire factory below
     diffusion = vol_geom.diffusion
     K_total = (2 * diffusion.K_wire + 1) * (2 * diffusion.K_time + 1)
     exp_size = cfg.track_hits.hits_chunk_size * K_total
@@ -698,7 +878,6 @@ def create_track_hits_fn_for_volume(cfg, vol_geom):
         closest_wire_idx = plane_int.closest_wire_idx
         closest_wire_distances = plane_int.closest_wire_dist
         attenuation_factors = plane_int.attenuation
-        # Derive valid_mask from n_actual (no stored valid_mask field)
         valid_mask = jnp.arange(charges.shape[0]) < deposits.n_actual
         group_ids = deposits.group_ids
         spacing_cm = vol_geom.wire_spacings_cm[plane_idx]
@@ -717,7 +896,7 @@ def create_track_hits_fn_for_volume(cfg, vol_geom):
         )
 
         def body(i, state):
-            s_pk, s_gid, s_ch, s_count, s_rowsums = state
+            s_sk, s_tk, s_gk, s_ch, s_count, s_rowsums = state
             start = i * cfg.track_hits.hits_chunk_size
 
             c_charges = jax.lax.dynamic_slice(charges, (start,), (cfg.track_hits.hits_chunk_size,))
@@ -757,32 +936,34 @@ def create_track_hits_fn_for_volume(cfg, vol_geom):
             gid_flat = gid_exp.reshape(exp_size).astype(jnp.int32)
             ch_flat = sig_val.reshape(exp_size)
 
-            chunk_pk = w_flat * cfg.num_time_steps + t_flat
+            # Separate spatial and time keys (no composite pk)
             chunk_valid = ch_flat > 0.0
-            chunk_pk = jnp.where(chunk_valid, chunk_pk, SENTINEL_PK)
-            chunk_gid = jnp.where(chunk_valid, gid_flat, jnp.int32(0))
+            chunk_sk = jnp.where(chunk_valid, w_flat, SENTINEL_PK)
+            chunk_tk = jnp.where(chunk_valid, t_flat, jnp.int32(0))
+            chunk_gk = jnp.where(chunk_valid, gid_flat, jnp.int32(0))
             chunk_ch = jnp.where(chunk_valid, ch_flat, 0.0).astype(jnp.float32)
 
-            new_pk, new_gid, new_ch, new_count = merge_chunk_hits(
-                s_pk, s_gid, s_ch,
-                chunk_pk, chunk_gid, chunk_ch,
+            new_sk, new_tk, new_gk, new_ch, new_count = merge_chunk_sensor_hits(
+                s_sk, s_tk, s_gk, s_ch,
+                chunk_sk, chunk_tk, chunk_gk, chunk_ch,
                 cfg.track_hits.inter_thresh
             )
 
-            return (new_pk, new_gid, new_ch, new_count, s_rowsums)
+            return (new_sk, new_tk, new_gk, new_ch, new_count, s_rowsums)
 
         init_state = (
             jnp.full(cfg.track_hits.max_keys, SENTINEL_PK, dtype=jnp.int32),
+            jnp.zeros(cfg.track_hits.max_keys, dtype=jnp.int32),
             jnp.zeros(cfg.track_hits.max_keys, dtype=jnp.int32),
             jnp.zeros(cfg.track_hits.max_keys, dtype=jnp.float32),
             jnp.int32(0),
             jnp.zeros(charges.shape[0], dtype=jnp.float32),
         )
 
-        final_pk, final_gid, final_ch, final_count, final_rowsums = jax.lax.fori_loop(
-            0, num_chunks, body, init_state
-        )
+        final_sk, final_tk, final_gk, final_ch, final_count, final_rowsums = \
+            jax.lax.fori_loop(0, num_chunks, body, init_state)
 
-        return (final_pk, final_gid, final_ch, final_count, final_rowsums)
+        return (final_sk, final_tk, final_gk, final_ch, final_count, final_rowsums)
 
-    return track_hits_fn
+    # Wire: spatial_key = wire_idx, default decode (None → identity in label_from_groups)
+    return track_hits_fn, zero_hits, None

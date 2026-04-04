@@ -358,7 +358,7 @@ def create_electronics_fn_for_volume(cfg, vol_geom, response_kernels,
     metadata : dict
         {'e_chunk', 'e_fft'} or empty if disabled.
     """
-    if not cfg.include_electronics:
+    if not cfg.include_electronics or vol_geom.readout_type == 'pixel':
         return _noop_electronics, {}
 
     _TAU_US = 1000.0
@@ -443,7 +443,7 @@ def create_digitize_fn_for_volume(cfg, vol_geom, digitization_config=None):
         Signature: (sig, plane_idx) -> digitized signal.
     dig_config : DigitizationConfig or None
     """
-    if not cfg.include_digitize:
+    if not cfg.include_digitize or vol_geom.readout_type == 'pixel':
         return _noop_digitize, None
 
     if digitization_config is None:

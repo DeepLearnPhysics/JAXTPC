@@ -91,8 +91,17 @@ def generate_detector(config_file_path: str) -> Dict[str, Any]:
             raise KeyError(f"Volume {i}: missing 'geometry.ranges'")
         if 'drift_direction' not in geo:
             raise KeyError(f"Volume {i}: missing 'geometry.drift_direction'")
-        if 'planes' not in vol:
-            raise KeyError(f"Volume {i}: missing 'planes' section")
+        # Wire volumes have 'planes', pixel volumes have 'readout.type: pixel'
+        readout_cfg = vol.get('readout', {})
+        readout_type = readout_cfg.get('type', 'wire')
+        if readout_type == 'pixel':
+            if 'pixel_pitch' not in readout_cfg:
+                raise KeyError(f"Volume {i}: pixel readout missing 'readout.pixel_pitch'")
+            if 'pixel_shape' not in readout_cfg:
+                raise KeyError(f"Volume {i}: pixel readout missing 'readout.pixel_shape'")
+        else:
+            if 'planes' not in vol:
+                raise KeyError(f"Volume {i}: missing 'planes' section")
 
     return detector_config
 

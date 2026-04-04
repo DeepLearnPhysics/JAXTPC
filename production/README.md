@@ -21,7 +21,13 @@ From the project root:
 # Basic run (10 events, 2 save workers, digitization on, noise/electronics off)
 python3 production/run_batch.py --data events.h5 --events 10
 
-# Full options
+# Using a production config (recommended — auto-sets total_pad, chunks, max_keys, thresholds)
+python3 production/run_batch.py \
+    --data events.h5 \
+    --config config/cubic_wireplane_config.yaml \
+    --production-config config/production_cubic_wireplane_config.yaml
+
+# Full manual options
 python3 production/run_batch.py \
     --data mpvmpr_20.h5 \
     --config config/cubic_wireplane_config.yaml \
@@ -36,12 +42,45 @@ python3 production/run_batch.py \
     --no-track-hits
 ```
 
+### Production Config
+
+Instead of manually setting `--total-pad`, `--response-chunk`, `--max-keys`, etc., you can
+generate an optimized config and load it with `--production-config`:
+
+```bash
+# Generate config (scans data, probes max_keys, finds optimal chunks)
+python3 -m profiler.setup_production --data events.h5 --config config/cubic_wireplane_config.yaml
+
+# Use it
+python3 production/run_batch.py --data events.h5 \
+    --config config/cubic_wireplane_config.yaml \
+    --production-config config/production_cubic_wireplane_config.yaml
+```
+
+The config file stores performance and quality knobs:
+
+```yaml
+# config/production_cubic_wireplane_config.yaml
+detector_config: config/cubic_wireplane_config.yaml
+total_pad: 300000
+response_chunk: 50000
+hits_chunk: 25000
+max_keys: 4000000
+inter_thresh: 1.0
+threshold_adc: 2.0
+corr_threshold: 25.0
+max_buckets: 1000
+```
+
+See `profiler/` for individual scripts to tune each parameter separately.
+
 ### CLI Flags
 
 | Flag | Default | Description |
 |---|---|---|
 | `--data` | `mpvmpr_20.h5` | Input HDF5 file with particle step data |
 | `--config` | `config/cubic_wireplane_config.yaml` | Detector configuration YAML |
+| `--production-config` | none | Load optimized params from profiler config YAML |
 | `--dataset` | `sim` | Dataset name prefix for output files |
 | `--outdir` | `.` | Output directory (creates `resp/`, `seg/`, `corr/` subdirs) |
 | `--events` | all | Number of events to process |
@@ -53,10 +92,15 @@ python3 production/run_batch.py \
 | `--no-digitize` | on | Disable ADC digitization |
 | `--no-track-hits` | on | Disable track correspondence |
 | `--sce` | off | Path to SCE HDF5 map for E-field distortions |
+| `--total-pad` | 500,000 | Max deposits per volume (sets JIT compiled shape) |
+| `--response-chunk` | 50,000 | Deposits per response fori_loop batch (must divide total-pad) |
+| `--hits-chunk` | 25,000 | Deposits per track-hits fori_loop batch (must divide total-pad) |
+| `--max-keys` | 4,000,000 | Track-hits merge state capacity per plane (RuntimeError if exceeded) |
+| `--inter-thresh` | 1.0 | Track-hits intermediate pruning threshold (electrons) |
+| `--corr-threshold` | 25.0 | Charge threshold for correspondence entries (electrons) |
+| `--max-buckets` | 1,000 | Max active buckets per plane (bucketed mode) |
 | `--group-size` | 5 | Deposits per correspondence group |
 | `--gap-threshold` | 5.0 | Group split threshold in mm |
-| `--corr-threshold` | 25.0 | Charge threshold for correspondence entries (electrons) |
-| `--total-pad` | 500,000 | Max deposits per side (sets JIT compiled shape) |
 | `--seed` | 42 | Random seed for noise generation |
 
 ## Pipeline
@@ -267,9 +311,11 @@ Without correspondence (`--no-track-hits`): ~3.7 MB/event, ~3.7 GB per 1000 even
 | 2 workers (with corr) | ~1.3s | ~0.8 events/s |
 | 2 workers (no corr) | ~0.5s | ~2.0 events/s |
 
-## Internal Parameters
+## Overflow Protection
 
-| Parameter | Default | Description |
-|---|---|---|
-| `inter_thresh` | 1.0 | Prune correspondence entries below this charge (electrons) during JIT merge |
-| `max_keys` | 4,000,000 | Merge state capacity per plane. Warning printed if exceeded |
+Both `total_pad` and `max_keys` raise `RuntimeError` if exceeded:
+
+- **total_pad overflow**: A volume has more deposits than `total_pad`. Raised during data loading (before simulation). Fix: increase `--total-pad` or run `profiler.find_optimal_pad`.
+- **max_keys overflow**: Track-hits merge state exceeds `max_keys` capacity for a plane. Raised after simulation. Fix: increase `--max-keys` or run `profiler.setup_production`.
+
+Use `--production-config` with a profiler-generated config to avoid both.

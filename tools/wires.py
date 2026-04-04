@@ -1,13 +1,14 @@
 """
-Wire signal calculations for LArTPC simulation.
+Wire and pixel signal calculations for LArTPC simulation.
 
-This module contains all wire-related calculations for processing charge deposits
-into wire signals. It supports two parallel simulation paths:
+This module contains all readout-related calculations for processing charge deposits
+into wire or pixel signals. It supports two parallel simulation paths:
 
 Sections:
 1. SHARED: Wire geometry calculations
-2. RESPONSE PATH: Kernel-based signal generation
-3. HIT PATH: Direct diffusion calculation
+2. RESPONSE PATH: Kernel-based signal generation (wire)
+3. HIT PATH: Direct diffusion calculation (wire)
+4. 3D PIXEL BUCKETING: Tile-based signal accumulation (pixel)
 """
 
 import jax
@@ -213,89 +214,39 @@ def compute_gaussian_diffusion(
     return jnp.maximum(response, 0.0)
 
 
-@jax.jit
-def compute_transverse_diffusion(
-    wire_distance_cm, drift_time_us, transverse_diffusion_cm2_us,
-    min_sigma=1e-4
-):
-    """
-    Calculate normalized 1D Gaussian response for wire (transverse) diffusion.
+@partial(jax.jit, static_argnums=(2,))
+def diffusion_cdf_1d(mu, sigma, size):
+    """Compute charge fractions per bin via CDF integration.
+
+    Integrates a Gaussian between bin edges to get the exact fraction
+    of charge landing in each bin. Normalized to sum to 1.0.
+
+    Works for any axis (wire, pixel, time) — just provide sigma and mu
+    in bin units (wire pitches, pixel pitches, or time steps).
 
     Parameters
     ----------
-    wire_distance_cm : jnp.ndarray
-        Distance from the hit to the wire in cm.
-    drift_time_us : float
-        Drift time in μs.
-    transverse_diffusion_cm2_us : float
-        Transverse diffusion coefficient in cm²/μs.
-    min_sigma : float
-        Minimum sigma value to avoid division by zero. Default 1e-4.
+    mu : float
+        Sub-bin offset of the deposit from the central bin center,
+        in bin units. Range [-0.5, 0.5).
+    sigma : float
+        Diffusion sigma in bin units (e.g., wire pitches or time steps).
+    size : int (static)
+        Number of bins (2*K+1).
 
     Returns
     -------
-    response : jnp.ndarray
-        Normalized wire diffusion response.
+    fractions : jnp.ndarray, shape (size,)
+        Charge fraction per bin, sums to 1.0.
     """
-    sigma_wire_squared = 2.0 * transverse_diffusion_cm2_us * drift_time_us
-    sigma_wire_squared = jnp.maximum(sigma_wire_squared, min_sigma ** 2)
-
-    # Calculate Gaussian term
-    wire_term = -(wire_distance_cm**2) / (2.0 * sigma_wire_squared)
-
-    # Calculate normalization factor for 1D Gaussian
-    norm_factor = 1.0 / (jnp.sqrt(2.0 * jnp.pi * sigma_wire_squared))
-
-    # Apply Gaussian formula
-    response = norm_factor * jnp.exp(wire_term)
-
-    return jnp.maximum(response, 0.0)
+    from jax.scipy.stats import norm
+    bins = jnp.arange(size + 1, dtype=jnp.float32) - size / 2
+    sigma_safe = jnp.maximum(sigma, 1e-6)
+    cdf = norm.cdf(bins, loc=mu, scale=sigma_safe)
+    pdf = jnp.diff(cdf)
+    return pdf / jnp.maximum(pdf.sum(), 1e-30)
 
 
-@jax.jit
-def compute_longitudinal_diffusion(
-    time_difference_us, drift_time_us,
-    longitudinal_diffusion_cm2_us, drift_velocity_cm_us,
-    min_sigma=1e-4
-):
-    """
-    Calculate normalized 1D Gaussian response for time (longitudinal) diffusion.
-
-    Parameters
-    ----------
-    time_difference_us : jnp.ndarray
-        Time difference between drift time and bin center in μs.
-    drift_time_us : float
-        Drift time in μs.
-    longitudinal_diffusion_cm2_us : float
-        Longitudinal diffusion coefficient in cm²/μs.
-    drift_velocity_cm_us : float
-        Drift velocity in cm/μs.
-    min_sigma : float
-        Minimum sigma value to avoid division by zero. Default 1e-4.
-
-    Returns
-    -------
-    response : jnp.ndarray
-        Normalized time diffusion response.
-    """
-    longitudinal_diffusion_us2_us = longitudinal_diffusion_cm2_us / (drift_velocity_cm_us ** 2)
-    sigma_time_squared = 2.0 * longitudinal_diffusion_us2_us * drift_time_us
-    sigma_time_squared = jnp.maximum(sigma_time_squared, min_sigma ** 2)
-
-    # Calculate Gaussian term
-    time_term = -(time_difference_us**2) / (2.0 * sigma_time_squared)
-
-    # Calculate normalization factor for 1D Gaussian
-    norm_factor = 1.0 / (jnp.sqrt(2.0 * jnp.pi * sigma_time_squared))
-
-    # Apply Gaussian formula
-    response = norm_factor * jnp.exp(time_term)
-
-    return jnp.maximum(response, 0.0)
-
-
-@partial(jax.jit, static_argnames=['K_wire', 'K_time', 'num_wires', 'num_time_steps'])
 def prepare_deposit_with_diffusion(
     charge, drift_time_us, tick_us, drift_distance_cm, wire_idx, closest_wire_distance,
     attenuation_factor, theta_xz_rad, theta_y_rad, angular_scaling_factor, valid_hit,
@@ -379,28 +330,25 @@ def prepare_deposit_with_diffusion(
     # charge_scaled = charge * angular_scaling_factor
     attenuated_charge = charge * attenuation_factor
 
-    # 4. Calculate diffusion response array ((2*K_wire+1) x (2*K_time+1))
-    # Reshape for broadcasting
-    wire_distances_2d = jnp.expand_dims(jnp.abs(wire_distances_cm), axis=1)  # Shape: (2*K_wire+1, 1)
-    time_differences_2d = jnp.expand_dims(time_differences_us, axis=0)  # Shape: (1, 2*K_time+1)
+    # 4. Calculate diffusion response via CDF integration
+    # Convert sigma to bin units (wire pitches / time steps)
+    sigma_wire_cm = jnp.sqrt(2.0 * transverse_diffusion_cm2_us * drift_time_us)
+    sigma_wire_pitches = sigma_wire_cm / wire_spacing_cm
 
-    # Calculate normalized wire diffusion response
-    wire_diffusion = compute_transverse_diffusion(
-        wire_distances_2d,
-        drift_time_us,
-        transverse_diffusion_cm2_us
-    )  # Shape: (2*K_wire+1, 1)
+    sigma_time_us = jnp.sqrt(
+        2.0 * (longitudinal_diffusion_cm2_us / (drift_velocity_cm_us ** 2)) * drift_time_us)
+    sigma_time_steps = sigma_time_us / time_step_size_us
 
-    # Calculate normalized time diffusion response
-    time_diffusion = compute_longitudinal_diffusion(
-        time_differences_2d,
-        drift_time_us,
-        longitudinal_diffusion_cm2_us,
-        drift_velocity_cm_us
-    )  # Shape: (1, 2*K_time+1)
+    # Sub-bin offsets in bin units
+    wire_mu = closest_wire_distance / wire_spacing_cm  # offset from nearest wire center
+    time_mu = (tick_us / time_step_size_us) - central_time_bin - 0.5  # offset from bin center
 
-    # Combine wire and time diffusion responses using broadcasting
-    diffusion_response_normalized = wire_diffusion * time_diffusion  # Shape: (2*K_wire+1, 2*K_time+1)
+    # CDF-integrated fractions per bin (charge-conserving, sum = 1.0)
+    wire_fractions = diffusion_cdf_1d(wire_mu, sigma_wire_pitches, 2 * K_wire + 1)
+    time_fractions = diffusion_cdf_1d(time_mu, sigma_time_steps, 2 * K_time + 1)
+
+    # 2D separable product
+    diffusion_response_normalized = wire_fractions[:, None] * time_fractions[None, :]
 
     # Apply charge for full diffusion response
     diffusion_response = diffusion_response_normalized * attenuated_charge
@@ -430,6 +378,119 @@ def prepare_deposit_with_diffusion(
 
     return wire_indices_flat, time_indices_flat, signal_values_out
 
+
+
+def prepare_pixel_deposit_with_diffusion(
+    charge, drift_time_us, tick_us, pixel_y_idx, pixel_z_idx,
+    pixel_y_offset, pixel_z_offset,
+    attenuation_factor, valid_hit,
+    K_py, K_pz, K_time, pixel_pitch_cm, time_step_size_us,
+    transverse_diffusion_cm2_us, longitudinal_diffusion_cm2_us,
+    drift_velocity_cm_us, num_py, num_pz, num_time_steps
+):
+    """
+    Prepare pixel deposit data WITH 3D diffusion kernel (hit/track_hits path).
+
+    Computes CDF-integrated Gaussian fractions across a (2K_py+1) × (2K_pz+1) × (2K_time+1)
+    neighborhood. Charge is exactly conserved (fractions sum to 1.0).
+
+    Parameters
+    ----------
+    charge : float
+    drift_time_us : float
+        Pure drift time for diffusion sigma calculation.
+    tick_us : float
+        Readout tick time for time bin placement.
+    pixel_y_idx, pixel_z_idx : int
+        Center pixel indices.
+    pixel_y_offset, pixel_z_offset : float
+        Sub-pixel offsets in [-0.5, 0.5) pixel pitch units.
+    attenuation_factor : float
+    valid_hit : bool
+    K_py, K_pz, K_time : int (static)
+        Half-widths in each dimension.
+    pixel_pitch_cm : float
+    time_step_size_us : float
+    transverse_diffusion_cm2_us : float
+    longitudinal_diffusion_cm2_us : float
+    drift_velocity_cm_us : float
+    num_py, num_pz, num_time_steps : int (static)
+
+    Returns
+    -------
+    spatial_keys : jnp.ndarray, shape (K_total,), int32
+        Flattened pixel IDs: py * num_pz + pz.
+    time_indices : jnp.ndarray, shape (K_total,), int32
+    signal_values : jnp.ndarray, shape (K_total,), float32
+    """
+    charge = jnp.where(valid_hit, charge, 0.0)
+    attenuated_charge = charge * attenuation_factor
+
+    # Time bins
+    central_time_bin = jnp.floor(tick_us / time_step_size_us).astype(jnp.int32)
+    time_offsets = jnp.arange(-K_time, K_time + 1)
+    time_bins = central_time_bin + time_offsets
+
+    # Pixel indices
+    py_offsets = jnp.arange(-K_py, K_py + 1)
+    pz_offsets = jnp.arange(-K_pz, K_pz + 1)
+    py_indices = pixel_y_idx + py_offsets
+    pz_indices = pixel_z_idx + pz_offsets
+
+    # Diffusion sigmas in bin units
+    sigma_T_cm = jnp.sqrt(2.0 * transverse_diffusion_cm2_us * drift_time_us)
+    sigma_T_pitches = sigma_T_cm / pixel_pitch_cm
+
+    sigma_L_us = jnp.sqrt(
+        2.0 * (longitudinal_diffusion_cm2_us / (drift_velocity_cm_us ** 2)) * drift_time_us)
+    sigma_L_steps = sigma_L_us / time_step_size_us
+
+    # Sub-bin offsets
+    time_mu = (tick_us / time_step_size_us) - central_time_bin - 0.5
+
+    # CDF-integrated fractions (charge-conserving)
+    py_fractions = diffusion_cdf_1d(pixel_y_offset, sigma_T_pitches, 2 * K_py + 1)
+    pz_fractions = diffusion_cdf_1d(pixel_z_offset, sigma_T_pitches, 2 * K_pz + 1)
+    time_fractions = diffusion_cdf_1d(time_mu, sigma_L_steps, 2 * K_time + 1)
+
+    # 3D separable product
+    diffusion_3d = (py_fractions[:, None, None]
+                    * pz_fractions[None, :, None]
+                    * time_fractions[None, None, :])  # (2K_py+1, 2K_pz+1, 2K_time+1)
+
+    diffusion_3d = diffusion_3d * attenuated_charge
+
+    # Validity masks
+    py_valid = (py_indices >= 0) & (py_indices < num_py)
+    pz_valid = (pz_indices >= 0) & (pz_indices < num_pz)
+    time_valid = (time_bins >= 0) & (time_bins < num_time_steps)
+
+    valid_3d = (py_valid[:, None, None]
+                & pz_valid[None, :, None]
+                & time_valid[None, None, :]
+                & valid_hit)
+
+    diffusion_3d = jnp.where(valid_3d, diffusion_3d, 0.0)
+    py_indices = jnp.where(py_valid, py_indices, 0)
+    pz_indices = jnp.where(pz_valid, pz_indices, 0)
+
+    # Flatten to (K_total,) arrays
+    num_py_bins = 2 * K_py + 1
+    num_pz_bins = 2 * K_pz + 1
+    num_t_bins = 2 * K_time + 1
+    K_total = num_py_bins * num_pz_bins * num_t_bins
+
+    # Spatial key: py * num_pz + pz (for track_hits merge)
+    # Broadcast to 3D then flatten
+    py_3d = jnp.broadcast_to(py_indices[:, None, None], (num_py_bins, num_pz_bins, num_t_bins))
+    pz_3d = jnp.broadcast_to(pz_indices[None, :, None], (num_py_bins, num_pz_bins, num_t_bins))
+    t_3d = jnp.broadcast_to(time_bins[None, None, :], (num_py_bins, num_pz_bins, num_t_bins))
+
+    spatial_keys = (py_3d * num_pz + pz_3d).reshape(K_total).astype(jnp.int32)
+    time_indices_out = t_3d.reshape(K_total).astype(jnp.int32)
+    signal_values_out = diffusion_3d.reshape(K_total)
+
+    return spatial_keys, time_indices_out, signal_values_out
 
 
 # ============================================================================
@@ -1070,5 +1131,396 @@ def sparse_buckets_to_dense(buckets, compact_to_key, num_active,
 
     output = jnp.zeros((num_wires, num_time_steps), dtype=jnp.float32)
     output = jax.lax.fori_loop(0, max_buckets, add_bucket, output)
+
+    return output
+
+
+# ============================================================================
+# Pixel Readout Helpers
+# ============================================================================
+
+@jax.jit
+def digitize_pixel_positions(positions_yz_cm, pixel_pitch_cm, pixel_origins_cm):
+    """Convert physical (y, z) positions to pixel indices and sub-pixel offsets.
+
+    Parameters
+    ----------
+    positions_yz_cm : jnp.ndarray, shape (N, 2)
+        Physical (y, z) positions in cm.
+    pixel_pitch_cm : float
+        Pixel pitch size in cm.
+    pixel_origins_cm : jnp.ndarray, shape (2,)
+        Pixel grid origin [y_min, z_min] in cm.
+
+    Returns
+    -------
+    pixel_y_idx : jnp.ndarray, shape (N,), int32
+        Center pixel y indices.
+    pixel_z_idx : jnp.ndarray, shape (N,), int32
+        Center pixel z indices.
+    pixel_y_offset : jnp.ndarray, shape (N,), float32
+        Sub-pixel y offset in [-0.5, 0.5).
+    pixel_z_offset : jnp.ndarray, shape (N,), float32
+        Sub-pixel z offset in [-0.5, 0.5).
+    """
+    d_yz = positions_yz_cm - pixel_origins_cm
+    offsets, centers = jnp.modf(d_yz / pixel_pitch_cm)
+    offsets = offsets - 0.5
+    pixel_indices = centers.astype(jnp.int32)
+    return pixel_indices[:, 0], pixel_indices[:, 1], offsets[:, 0], offsets[:, 1]
+
+
+@partial(jax.jit, static_argnames=['num_py', 'num_pz'])
+def prepare_pixel_deposit_for_response(
+    charge, tick_us, pixel_y_idx, pixel_z_idx,
+    pixel_y_offset, pixel_z_offset,
+    attenuation_factor, valid_hit,
+    time_step_size_us, num_py, num_pz
+):
+    """Prepare a single pixel deposit for response kernel application.
+
+    Parameters
+    ----------
+    charge : float
+    tick_us : float
+        Readout tick time in μs.
+    pixel_y_idx, pixel_z_idx : int
+        Center pixel indices.
+    pixel_y_offset, pixel_z_offset : float
+        Sub-pixel fractional offsets [-0.5, 0.5).
+    attenuation_factor : float
+    valid_hit : bool
+    time_step_size_us : float
+    num_py, num_pz : int
+        Total pixel grid dimensions.
+
+    Returns
+    -------
+    tuple
+        (pixel_y_idx, pixel_z_idx, pixel_y_offset, pixel_z_offset,
+         time_index, time_offset, intensity)
+    """
+    charge = jnp.where(valid_hit, charge, 0.0)
+
+    time_index = jnp.floor(tick_us / time_step_size_us).astype(jnp.int32)
+    time_offset = (tick_us / time_step_size_us) - time_index
+
+    intensity = charge * attenuation_factor
+
+    valid = (valid_hit
+             & (pixel_y_idx >= 0) & (pixel_y_idx < num_py)
+             & (pixel_z_idx >= 0) & (pixel_z_idx < num_pz)
+             & (time_index >= 0))
+
+    intensity = jnp.where(valid, intensity, 0.0)
+    pixel_y_idx = jnp.where(valid, pixel_y_idx, 0)
+    pixel_z_idx = jnp.where(valid, pixel_z_idx, 0)
+
+    return (pixel_y_idx, pixel_z_idx, pixel_y_offset, pixel_z_offset,
+            time_index, time_offset, intensity)
+
+
+# ============================================================================
+# 3D Pixel Bucketing
+# ============================================================================
+
+@partial(jax.jit, static_argnames=('B1', 'B2', 'B3', 'num_py', 'num_pz',
+                                    'num_time_steps', 'max_buckets',
+                                    'py_zero_bin', 'pz_zero_bin', 'time_zero_bin'))
+def build_bucket_mapping_3d(pixel_y_indices, pixel_z_indices, time_indices,
+                            B1, B2, B3, num_py, num_pz, num_time_steps,
+                            max_buckets, py_zero_bin, pz_zero_bin, time_zero_bin):
+    """
+    Build point_to_compact mapping for 3D pixel bucketing.
+
+    Phase 1 of sparse pixel bucketing. Each deposit's kernel can touch up to
+    8 tiles (2x2x2 octants in pixel_y, pixel_z, time). This function computes
+    which 8 tiles each deposit touches and creates a compact mapping.
+
+    Parameters
+    ----------
+    pixel_y_indices : jnp.ndarray, shape (N,)
+        Center pixel y index for each segment.
+    pixel_z_indices : jnp.ndarray, shape (N,)
+        Center pixel z index for each segment.
+    time_indices : jnp.ndarray, shape (N,)
+        Start time index for each segment.
+    B1 : int
+        Tile size in pixel y direction (= 2 * kernel_py).
+    B2 : int
+        Tile size in pixel z direction (= 2 * kernel_pz).
+    B3 : int
+        Tile size in time direction (= 2 * kernel_time).
+    num_py, num_pz : int
+        Total pixels in y and z.
+    num_time_steps : int
+        Total time steps.
+    max_buckets : int
+        Maximum active tiles to allocate.
+    py_zero_bin, pz_zero_bin, time_zero_bin : int
+        Kernel center offsets in each dimension.
+
+    Returns
+    -------
+    point_to_compact : jnp.ndarray, shape (N, 8)
+        Maps (segment, octant) to compact tile index.
+    num_active : int
+        Number of unique active tiles.
+    compact_to_key : jnp.ndarray, shape (max_buckets,)
+        Maps compact index to tile key.
+    """
+    N = pixel_y_indices.shape[0]
+    NUM_BPZ = (num_pz + B2 - 1) // B2
+    NUM_BT = (num_time_steps + B3 - 1) // B3
+
+    home_bpy = (pixel_y_indices - py_zero_bin) // B1
+    home_bpz = (pixel_z_indices - pz_zero_bin) // B2
+    home_bt = (time_indices - time_zero_bin) // B3
+
+    # 8 octants: all combinations of {0, 1} in 3 dimensions
+    offsets_py = jnp.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=jnp.int32)
+    offsets_pz = jnp.array([0, 0, 1, 1, 0, 0, 1, 1], dtype=jnp.int32)
+    offsets_t = jnp.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=jnp.int32)
+
+    bucket_bpy = home_bpy[:, None] + offsets_py  # (N, 8)
+    bucket_bpz = home_bpz[:, None] + offsets_pz
+    bucket_bt = home_bt[:, None] + offsets_t
+
+    bucket_keys = bucket_bpy * NUM_BPZ * NUM_BT + bucket_bpz * NUM_BT + bucket_bt
+
+    flat_keys = bucket_keys.ravel()  # (8N,)
+
+    sorted_idx = jnp.argsort(flat_keys)
+    sorted_keys = flat_keys[sorted_idx]
+
+    is_new = jnp.concatenate([
+        jnp.array([True]),
+        sorted_keys[1:] != sorted_keys[:-1]
+    ])
+
+    compact_idx_sorted = jnp.cumsum(is_new.astype(jnp.int32)) - 1
+
+    compact_idx_flat = jnp.zeros(8 * N, dtype=jnp.int32)
+    compact_idx_flat = compact_idx_flat.at[sorted_idx].set(compact_idx_sorted)
+
+    point_to_compact = compact_idx_flat.reshape(N, 8)
+
+    num_active = jnp.sum(is_new.astype(jnp.int32))
+
+    compact_to_key = jnp.zeros(max_buckets, dtype=jnp.int32)
+    compact_to_key = compact_to_key.at[compact_idx_sorted].set(
+        sorted_keys, mode='drop')
+
+    return point_to_compact, num_active, compact_to_key
+
+
+@partial(jax.jit, static_argnames=('max_buckets', 'kernel_py', 'kernel_pz',
+                                    'kernel_time', 'B1', 'B2', 'B3',
+                                    'py_zero_bin', 'pz_zero_bin', 'time_zero_bin',
+                                    'batch_size', 'num_py', 'num_pz',
+                                    'num_time_steps'))
+def scatter_contributions_to_pixel_buckets_batched(
+    pixel_y_indices, pixel_z_indices, time_indices,
+    intensities, contributions,
+    point_to_compact, max_buckets,
+    kernel_py, kernel_pz, kernel_time,
+    B1, B2, B3,
+    py_zero_bin, pz_zero_bin, time_zero_bin,
+    batch_size=1000, num_py=None, num_pz=None, num_time_steps=None
+):
+    """
+    Batched scatter of 3D pixel kernel contributions to sparse tiles.
+
+    Uses jax.lax.scan to process segments in batches, avoiding
+    materialization of large intermediate arrays.
+
+    Parameters
+    ----------
+    pixel_y_indices : jnp.ndarray, shape (N,)
+        Center pixel y index for each segment.
+    pixel_z_indices : jnp.ndarray, shape (N,)
+        Center pixel z index for each segment.
+    time_indices : jnp.ndarray, shape (N,)
+        Start time index for each segment.
+    intensities : jnp.ndarray, shape (N,)
+        Intensity scaling factor for each segment.
+    contributions : jnp.ndarray, shape (N, kernel_py, kernel_pz, kernel_time)
+        Kernel response for each segment.
+    point_to_compact : jnp.ndarray, shape (N, 8)
+        Mapping from (segment, octant) to compact tile index.
+    max_buckets : int
+        Maximum number of tiles.
+    kernel_py, kernel_pz, kernel_time : int
+        Kernel dimensions.
+    B1, B2, B3 : int
+        Tile sizes in pixel_y, pixel_z, time directions.
+    py_zero_bin, pz_zero_bin, time_zero_bin : int
+        Kernel center offsets.
+    batch_size : int
+        Segments per batch in scan.
+    num_py, num_pz, num_time_steps : int, optional
+        Detector bounds for validity checking.
+
+    Returns
+    -------
+    jnp.ndarray, shape (max_buckets, B1, B2, B3)
+        Sparse tile contributions.
+    """
+    N = pixel_y_indices.shape[0]
+
+    n_batches = (N + batch_size - 1) // batch_size
+    padded_N = n_batches * batch_size
+    pad = padded_N - N
+
+    py_pad = jnp.pad(pixel_y_indices, (0, pad), constant_values=0)
+    pz_pad = jnp.pad(pixel_z_indices, (0, pad), constant_values=0)
+    t_pad = jnp.pad(time_indices, (0, pad), constant_values=0)
+    int_pad = jnp.pad(intensities, (0, pad), constant_values=0.0)
+    contrib_pad = jnp.pad(contributions,
+                          ((0, pad), (0, 0), (0, 0), (0, 0)),
+                          constant_values=0.0)
+    p2c_pad = jnp.pad(point_to_compact, ((0, pad), (0, 0)), constant_values=0)
+    valid_mask = jnp.arange(padded_N) < N
+
+    py_batched = py_pad.reshape(n_batches, batch_size)
+    pz_batched = pz_pad.reshape(n_batches, batch_size)
+    t_batched = t_pad.reshape(n_batches, batch_size)
+    int_batched = int_pad.reshape(n_batches, batch_size)
+    contrib_batched = contrib_pad.reshape(
+        n_batches, batch_size, kernel_py, kernel_pz, kernel_time)
+    p2c_batched = p2c_pad.reshape(n_batches, batch_size, 8)
+    valid_batched = valid_mask.reshape(n_batches, batch_size)
+
+    kpy_idx = jnp.arange(kernel_py)
+    kpz_idx = jnp.arange(kernel_pz)
+    kt_idx = jnp.arange(kernel_time)
+
+    def process_batch(output, batch_data):
+        bpy, bpz, bt, bi, bc, bp, bv = batch_data
+
+        # Scale contributions — shape (batch_size, K_py, K_pz, K_t)
+        scaled = bc * bi[:, None, None, None]
+
+        # Global coordinates — shape (batch_size, K_py, K_pz, K_t)
+        gpy = (bpy[:, None, None, None] - py_zero_bin
+               + kpy_idx[None, :, None, None]).astype(jnp.int32)
+        gpz = (bpz[:, None, None, None] - pz_zero_bin
+               + kpz_idx[None, None, :, None]).astype(jnp.int32)
+        gt = (bt[:, None, None, None] - time_zero_bin
+              + kt_idx[None, None, None, :]).astype(jnp.int32)
+
+        # Zero contributions outside detector bounds
+        if num_py is not None and num_pz is not None and num_time_steps is not None:
+            valid_bounds = ((gpy >= 0) & (gpy < num_py)
+                            & (gpz >= 0) & (gpz < num_pz)
+                            & (gt >= 0) & (gt < num_time_steps))
+            scaled = scaled * valid_bounds
+
+        # Home tile
+        home_bpy = (bpy[:, None, None, None] - py_zero_bin) // B1
+        home_bpz = (bpz[:, None, None, None] - pz_zero_bin) // B2
+        home_bt = (bt[:, None, None, None] - time_zero_bin) // B3
+
+        # Cell tile
+        cell_bpy = gpy // B1
+        cell_bpz = gpz // B2
+        cell_bt = gt // B3
+
+        # Octant index
+        which_py = jnp.clip(cell_bpy - home_bpy, 0, 1).astype(jnp.int32)
+        which_pz = jnp.clip(cell_bpz - home_bpz, 0, 1).astype(jnp.int32)
+        which_t = jnp.clip(cell_bt - home_bt, 0, 1).astype(jnp.int32)
+        octant = which_py * 4 + which_pz * 2 + which_t
+
+        # Gather tile index
+        batch_idx = jnp.arange(batch_size)[:, None, None, None]
+        batch_idx_expanded = jnp.broadcast_to(
+            batch_idx, (batch_size, kernel_py, kernel_pz, kernel_time))
+        bucket_idx = bp[batch_idx_expanded, octant]
+
+        # Local coordinates within tile
+        lpy = (gpy % B1).astype(jnp.int32)
+        lpz = (gpz % B2).astype(jnp.int32)
+        lt = (gt % B3).astype(jnp.int32)
+
+        # Mask invalid segments
+        valid_4d = jnp.broadcast_to(
+            bv[:, None, None, None],
+            (batch_size, kernel_py, kernel_pz, kernel_time))
+        masked_scaled = jnp.where(valid_4d, scaled, 0.0)
+
+        output = output.at[bucket_idx, lpy, lpz, lt].add(
+            masked_scaled, mode='drop')
+
+        return output, None
+
+    output = jnp.zeros((max_buckets, B1, B2, B3), dtype=jnp.float32)
+    output, _ = jax.lax.scan(
+        process_batch,
+        output,
+        (py_batched, pz_batched, t_batched, int_batched,
+         contrib_batched, p2c_batched, valid_batched)
+    )
+
+    return output
+
+
+@partial(jax.jit, static_argnames=('B1', 'B2', 'B3', 'num_py', 'num_pz',
+                                    'num_time_steps', 'max_buckets'))
+def sparse_pixel_buckets_to_dense(buckets, compact_to_key, num_active,
+                                  B1, B2, B3, num_py, num_pz,
+                                  num_time_steps, max_buckets):
+    """
+    Convert sparse 3D pixel tiles back to dense (num_py, num_pz, num_time) array.
+
+    Parameters
+    ----------
+    buckets : jnp.ndarray, shape (max_buckets, B1, B2, B3)
+        Sparse tile contributions.
+    compact_to_key : jnp.ndarray, shape (max_buckets,)
+        Mapping to original tile keys.
+    num_active : int
+        Number of active tiles.
+    B1, B2, B3 : int
+        Tile sizes in pixel_y, pixel_z, time.
+    num_py, num_pz : int
+        Total pixels in y and z.
+    num_time_steps : int
+        Total time steps.
+    max_buckets : int
+        Maximum number of tiles.
+
+    Returns
+    -------
+    jnp.ndarray, shape (num_py, num_pz, num_time_steps)
+        Dense output array.
+    """
+    NUM_BPZ = (num_pz + B2 - 1) // B2
+    NUM_BT = (num_time_steps + B3 - 1) // B3
+
+    def add_tile(i, output):
+        key = compact_to_key[i]
+        bpy = key // (NUM_BPZ * NUM_BT)
+        remainder = key % (NUM_BPZ * NUM_BT)
+        bpz = remainder // NUM_BT
+        bt = remainder % NUM_BT
+
+        py_start = bpy * B1
+        pz_start = bpz * B2
+        t_start = bt * B3
+
+        py_indices = py_start + jnp.arange(B1)[:, None, None]
+        pz_indices = pz_start + jnp.arange(B2)[None, :, None]
+        t_indices = t_start + jnp.arange(B3)[None, None, :]
+
+        valid = i < num_active
+        tile_data = jnp.where(valid, buckets[i], 0.0)
+
+        output = output.at[py_indices, pz_indices, t_indices].add(
+            tile_data, mode='drop')
+        return output
+
+    output = jnp.zeros((num_py, num_pz, num_time_steps), dtype=jnp.float32)
+    output = jax.lax.fori_loop(0, max_buckets, add_tile, output)
 
     return output

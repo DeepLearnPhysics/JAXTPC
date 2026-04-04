@@ -96,22 +96,23 @@ def build_viz_config(resp_path):
 def load_event_resp(resp_path, event_idx):
     """Load one event's response signals as dense arrays.
 
-    Automatically detects uint16 (digitized) vs float32 format.
+    Automatically detects wire (2D) vs pixel (3D) format, and
+    uint16 (digitized) vs float32.
 
     Returns
     -------
     dense_signals : dict
-        {(vol, plane): (num_wires, num_time_steps) ndarray}
+        Wire: {(vol, plane): (num_wires, num_time_steps) ndarray}
+        Pixel: {(vol, plane): (num_py, num_pz, num_time_steps) ndarray}
     event_attrs : dict
     pedestals : dict or None
-        {(vol, plane): int} if digitized, None otherwise.
     """
     event_key = f'event_{event_idx:03d}'
 
     with h5py.File(resp_path, 'r') as f:
-        cfg = f['config']
-        num_time_steps = int(cfg.attrs['num_time_steps'])
-        num_wires_arr = cfg['num_wires'][:]
+        cfg_grp = f['config']
+        num_time_steps = int(cfg_grp.attrs['num_time_steps'])
+        num_wires_arr = cfg_grp['num_wires'][:]
         n_vol = num_wires_arr.shape[0]
         n_planes = num_wires_arr.shape[1]
 
@@ -124,39 +125,83 @@ def load_event_resp(resp_path, event_idx):
 
         for v in range(n_vol):
             vol_key = f'volume_{v}'
-            for p in range(n_planes):
-                nw = int(num_wires_arr[v, p])
-                if nw == 0:
-                    continue
-                plabel = _plane_label(p)
+            if vol_key not in evt:
+                continue
 
-                if vol_key not in evt or plabel not in evt[vol_key] or \
-                   'delta_wire' not in evt[vol_key][plabel]:
-                    dense_signals[(v, p)] = np.zeros((nw, num_time_steps),
-                                                      dtype=np.uint16)
+            # Discover plane labels from HDF5 groups
+            vol_grp = evt[vol_key]
+            for plabel in vol_grp:
+                g = vol_grp[plabel]
+                if not isinstance(g, h5py.Group):
                     continue
 
-                g = evt[vol_key][plabel]
-                wire_start = int(g.attrs['wire_start'])
-                time_start = int(g.attrs['time_start'])
+                # Detect pixel vs wire by presence of delta_py
+                is_pixel = 'delta_py' in g
 
-                wires = wire_start + np.cumsum(g['delta_wire'][:]).astype(np.int32)
-                times = time_start + np.cumsum(g['delta_time'][:]).astype(np.int32)
-                valid = ((wires >= 0) & (wires < nw) &
-                         (times >= 0) & (times < num_time_steps))
+                if is_pixel:
+                    # Pixel 3D format
+                    if 'n_pixels' not in g.attrs:
+                        continue
+                    py_start = int(g.attrs['py_start'])
+                    pz_start = int(g.attrs['pz_start'])
+                    time_start = int(g.attrs['time_start'])
 
-                raw_values = g['values'][:]
-                if raw_values.dtype == np.uint16:
-                    digitized = True
-                    ped = int(g.attrs['pedestal'])
-                    pedestals[(v, p)] = ped
-                    dense = np.zeros((nw, num_time_steps), dtype=np.uint16)
-                    dense[wires[valid], times[valid]] = raw_values[valid]
+                    pys = py_start + np.cumsum(g['delta_py'][:]).astype(np.int32)
+                    pzs = pz_start + np.cumsum(g['delta_pz'][:]).astype(np.int32)
+                    times = time_start + np.cumsum(g['delta_time'][:]).astype(np.int32)
+
+                    # Infer pixel grid size from volume_ranges if available
+                    if 'volume_ranges' in cfg_grp:
+                        vr = cfg_grp['volume_ranges'][v]  # (3, 2) in mm
+                        # Assume pixel pitch from range / max pixel index
+                        num_py = int(np.max(pys)) + 1 if len(pys) > 0 else 1
+                        num_pz = int(np.max(pzs)) + 1 if len(pzs) > 0 else 1
+                    else:
+                        num_py = int(np.max(pys)) + 1 if len(pys) > 0 else 1
+                        num_pz = int(np.max(pzs)) + 1 if len(pzs) > 0 else 1
+
+                    values = g['values'][:].astype(np.float32)
+                    valid = ((pys >= 0) & (pys < num_py) &
+                             (pzs >= 0) & (pzs < num_pz) &
+                             (times >= 0) & (times < num_time_steps))
+
+                    dense = np.zeros((num_py, num_pz, num_time_steps), dtype=np.float32)
+                    dense[pys[valid], pzs[valid], times[valid]] = values[valid]
+
+                    # Find plane index from label
+                    p = 0  # pixel volumes have plane_idx=0
+                    dense_signals[(v, p)] = dense
+
                 else:
-                    dense = np.zeros((nw, num_time_steps), dtype=np.float32)
-                    dense[wires[valid], times[valid]] = raw_values[valid]
+                    # Wire 2D format
+                    if 'delta_wire' not in g:
+                        continue
+                    # Find plane index from label
+                    p = {'U': 0, 'V': 1, 'Y': 2}.get(plabel, 0)
+                    nw = int(num_wires_arr[v, p])
+                    if nw == 0:
+                        continue
 
-                dense_signals[(v, p)] = dense
+                    wire_start = int(g.attrs['wire_start'])
+                    time_start = int(g.attrs['time_start'])
+
+                    wires = wire_start + np.cumsum(g['delta_wire'][:]).astype(np.int32)
+                    times = time_start + np.cumsum(g['delta_time'][:]).astype(np.int32)
+                    valid = ((wires >= 0) & (wires < nw) &
+                             (times >= 0) & (times < num_time_steps))
+
+                    raw_values = g['values'][:]
+                    if raw_values.dtype == np.uint16:
+                        digitized = True
+                        ped = int(g.attrs['pedestal'])
+                        pedestals[(v, p)] = ped
+                        dense = np.zeros((nw, num_time_steps), dtype=np.uint16)
+                        dense[wires[valid], times[valid]] = raw_values[valid]
+                    else:
+                        dense = np.zeros((nw, num_time_steps), dtype=np.float32)
+                        dense[wires[valid], times[valid]] = raw_values[valid]
+
+                    dense_signals[(v, p)] = dense
 
     return dense_signals, event_attrs, pedestals if digitized else None
 
@@ -266,6 +311,45 @@ def _decode_plane_corr(g, num_time_steps):
     return pk_flat, gid_flat, ch_flat, n_entries
 
 
+def _decode_plane_corr_pixel(g):
+    """Decode one pixel plane's CSR correspondence into flat arrays."""
+    grp_ids = g['group_ids'][:]
+    grp_sizes = g['group_sizes'][:]
+    center_py = g['center_py'][:]
+    center_pz = g['center_pz'][:]
+    center_times = g['center_times'][:]
+    peak_charges = g['peak_charges'][:]
+    delta_py = g['delta_py'][:]
+    delta_pz = g['delta_pz'][:]
+    delta_times = g['delta_times'][:]
+    charges_u16 = g['charges_u16'][:]
+
+    group_starts = np.cumsum(grp_sizes) - grp_sizes
+    n_entries = int(grp_sizes.sum())
+
+    py_flat = np.empty(n_entries, dtype=np.int32)
+    pz_flat = np.empty(n_entries, dtype=np.int32)
+    t_flat = np.empty(n_entries, dtype=np.int32)
+    gid_flat = np.empty(n_entries, dtype=np.int32)
+    ch_flat = np.empty(n_entries, dtype=np.float32)
+
+    for i in range(len(grp_ids)):
+        s = int(group_starts[i])
+        sz = int(grp_sizes[i])
+        py = int(center_py[i]) + delta_py[s:s + sz].astype(np.int32)
+        pz = int(center_pz[i]) + delta_pz[s:s + sz].astype(np.int32)
+        t = int(center_times[i]) + delta_times[s:s + sz].astype(np.int32)
+        ch = float(peak_charges[i]) * charges_u16[s:s + sz].astype(np.float32) / 65535.0
+
+        py_flat[s:s + sz] = py
+        pz_flat[s:s + sz] = pz
+        t_flat[s:s + sz] = t
+        gid_flat[s:s + sz] = grp_ids[i]
+        ch_flat[s:s + sz] = ch
+
+    return py_flat, pz_flat, t_flat, gid_flat, ch_flat, n_entries
+
+
 def load_event_corr(corr_path, event_idx, num_time_steps, n_volumes=2, max_planes=3):
     """Load correspondence and derive track labels + diffused charge.
 
@@ -306,34 +390,60 @@ def load_event_corr(corr_path, event_idx, num_time_steps, n_volumes=2, max_plane
 
         for v in range(n_volumes):
             vol_key = f'volume_{v}'
-            for p in range(max_planes):
-                nw = int(nw_arr[v, p])
-                if nw == 0:
-                    continue
-                plabel = _plane_label(p)
+            if vol_key not in evt:
+                continue
 
-                if vol_key not in evt or plabel not in evt[vol_key]:
-                    track_hits[(v, p)] = {
-                        'labeled_hits': np.zeros((0, 3), dtype=np.float32),
-                        'labeled_track_ids': np.array([], dtype=np.int32),
-                        'num_labeled': 0,
+            vol_grp = evt[vol_key]
+            for plabel in vol_grp:
+                g = vol_grp[plabel]
+                if not isinstance(g, h5py.Group) or 'group_ids' not in g:
+                    continue
+
+                # Detect pixel vs wire
+                is_pixel = 'delta_py' in g
+
+                # Find plane index from label
+                p = {'U': 0, 'V': 1, 'Y': 2, 'Pixel': 0}.get(plabel, 0)
+
+                if is_pixel:
+                    py, pz, t, gid, ch, n_entries = _decode_plane_corr_pixel(g)
+
+                    # Diffused charge as sparse dict (no dense 3D array)
+                    truth_dense[(v, p)] = {
+                        'pixel_y': py, 'pixel_z': pz,
+                        'time': t, 'values': ch,
                     }
-                    truth_dense[(v, p)] = np.zeros((nw, num_time_steps), dtype=np.float32)
-                    continue
 
-                pk, gid, ch, n_entries = _decode_plane_corr(evt[vol_key][plabel], num_time_steps)
+                    # Track labels with pixel decode
+                    num_pz = int(np.max(pz)) + 1 if len(pz) > 0 else 1
+                    def decode_pixel(sk, _npz=num_pz):
+                        return np.column_stack([sk // _npz, sk % _npz])
 
-                # Diffused charge: sum all entries into dense array
-                dense = np.zeros((nw, num_time_steps), dtype=np.float32)
-                all_w = pk // num_time_steps
-                all_t = pk % num_time_steps
-                valid = (all_w >= 0) & (all_w < nw) & (all_t >= 0) & (all_t < num_time_steps)
-                np.add.at(dense, (all_w[valid], all_t[valid]), ch[valid])
-                truth_dense[(v, p)] = dense
+                    # Pack spatial key for label_from_groups
+                    sk = py * num_pz + pz
+                    result = label_from_groups(
+                        sk, t, gid, ch, n_entries,
+                        g2t_per_vol[v], decode_spatial_fn=decode_pixel)
+                    track_hits[(v, p)] = result
 
-                # Track labels — use this volume's group_to_track
-                result = label_from_groups(pk, gid, ch, n_entries,
-                                           g2t_per_vol[v], num_time_steps)
-                track_hits[(v, p)] = result
+                else:
+                    nw = int(nw_arr[v, p])
+                    if nw == 0:
+                        continue
+
+                    pk, gid, ch, n_entries = _decode_plane_corr(g, num_time_steps)
+
+                    dense = np.zeros((nw, num_time_steps), dtype=np.float32)
+                    all_w = pk // num_time_steps
+                    all_t = pk % num_time_steps
+                    valid = (all_w >= 0) & (all_w < nw) & (all_t >= 0) & (all_t < num_time_steps)
+                    np.add.at(dense, (all_w[valid], all_t[valid]), ch[valid])
+                    truth_dense[(v, p)] = dense
+
+                    result = label_from_groups(
+                        all_w[valid], all_t[valid], gid[valid], ch[valid],
+                        np.sum(valid),
+                        g2t_per_vol[v])
+                    track_hits[(v, p)] = result
 
     return track_hits, truth_dense, g2t_per_vol

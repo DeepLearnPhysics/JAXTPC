@@ -400,7 +400,7 @@ def create_noise_fn_for_volume(cfg, vol_geom, response_kernels, e_chunk=None):
     noise_fn : callable
         Signature: (key, sig, plane_idx, n_wires, n_time) -> noisy signal.
     """
-    if not cfg.include_noise:
+    if not cfg.include_noise or vol_geom.readout_type == 'pixel':
         return _noop_noise
 
     noise_x, noise_y, noise_z, emp_freqs, emp_shape = load_noise_params(

@@ -7,10 +7,9 @@ distances, and space charge corrections.
 
 import jax
 import jax.numpy as jnp
-from functools import partial
 
 
-@partial(jax.jit, static_argnums=(1, 2))
+@jax.jit
 def compute_drift_to_plane(positions_cm, x_anode_cm, drift_direction,
                            drift_velocity_cm_us, plane_dist_from_anode_cm):
     """
