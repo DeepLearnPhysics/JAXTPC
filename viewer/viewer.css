@@ -1,0 +1,243 @@
+* { margin: 0; padding: 0; box-sizing: border-box }
+
+body {
+  background: #080808; color: #d0d0d0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  overflow: hidden; height: 100vh;
+}
+
+/* Loading screen */
+#loading {
+  position: fixed; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; z-index: 100; background: #080808;
+}
+#loading h1 { font-size: 26px; font-weight: 300; letter-spacing: 5px; color: #ff9900; margin-bottom: 8px }
+#loading .sub { color: #555; font-size: 13px; margin-bottom: 28px }
+#loadStatus { margin-top: 14px; color: #666; font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace }
+
+/* App layout */
+#app { display: none; height: 100vh; flex-direction: column }
+#main { display: flex; flex: 1; min-height: 0 }
+#panel3d { flex: 1; position: relative; overflow: hidden }
+#divider { width: 1px; background: rgba(255,255,255,.05); flex-shrink: 0 }
+#panel2d { flex: 1; position: relative; overflow: hidden }
+#canvas2d { display: block; width: 100%; height: 100%; cursor: crosshair }
+
+/* Toolbar */
+#toolbar {
+  height: 44px; display: flex; align-items: center; padding: 0 14px;
+  background: rgba(255,255,255,.025); border-bottom: 1px solid rgba(255,255,255,.05);
+  gap: 14px; flex-shrink: 0;
+}
+.logo { font-size: 14px; font-weight: 600; letter-spacing: 3px; color: #ff9900 }
+.sep { width: 1px; height: 20px; background: rgba(255,255,255,.08) }
+.toolbar-label { font-size: 10px; color: #666; letter-spacing: 1px; font-weight: 600 }
+
+/* Buttons */
+.btn-group { display: flex; border: 1px solid rgba(255,255,255,.08); border-radius: 5px; overflow: hidden }
+.btn-group button {
+  padding: 5px 13px; background: transparent; border: none; color: #666;
+  font-size: 11px; font-weight: 600; letter-spacing: 1px; cursor: pointer; transition: all .15s;
+}
+.btn-group button.active { background: rgba(255,153,0,.12); color: #ff9900 }
+.btn-group button:hover:not(.active) { color: #aaa; background: rgba(255,255,255,.04) }
+.btn-group button.disabled { opacity: .3; pointer-events: none }
+
+/* Inputs */
+#evInput {
+  background: #151515; color: #ff9900; border: none; font-size: 12px; font-weight: 600;
+  font-family: inherit; width: 48px; text-align: center; padding: 5px 2px; -moz-appearance: textfield;
+}
+#evInput::-webkit-outer-spin-button, #evInput::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0 }
+#volSelect {
+  background: #151515; color: #ff9900; border: 1px solid rgba(255,153,0,.25);
+  border-radius: 5px; padding: 4px 8px; font-size: 11px; font-weight: 600; font-family: inherit; cursor: pointer;
+}
+#colorSelect {
+  background: #151515; color: #ff9900; border: 1px solid rgba(255,153,0,.25);
+  border-radius: 5px; padding: 4px 8px; font-size: 11px; font-weight: 600;
+  font-family: inherit; cursor: pointer;
+}
+#labelSelect {
+  background: #151515; color: #ff9900; border: 1px solid rgba(255,153,0,.25);
+  border-radius: 5px; padding: 4px 8px; font-size: 11px; font-weight: 600;
+  font-family: inherit; cursor: pointer;
+}
+#catFilterSelect {
+  background: #151515; color: #ccc; border: 1px solid rgba(255,255,255,.08);
+  border-radius: 5px; padding: 4px 6px; font-size: 11px; font-family: inherit;
+  cursor: pointer; max-width: 160px;
+}
+#catFilterInput {
+  background: #151515; color: #ccc; border: 1px solid rgba(255,255,255,.08);
+  border-radius: 5px; padding: 4px 6px; font-size: 11px; font-family: inherit; width: 60px;
+}
+#catFilterInput::placeholder { color: #555 }
+#trackSelect {
+  background: #151515; color: #ccc; border: 1px solid rgba(255,255,255,.08);
+  border-radius: 5px; padding: 4px 6px; font-size: 11px; font-family: inherit; cursor: pointer; max-width: 140px;
+}
+#trackInput {
+  background: #151515; color: #ccc; border: 1px solid rgba(255,255,255,.08);
+  border-radius: 5px; padding: 4px 6px; font-size: 11px; font-family: inherit; width: 72px;
+}
+#trackInput::placeholder { color: #555 }
+#status {
+  margin-left: auto; font-size: 10px; color: #555;
+  font-family: 'SF Mono', 'Fira Code', monospace; max-width: 45%;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Panel labels */
+.panel-label {
+  position: absolute; top: 8px; left: 12px; font-size: 10px; color: #444;
+  letter-spacing: 2px; text-transform: uppercase; pointer-events: none; z-index: 2;
+}
+.panel-actions {
+  position: absolute; top: 6px; right: 10px; display: flex; gap: 4px; z-index: 3;
+}
+.pa-btn {
+  background: rgba(30,30,30,.6); border: 1px solid rgba(255,255,255,.12); color: #999;
+  width: 28px; height: 28px; border-radius: 4px; cursor: pointer;
+  font-size: 16px; display: flex; align-items: center; justify-content: center;
+  padding: 0; line-height: 1; opacity: 0.6; transition: opacity .15s, color .15s;
+  backdrop-filter: blur(4px);
+}
+.pa-btn:hover { opacity: 1; color: #ff9900; border-color: rgba(255,153,0,.3); }
+#toast {
+  position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%);
+  background: rgba(20,20,20,.9); color: #eee; padding: 8px 18px;
+  border-radius: 6px; font-size: 12px; font-family: inherit;
+  pointer-events: none; opacity: 0; transition: opacity .25s; z-index: 100;
+}
+#toast.visible { opacity: 1; }
+
+/* Loading overlay */
+#overlay {
+  display: none; position: fixed; inset: 0; background: rgba(8,8,8,.85);
+  z-index: 50; align-items: center; justify-content: center; flex-direction: column;
+}
+#overlay.visible { display: flex }
+#overlay .spinner {
+  width: 28px; height: 28px; border: 3px solid #333; border-top-color: #ff9900;
+  border-radius: 50%; animation: spin .8s linear infinite; margin-bottom: 12px;
+}
+#overlay .msg { color: #999; font-size: 13px; letter-spacing: 1px }
+@keyframes spin { to { transform: rotate(360deg) } }
+
+/* Settings panel */
+#settingsPanel {
+  display: none; position: fixed; top: 44px; right: 10px;
+  background: #151515; border: 1px solid rgba(255,255,255,.1);
+  border-radius: 8px; padding: 14px 16px; z-index: 60; width: 210px;
+}
+#settingsPanel .close {
+  position: absolute; top: 6px; right: 8px; background: none; border: none;
+  color: #666; font-size: 16px; cursor: pointer; padding: 2px 6px;
+}
+#settingsPanel .close:hover { color: #ccc }
+#settingsPanel.visible { display: block }
+#settingsPanel label { display: block; font-size: 11px; color: #888; margin-bottom: 4px; letter-spacing: .5px }
+#settingsPanel input[type=range] { width: 100%; margin: 4px 0 10px; accent-color: #ff9900 }
+#settingsPanel input[type=number] {
+  width: 70px; background: #222; color: #ccc; border: 1px solid #333;
+  border-radius: 4px; padding: 3px 6px; font-size: 11px;
+}
+.settings-section {
+  color: #ff9900; font-size: 10px; letter-spacing: 1px; margin-bottom: 8px; font-weight: 600;
+}
+.settings-divider {
+  color: #ff9900; font-size: 10px; letter-spacing: 1px; margin: 12px 0 8px;
+  font-weight: 600; border-top: 1px solid #333; padding-top: 10px;
+}
+
+/* Panel close button (inside actions row, hidden until expanded) */
+#panelCloseBtn { display: none; }
+#panelCloseBtn.visible { display: flex; }
+
+/* Drift transport bar — inside 3D panel */
+#driftBar {
+  display: none; position: absolute; bottom: 8px; left: 12px; right: 12px;
+  height: 30px; background: rgba(15,15,15,.8);
+  border: 1px solid rgba(255,255,255,.08); border-radius: 6px;
+  align-items: center; padding: 0 10px; gap: 8px; z-index: 4;
+  backdrop-filter: blur(4px);
+}
+#driftBar.visible { display: flex }
+#driftBar button {
+  background: none; border: 1px solid rgba(255,255,255,.12); color: #ccc;
+  width: 28px; height: 28px; border-radius: 4px; cursor: pointer;
+  font-size: 14px; display: flex; align-items: center; justify-content: center;
+}
+#driftBar button:hover { background: rgba(255,255,255,.08); color: #fff }
+#driftBar button.active { color: #ff9900; border-color: rgba(255,153,0,.3) }
+#driftScrubber {
+  flex: 1; height: 4px; -webkit-appearance: none; appearance: none;
+  background: #333; border-radius: 2px; outline: none; cursor: pointer;
+}
+#driftScrubber::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px;
+  background: #ff9900; border-radius: 50%; cursor: pointer;
+}
+#driftScrubber::-moz-range-thumb {
+  width: 14px; height: 14px; background: #ff9900;
+  border-radius: 50%; border: none; cursor: pointer;
+}
+#driftTimeLabel {
+  font-size: 10px; color: #888; font-family: 'SF Mono', monospace;
+  min-width: 80px; text-align: right;
+}
+
+/* Theme switch */
+.theme-switch {
+  display: flex; align-items: center; border: 1px solid rgba(255,255,255,.08);
+  border-radius: 5px; overflow: hidden; cursor: pointer;
+}
+.ts-icon { padding: 4px 8px; font-size: 13px; color: #555; transition: all .15s }
+.ts-icon.active { color: #ff9900 }
+body.light-mode .theme-switch { border-color: rgba(0,0,0,.12) }
+body.light-mode .ts-icon.active { color: #2563eb }
+
+/* Light mode overrides */
+body.light-mode { background: #fafafa; color: #2c2c2c }
+body.light-mode #loading { background: #fafafa }
+body.light-mode #loading h1 { color: #1a73e8 }
+body.light-mode #loading .sub { color: #777 }
+body.light-mode #loadStatus { color: #666 }
+body.light-mode #toolbar { background: #fff; border-bottom: 1px solid #e2e2e2 }
+body.light-mode .logo { color: #1a73e8 }
+body.light-mode .sep { background: #d8d8d8 }
+body.light-mode .btn-group { border-color: #ccc }
+body.light-mode .btn-group button { color: #777 }
+body.light-mode .btn-group button.active { background: rgba(26,115,232,.08); color: #1a73e8 }
+body.light-mode .btn-group button:hover:not(.active) { color: #333; background: rgba(0,0,0,.04) }
+body.light-mode #evInput { background: #f2f2f2; color: #1a73e8 }
+body.light-mode #volSelect, body.light-mode #labelSelect, body.light-mode #colorSelect {
+  background: #f2f2f2; color: #1a73e8; border-color: #bbb }
+body.light-mode #catFilterSelect { background: #f2f2f2; color: #2c2c2c; border-color: #bbb }
+body.light-mode #catFilterInput { background: #f2f2f2; color: #2c2c2c; border-color: #bbb }
+body.light-mode #status { color: #777 }
+body.light-mode #divider { background: #e2e2e2 }
+body.light-mode .panel-label { color: #999 }
+body.light-mode #overlay { background: rgba(250,250,250,.92) }
+body.light-mode #overlay .spinner { border-color: #ccc; border-top-color: #1a73e8 }
+body.light-mode #overlay .msg { color: #555 }
+body.light-mode #settingsPanel { background: #fff; border-color: #d8d8d8; box-shadow: 0 2px 8px rgba(0,0,0,.08) }
+body.light-mode #settingsPanel .close { color: #999 }
+body.light-mode #settingsPanel .close:hover { color: #333 }
+body.light-mode #settingsPanel label { color: #555 }
+body.light-mode #settingsPanel input[type=number] { background: #f2f2f2; color: #2c2c2c; border-color: #ccc }
+body.light-mode .settings-section, body.light-mode .settings-divider { color: #1a73e8 }
+body.light-mode .settings-divider { border-top-color: #e2e2e2 }
+body.light-mode #driftBar { background: rgba(255,255,255,.92); border-color: #d8d8d8; box-shadow: 0 1px 4px rgba(0,0,0,.06) }
+body.light-mode #driftBar button { border-color: #ccc; color: #777 }
+body.light-mode #driftBar button:hover { background: rgba(0,0,0,.04); color: #333 }
+body.light-mode #driftBar button.active { color: #1a73e8; border-color: rgba(26,115,232,.3) }
+body.light-mode #driftScrubber { background: #ddd }
+body.light-mode #driftScrubber::-webkit-slider-thumb { background: #1a73e8 }
+body.light-mode #driftScrubber::-moz-range-thumb { background: #1a73e8 }
+body.light-mode #driftTimeLabel { color: #555 }
+body.light-mode #settingsPanel input[type=range] { accent-color: #1a73e8 }
+body.light-mode .pa-btn { background: rgba(255,255,255,.7); border-color: rgba(0,0,0,.12); color: #999 }
+body.light-mode .pa-btn:hover { color: #1a73e8; border-color: rgba(26,115,232,.3) }
+body.light-mode #toast { background: rgba(50,50,50,.9); color: #fff }
