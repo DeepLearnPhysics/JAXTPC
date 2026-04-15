@@ -130,6 +130,8 @@ def compute_volume_physics(
         positions_cm=positions_cm,
         positions_yz_cm=yz,
         t0_us=deposits.t0_us,
+        interaction_ids=deposits.interaction_ids,
+        ancestor_track_ids=deposits.ancestor_track_ids,
     )
 
 
