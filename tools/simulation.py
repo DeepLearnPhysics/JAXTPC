@@ -562,7 +562,8 @@ class DetectorSimulator:
             sce_fn = sce_factory()
             vol_int = compute_volume_physics(
                 vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
-            return vol_int.charges, vol_int.photons, vol_int.positions_cm
+            return (vol_int.charges, vol_int.photons, vol_int.positions_cm,
+                    vol_int.interaction_ids, vol_int.ancestor_track_ids)
 
         @jax.jit
         def _light_calculator_jit(sim_params, stacked_deps):
@@ -730,11 +731,16 @@ class DetectorSimulator:
             sim_params = self._default_sim_params
 
         stacked_deps = jax.tree.map(lambda *xs: jnp.stack(xs), *deposits.volumes)
-        all_charges, all_photons, all_positions = self._light_calculator_jit(
-            sim_params, stacked_deps)
+        all_charges, all_photons, all_positions, all_interaction_ids, all_ancestor_track_ids = \
+            self._light_calculator_jit(sim_params, stacked_deps)
 
         filled_volumes = tuple(
-            vol._replace(charge=all_charges[v], photons=all_photons[v])
+            vol._replace(
+                charge=all_charges[v],
+                photons=all_photons[v],
+                interaction_ids=all_interaction_ids[v],
+                ancestor_track_ids=all_ancestor_track_ids[v],
+            )
             for v, vol in enumerate(deposits.volumes)
         )
         return deposits._replace(volumes=filled_volumes)

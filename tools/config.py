@@ -563,6 +563,8 @@ class VolumeIntermediates(NamedTuple):
     positions_cm: jnp.ndarray      # (N, 3) original positions (for NN response)
     positions_yz_cm: jnp.ndarray   # (N, 2) projected (for wire distances)
     t0_us: jnp.ndarray             # (N,) initial deposit time in μs
+    interaction_ids: jnp.ndarray    # (N,) interaction label (int16)
+    ancestor_track_ids: jnp.ndarray  # (N,) primary shower ancestor (int32)
 
 
 class PlaneIntermediates(NamedTuple):
