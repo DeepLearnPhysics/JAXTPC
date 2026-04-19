@@ -120,6 +120,11 @@ For each event, `run_batch.py` performs:
    - `seg/`: compact 3D truth deposits
    - `inst/`: per-instance sensor decomposition (group-level 3D-to-2D mapping)
 
+The canonical layout in ``docs/DATASET_DESIGN.md`` (in
+``particle-imaging-models/``) defines a fourth directory, ``labl/``,
+holding per-track labels. It is produced **separately**, not by
+``run_batch.py`` — see "Generating labl/" below.
+
 ## Threading Architecture
 
 With `--workers N` (default 2), save work is offloaded to background threads:
@@ -200,9 +205,14 @@ times = time_start + np.cumsum(delta_time)
 signal_adc = values.astype(np.int32) - pedestal  # signed ADC
 ```
 
-### 2. Segment File (`_seg_`)
+### 2. Seg File (`_seg_`)
 
-3D truth deposits. Array index = segment ID, referenced by inst file.
+Pure 3D truth physics. Deposit-level scalars only — no instance
+identifiers, no per-track metadata, no group machinery. Per the design
+doc (in ``particle-imaging-models/docs/DATASET_DESIGN.md``), seg is
+loadable standalone for SSL on 3D deposits or per-deposit physics
+regression; any labeling / correspondence goes through ``labl/`` or
+``inst/``.
 
 ```
 /config/
@@ -211,29 +221,36 @@ signal_adc = values.astype(np.int32) - pedestal  # signed ADC
     num_wires           (2, 3) int32
 
 /event_{NNN}/
-    attrs: source_event_idx, n_deposits, n_east, n_west, n_groups,
-           pos_origin_x/y/z, pos_step_mm
-    positions           (N, 3) uint16    voxelized at pos_step_mm resolution
-    de                  (N,) float16     energy deposit in MeV
-    dx                  (N,) float16     step length in mm
-    theta               (N,) float16     polar angle
-    phi                 (N,) float16     azimuthal angle
-    track_ids           (N,) int32       Geant4 particle track ID
-    group_ids           (N,) int32       group assignment
-    group_to_track      (G,) int32       group ID -> track ID lookup
-    qs_fractions        (N,) float16     deposit charge fraction within group
+    attrs: source_event_idx
+    volume_N/
+        attrs: n_actual, pos_origin_x/y/z, pos_step_mm
+        positions   (N, 3) uint16    voxelized at pos_step_mm
+        de          (N,) float16     energy deposit in MeV
+        dx          (N,) float16     step length in mm
+        theta       (N,) float16     polar angle
+        phi         (N,) float16     azimuthal angle
+        t0_us       (N,) float16     step time (µs)
+        charge      (N,) float32     recombined charge
+        photons     (N,) float32     scintillation photons
 ```
+
+**NOT stored here** (moved to inst/ or labl/ per design):
+``track_ids``, ``group_ids``, ``group_to_track``, ``qs_fractions``,
+``pdg``, ``interaction_ids``, ``ancestor_track_ids``,
+``original_indices``.
 
 **Decode positions:**
 ```python
-positions_mm = positions.astype(np.float32) * pos_step_mm + np.array([pos_origin_x, pos_origin_y, pos_origin_z])
+positions_mm = positions.astype(np.float32) * pos_step_mm + \
+               np.array([pos_origin_x, pos_origin_y, pos_origin_z])
 ```
-
-**Group assignment:** Consecutive runs of `group_size` deposits per track, split on spatial gaps > `gap_threshold_mm` and on the cathode boundary (x=0). `qs_fractions[i]` = deposit's share of its group's recombined charge, used for disaggregation.
 
 ### 3. Inst File (`_inst_`)
 
-Per-instance sensor decomposition: which groups contributed to which pixels, stored in CSR format.
+Per-instance sensor decomposition. Owns all group-related machinery:
+each deposit's group assignment, the per-group → track lookup, the
+within-group charge-fraction weights, and the CSR-encoded per-pixel
+entries (which groups contributed to which pixels).
 
 ```
 /config/
@@ -242,19 +259,30 @@ Per-instance sensor decomposition: which groups contributed to which pixels, sto
     num_wires           (2, 3) int32
 
 /event_{NNN}/
-    attrs: source_event_idx, n_deposits, n_groups, threshold
-    group_to_track      (G,) int32
-
-    {plane}/                              6 planes: east_U/V/Y, west_U/V/Y
-        group_ids       (G_p,) int32      active groups on this plane
-        group_sizes     (G_p,) uint8      entries per group
-        center_wires    (G_p,) int16      wire index of peak-charge pixel
-        center_times    (G_p,) int16      time index of peak-charge pixel
-        peak_charges    (G_p,) float32    charge at peak pixel (electrons)
-        delta_wires     (N_p,) int8       wire offset from group center
-        delta_times     (N_p,) int8       time offset from group center
-        charges_u16     (N_p,) uint16     charge as fraction of peak (x65535)
-        attrs: n_groups_plane, n_entries
+    attrs: source_event_idx, threshold
+    volume_N/
+        attrs: n_actual, n_groups
+        segment_to_group  (N,) int32     per-deposit: which group each
+                                         deposit belongs to. Row-aligned
+                                         with seg deposits in volume N.
+        qs_fractions      (N,) float16   per-deposit: each deposit's
+                                         share of its group's recombined
+                                         charge. Used for deposit-level
+                                         disaggregation when traversing
+                                         inst -> seg.
+        group_to_track    (G,) int32     per-group: Geant4 track_id of
+                                         each group.
+        {plane_label}/                   one subgroup per readout plane
+            group_ids       (G_p,) int32   active groups on this plane
+            group_sizes     (G_p,) uint8   entries per group
+            center_wires    (G_p,) int16   wire idx of peak-charge pixel
+            center_times    (G_p,) int16   time idx of peak-charge pixel
+            peak_charges    (G_p,) float32 charge at peak pixel (e-)
+            delta_wires     (N_p,) int8    wire offset from group center
+            delta_times     (N_p,) int8    time offset from group center
+            charges_u16     (N_p,) uint16  charge as fraction of peak
+                                           (x65535)
+            attrs: n_groups_plane, n_entries
 ```
 
 **Decode:**
@@ -268,20 +296,82 @@ charge = peak_charges[i] * charges_u16[j] / 65535.0
 
 ---
 
-## Bidirectional Correspondence
+### 4. Labl File (`_labl_`)
 
-**Forward (segment -> hits):**
-```python
-group = group_ids[deposit_idx]
-# Find group in correspondence, decode entries -> (wire, time, charge)
-deposit_charge_at_pixel = qs_fractions[deposit_idx] * group_charge_at_pixel
+Per-track labels and the per-deposit → track_id foreign key. **Not
+produced by `run_batch.py`** — generated separately (currently by the
+stop-gap script `make_labl.py`, see below). Lives under
+`{outdir}/labl/{dataset}_labl_{NNNN}.h5`.
+
+```
+/config/
+    attrs: dataset_name, source_file, n_events, n_volumes,
+           label_names, source, generator, ...
+
+/event_{NNN}/
+    volume_N/
+        # Per-deposit FK (N,) — row-aligned with seg deposits for vol N
+        segment_to_track     (N,) int32    deposit i -> Geant4 track_id
+
+        # Per-unique-track (T,) dimension table
+        track_ids            (T,) int32    primary key: unique tracks
+        track_pdg            (T,) int32    raw PDG code per track
+        track_interaction    (T,) int32    raw interaction_id per track
+        track_ancestor       (T,) int32    raw ancestor track_id per track
+        track_cluster        (T,) int32    dummy (= track_ids) for now
 ```
 
-**Backward (hit -> segments):**
+**Design rationale.** This is a two-section layout:
+- The per-deposit `segment_to_track` gives the track_id for each deposit
+  directly (no subgroup; its shape N_deposits distinguishes it).
+- The per-unique-track columns `track_{pdg, interaction, ancestor,
+  cluster}` are a dimension table keyed by `track_ids`, avoiding
+  per-track metadata being broadcast N times across deposits.
+
+**Label lookup (per-deposit):**
 ```python
-# Scan correspondence entries for matching (wire, time)
-track_id = group_to_track[group_id]
-members = np.where(group_ids == group_id)[0]  # constituent deposits
+# For deposit i in volume v:
+#   track_id = labl_v.segment_to_track[i]
+#   j = np.searchsorted(sort(labl_v.track_ids), track_id)
+#   pdg = labl_v.track_pdg[j]
+```
+
+**Generating labl — `production/make_labl.py`**
+
+`make_labl.py` is a temporary stand-in for a proper edepsim-side labl
+writer. It pulls the deposit → group assignment from `inst/`, the
+group → track_id map from `inst/`, and the per-track metadata (pdg,
+interaction, ancestor) from the original edepsim HDF5 source file.
+
+```bash
+python3 production/make_labl.py --outdir dataset_20 --source out.h5
+```
+
+- `--outdir`: dataset directory; must contain `inst/`. Creates `labl/`
+  alongside.
+- `--source`: edepsim HDF5 file. Defaults to the `source_file` attr
+  recorded in the inst config.
+- `--dataset`: filename prefix (default `sim`).
+
+Runtime is trivial (<2 s per 20-event file). This script is explicitly
+out of the simulation pipeline and **not JIT-compiled** — replace with
+an edepsim-side integrated writer when productionizing.
+
+## Bidirectional Correspondence
+
+**Forward (deposit -> pixels):**
+```python
+# seg has no group info; use inst:
+g = inst[v].segment_to_group[deposit_idx]
+# Find group g in inst[v][plane].group_ids, decode entries -> (wire, time, charge)
+deposit_charge_at_pixel = inst[v].qs_fractions[deposit_idx] * group_charge_at_pixel
+```
+
+**Backward (hit -> deposits):**
+```python
+# Scan inst per-pixel entries for matching (wire, time) -> group_id
+track_id = inst[v].group_to_track[group_id]
+# Deposits of this group: np.where(inst[v].segment_to_group == group_id)[0]
 ```
 
 **Deriving track labels (not stored, computed from correspondence):**

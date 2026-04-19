@@ -321,18 +321,50 @@ def main():
                                   deposits, source_idx)
 
     def _write_inst_event(f, event_key, inst_data, deposits, source_idx):
-        """Write pre-encoded correspondence to HDF5."""
+        """Write the inst file's event group.
+
+        Per-volume we store:
+          - ``segment_to_group`` (N_deposits,) int32 — per-deposit group
+            assignment. Moved out of seg because groups are an inst
+            concept (they partition seg deposits for sensor
+            correspondence).
+          - ``qs_fractions`` (N_deposits,) float16 — each deposit's share
+            of its group's recombined charge. Used for deposit-level
+            disaggregation when traversing inst → seg.
+          - ``group_to_track`` (G,) int32 — per-group Geant4 track_id.
+          - one subgroup per readout plane holding the CSR-encoded
+            per-pixel entries.
+        """
         evt = f.create_group(event_key)
         evt.attrs['source_event_idx'] = source_idx
         evt.attrs['n_volumes'] = len(deposits.volumes)
         evt.attrs['threshold'] = args.inst_threshold
 
         for v in range(len(deposits.volumes)):
+            vol = deposits.volumes[v]
+            n = int(vol.n_actual)
             vol_grp = evt.create_group(f'volume_{v}')
+            vol_grp.attrs['n_actual'] = n
+
+            # Per-deposit arrays (moved from seg)
+            if n > 0:
+                vol_grp.create_dataset(
+                    'segment_to_group',
+                    data=np.asarray(vol.group_ids[:n]).astype(np.int32),
+                    compression='gzip')
+                vol_grp.create_dataset(
+                    'qs_fractions',
+                    data=np.asarray(vol.qs_fractions[:n]).astype(np.float16),
+                    compression='gzip')
+
+            # Per-group lookup
             g2t = deposits.group_to_track[v]
             if g2t is not None:
                 vol_grp.create_dataset('group_to_track',
                                        data=g2t, compression='gzip')
+                vol_grp.attrs['n_groups'] = len(g2t)
+
+            # Per-plane CSR entries
             for (vi, pi), csr in inst_data.items():
                 if vi != v:
                     continue

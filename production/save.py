@@ -297,10 +297,16 @@ def save_event_sensor(f, event_key, response_signals, threshold_adc,
 
 
 def save_event_seg(f, event_key, deposits, source_event_idx, pos_step_mm=0.3, cfg=None):
-    """Save one event's 3D truth deposits in compact format.
+    """Save one event's 3D truth deposits — physics only.
 
-    Saves per-volume: positions, physics, charge, photons, qs_fractions,
-    track/group IDs, group_to_track.
+    Per-volume contents: positions, de/dx/theta/phi/t0_us, charge, photons.
+
+    This file does **not** carry instance identifiers or per-track
+    metadata (track_ids, group_ids, group_to_track, pdg, interaction_id,
+    ancestor_track_id, qs_fractions). Those belong in ``inst/`` (group
+    machinery + per-deposit group assignment + qs_fractions) and
+    ``labl/`` (per-deposit → track_id map + per-unique-track metadata).
+    See ``docs/DATASET_DESIGN.md`` in particle-imaging-models.
 
     If cfg is provided, positions are transformed from local coordinates
     back to global before saving.
@@ -344,28 +350,9 @@ def save_event_seg(f, event_key, deposits, source_event_idx, pos_step_mm=0.3, cf
         vg.create_dataset('phi', data=np.asarray(vol.phi[:n]).astype(np.float16), compression='gzip')
         vg.create_dataset('t0_us', data=np.asarray(vol.t0_us[:n]).astype(np.float16), compression='gzip')
 
-        # IDs
-        vg.create_dataset('track_ids', data=np.asarray(vol.track_ids[:n]), compression='gzip')
-        vg.create_dataset('group_ids', data=np.asarray(vol.group_ids[:n]), compression='gzip')
-        vg.create_dataset('interaction_ids', data=np.asarray(vol.interaction_ids[:n]), compression='gzip')
-        vg.create_dataset('ancestor_track_ids', data=np.asarray(vol.ancestor_track_ids[:n]), compression='gzip')
-        vg.create_dataset('pdg', data=np.asarray(vol.pdg[:n]), compression='gzip')
-
-        # Per-volume group_to_track
-        g2t = deposits.group_to_track[v]
-        if g2t is not None:
-            vg.create_dataset('group_to_track', data=g2t, compression='gzip')
-            vg.attrs['n_groups'] = len(g2t)
-
-        # Simulation outputs (charge, photons as float32 — can exceed float16 range; qs as float16)
+        # Sim-derived per-deposit scalars
         vg.create_dataset('charge', data=np.asarray(vol.charge[:n]).astype(np.float32), compression='gzip')
         vg.create_dataset('photons', data=np.asarray(vol.photons[:n]).astype(np.float32), compression='gzip')
-        vg.create_dataset('qs_fractions', data=np.asarray(vol.qs_fractions[:n]).astype(np.float16), compression='gzip')
-
-        # Original indices (mapping back to input deposit order)
-        oi = deposits.original_indices[v]
-        if oi is not None:
-            vg.create_dataset('original_indices', data=oi, compression='gzip')
 
 
 def encode_correspondence_csr(gp_pk, gp_gid, gp_ch, gp_count, num_time_steps,
