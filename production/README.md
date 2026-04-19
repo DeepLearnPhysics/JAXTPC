@@ -7,7 +7,7 @@ Batch simulation of particle events in a liquid argon TPC, producing structured 
 ```
 production/
 ├── run_batch.py              # Main batch simulation script
-├── save.py                   # HDF5 save functions (resp/seg/corr encoding)
+├── save.py                   # HDF5 save functions (sensor/seg/inst encoding)
 ├── load.py                   # HDF5 load/decode functions
 ├── view_production.ipynb     # Visualize production output (no simulation needed)
 └── README.md                 # This file
@@ -68,7 +68,7 @@ hits_chunk: 25000
 max_keys: 4000000
 inter_thresh: 1.0
 threshold_adc: 2.0
-corr_threshold: 25.0
+inst_threshold: 25.0
 max_buckets: 1000
 ```
 
@@ -82,7 +82,7 @@ See `profiler/` for individual scripts to tune each parameter separately.
 | `--config` | `config/cubic_wireplane_config.yaml` | Detector configuration YAML |
 | `--production-config` | none | Load optimized params from profiler config YAML |
 | `--dataset` | `sim` | Dataset name prefix for output files |
-| `--outdir` | `.` | Output directory (creates `resp/`, `seg/`, `corr/` subdirs) |
+| `--outdir` | `.` | Output directory (creates `sensor/`, `seg/`, `inst/` subdirs) |
 | `--events` | all | Number of events to process |
 | `--events-per-file` | 1000 | Events per output HDF5 file |
 | `--threshold-adc` | 2.0 | Minimum signal amplitude to store (ADC) |
@@ -90,16 +90,16 @@ See `profiler/` for individual scripts to tune each parameter separately.
 | `--noise` | off | Enable intrinsic noise |
 | `--electronics` | off | Enable RC-RC electronics response |
 | `--no-digitize` | on | Disable ADC digitization |
-| `--no-track-hits` | on | Disable track correspondence |
+| `--no-track-hits` | on | Disable per-instance decomposition (inst file) |
 | `--sce` | off | Path to SCE HDF5 map for E-field distortions |
 | `--total-pad` | 500,000 | Max deposits per volume (sets JIT compiled shape) |
 | `--response-chunk` | 50,000 | Deposits per response fori_loop batch (must divide total-pad) |
 | `--hits-chunk` | 25,000 | Deposits per track-hits fori_loop batch (must divide total-pad) |
 | `--max-keys` | 4,000,000 | Track-hits merge state capacity per plane (RuntimeError if exceeded) |
 | `--inter-thresh` | 1.0 | Track-hits intermediate pruning threshold (electrons) |
-| `--corr-threshold` | 25.0 | Charge threshold for correspondence entries (electrons) |
+| `--inst-threshold` | 25.0 | Charge threshold for inst (per-instance) entries (electrons) |
 | `--max-buckets` | 1,000 | Max active buckets per plane (bucketed mode) |
-| `--group-size` | 5 | Deposits per correspondence group |
+| `--group-size` | 5 | Deposits per inst (correspondence) group |
 | `--gap-threshold` | 5.0 | Group split threshold in mm |
 | `--seed` | 42 | Random seed for noise generation |
 
@@ -116,9 +116,9 @@ For each event, `run_batch.py` performs:
    - Q_s fractions computed inside JIT from recombined charges
    - Optional: electronics response, noise, ADC digitization
 4. **Save** to three HDF5 file types (offloaded to worker threads):
-   - Response: sparse thresholded wire signals
-   - Segments: compact 3D truth deposits
-   - Correspondence: group-level 3D-to-2D mapping
+   - `sensor/`: sparse thresholded raw readout
+   - `seg/`: compact 3D truth deposits
+   - `inst/`: per-instance sensor decomposition (group-level 3D-to-2D mapping)
 
 ## Threading Architecture
 
@@ -142,15 +142,18 @@ With 2 workers on typical events (~170K deposits): **~1.3s/event** (vs 2.9s seri
 The `view_production.ipynb` notebook loads and visualizes production output without running any simulation. It only needs the output HDF5 files — no YAML config or `generate_detector` required.
 
 ```python
-from production.load import get_file_paths, build_viz_config, load_event_resp, load_event_seg, load_event_corr
+from production.load import (
+    get_file_paths, build_viz_config,
+    load_event_sensor, load_event_seg, load_event_inst,
+)
 
-resp_path, seg_path, corr_path = get_file_paths('output/', 'myrun', file_index=0)
-viz_config = build_viz_config(resp_path)  # minimal config from HDF5 metadata
-dense_signals, attrs, pedestals = load_event_resp(resp_path, event_idx=0)
+sensor_path, seg_path, inst_path = get_file_paths('output/', 'myrun', file_index=0)
+viz_config = build_viz_config(sensor_path)  # minimal config from HDF5 metadata
+dense_signals, attrs, pedestals = load_event_sensor(sensor_path, event_idx=0)
 # pedestals is {(side, plane): int} if digitized, None otherwise
 # To get signed ADC: signal = dense_signals[(s,p)].astype(int) - pedestals[(s,p)]
 seg = load_event_seg(seg_path, event_idx=0)
-track_hits, truth_dense, g2t = load_event_corr(corr_path, event_idx=0, num_time_steps=2701)
+track_hits, truth_dense, g2t = load_event_inst(inst_path, event_idx=0, num_time_steps=2701)
 ```
 
 ---
@@ -160,14 +163,14 @@ track_hits, truth_dense, g2t = load_event_corr(corr_path, event_idx=0, num_time_
 Three file types per batch, split by `events_per_file`:
 
 ```
-{dataset}_resp_{NNNN}.h5   — detector response (sparse wire signals)
-{dataset}_seg_{NNNN}.h5    — 3D truth deposits (segment data)
-{dataset}_corr_{NNNN}.h5   — 3D-to-2D correspondence map
+{dataset}_sensor_{NNNN}.h5  — raw sensor readout (sparse wire/pixel signals)
+{dataset}_seg_{NNNN}.h5     — 3D truth deposits (segment data)
+{dataset}_inst_{NNNN}.h5    — per-instance sensor decomposition
 ```
 
-### 1. Response File (`_resp_`)
+### 1. Sensor File (`_sensor_`)
 
-Sparse thresholded wire signals after full detector simulation.
+Sparse thresholded raw readout after full detector simulation.
 
 ```
 /config/
@@ -199,7 +202,7 @@ signal_adc = values.astype(np.int32) - pedestal  # signed ADC
 
 ### 2. Segment File (`_seg_`)
 
-3D truth deposits. Array index = segment ID, referenced by correspondence.
+3D truth deposits. Array index = segment ID, referenced by inst file.
 
 ```
 /config/
@@ -228,9 +231,9 @@ positions_mm = positions.astype(np.float32) * pos_step_mm + np.array([pos_origin
 
 **Group assignment:** Consecutive runs of `group_size` deposits per track, split on spatial gaps > `gap_threshold_mm` and on the cathode boundary (x=0). `qs_fractions[i]` = deposit's share of its group's recombined charge, used for disaggregation.
 
-### 3. Correspondence File (`_corr_`)
+### 3. Inst File (`_inst_`)
 
-3D-to-2D correspondence: which groups contributed to which pixels, stored in CSR format.
+Per-instance sensor decomposition: which groups contributed to which pixels, stored in CSR format.
 
 ```
 /config/

@@ -1,10 +1,11 @@
 """
 Batch simulation: run events and save to structured HDF5 files.
 
-Produces three file types per batch:
-    {dataset}_resp_{NNNN}.h5  — sparse thresholded wire signals
-    {dataset}_seg_{NNNN}.h5   — 3D truth deposits (per-volume)
-    {dataset}_corr_{NNNN}.h5  — 3D→2D correspondence + track labels
+Produces three file types per batch (canonical names; see
+docs/DATASET_DESIGN.md in particle-imaging-models):
+    {dataset}_sensor_{NNNN}.h5  — sparse thresholded raw readout
+    {dataset}_seg_{NNNN}.h5     — 3D truth deposits (per-volume)
+    {dataset}_inst_{NNNN}.h5    — per-instance sensor decomposition
 
 See README.md for pipeline details, output schema, and threading architecture.
 
@@ -39,8 +40,8 @@ from tools.geometry import generate_detector
 from tools.loader import ParticleStepExtractor, build_deposit_data, compute_interaction_ids
 
 from production.save import (
-    write_config_resp, write_config_seg, write_config_corr,
-    save_event_resp, save_event_seg, save_event_corr,
+    write_config_sensor, write_config_seg, write_config_inst,
+    save_event_sensor, save_event_seg, save_event_inst,
     encode_correspondence_csr, encode_correspondence_csr_pixel, _plane_label,
 )
 
@@ -145,8 +146,9 @@ def main():
     parser.add_argument('--group-size', type=int, default=5)
     parser.add_argument('--gap-threshold', type=float, default=5.0,
                         help='Gap threshold in mm for group splitting')
-    parser.add_argument('--corr-threshold', type=float, default=25.0,
-                        help='Charge threshold in electrons for correspondence entries (default: 25)')
+    parser.add_argument('--inst-threshold', type=float, default=25.0,
+                        help='Charge threshold in electrons for inst (per-instance) '
+                             'entries (default: 25)')
     parser.add_argument('--total-pad', type=int, default=500_000)
     parser.add_argument('--response-chunk', type=int, default=50_000,
                         help='Deposits per fori_loop batch (must divide total-pad)')
@@ -181,13 +183,13 @@ def main():
     num_files = (num_events + events_per_file - 1) // events_per_file
 
     # Output directories
-    resp_dir = os.path.join(args.outdir, 'resp')
+    sensor_dir = os.path.join(args.outdir, 'sensor')
     seg_dir = os.path.join(args.outdir, 'seg')
-    corr_dir = os.path.join(args.outdir, 'corr') if include_track_hits else None
-    for d in [resp_dir, seg_dir]:
+    inst_dir = os.path.join(args.outdir, 'inst') if include_track_hits else None
+    for d in [sensor_dir, seg_dir]:
         os.makedirs(d, exist_ok=True)
-    if corr_dir:
-        os.makedirs(corr_dir, exist_ok=True)
+    if inst_dir:
+        os.makedirs(inst_dir, exist_ok=True)
 
     print('=' * 60)
     print(' JAXTPC Batch Simulation v2')
@@ -207,7 +209,7 @@ def main():
     print(f'  Bucketed:      {"ON (max_buckets=" + str(args.max_buckets) + ")" if args.bucketed else "OFF"}')
     print(f'  Workers:       {args.workers} {"(serial)" if args.workers == 0 else "(threaded)"}')
     print(f'  Device:        {jax.devices()[0]}')
-    print(f'  Output:        {args.outdir}/{{resp,seg,corr}}/')
+    print(f'  Output:        {args.outdir}/{{sensor,seg,inst}}/')
 
     # ---- Create simulator ----
     detector_config = generate_detector(args.config)
@@ -284,14 +286,14 @@ def main():
     num_workers = args.workers
     file_lock = threading.Lock()
 
-    def save_one_event(f_resp, f_seg, f_corr, item):
+    def save_one_event(f_sensor, f_seg, f_inst, item):
         """Save a single event (CSR encode + HDF5 write). Thread-safe."""
         (event_key, response_np, track_hits_raw, deposits, source_idx) = item
 
         # CSR encoding (numpy, GIL-free — runs in parallel across workers)
-        corr_data = None
-        if include_track_hits and f_corr is not None:
-            corr_data = {}
+        inst_data = None
+        if include_track_hits and f_inst is not None:
+            inst_data = {}
             for plane_key, raw in track_hits_raw.items():
                 if not isinstance(plane_key, tuple):
                     continue
@@ -299,31 +301,31 @@ def main():
                 sk, tk, gid, ch, count, _ = raw
                 if cfg.volumes[vol_idx].readout_type == 'pixel':
                     num_pz = cfg.volumes[vol_idx].pixel_shape[1]
-                    corr_data[plane_key] = encode_correspondence_csr_pixel(
+                    inst_data[plane_key] = encode_correspondence_csr_pixel(
                         sk, tk, gid, ch, count, num_pz,
-                        threshold=args.corr_threshold)
+                        threshold=args.inst_threshold)
                 else:
                     pk = sk * cfg.num_time_steps + tk
-                    corr_data[plane_key] = encode_correspondence_csr(
+                    inst_data[plane_key] = encode_correspondence_csr(
                         pk, gid, ch, count, cfg.num_time_steps,
-                        threshold=args.corr_threshold)
+                        threshold=args.inst_threshold)
 
         # HDF5 write (serialized through file lock)
         with file_lock:
-            save_event_resp(f_resp, event_key, response_np, threshold_adc,
+            save_event_sensor(f_sensor, event_key, response_np, threshold_adc,
                             source_idx, deposits, cfg=cfg,
                             digitized=include_digitize)
             save_event_seg(f_seg, event_key, deposits, source_idx, cfg=cfg)
-            if corr_data is not None and f_corr is not None:
-                _write_corr_event(f_corr, event_key, corr_data,
+            if inst_data is not None and f_inst is not None:
+                _write_inst_event(f_inst, event_key, inst_data,
                                   deposits, source_idx)
 
-    def _write_corr_event(f, event_key, corr_data, deposits, source_idx):
+    def _write_inst_event(f, event_key, inst_data, deposits, source_idx):
         """Write pre-encoded correspondence to HDF5."""
         evt = f.create_group(event_key)
         evt.attrs['source_event_idx'] = source_idx
         evt.attrs['n_volumes'] = len(deposits.volumes)
-        evt.attrs['threshold'] = args.corr_threshold
+        evt.attrs['threshold'] = args.inst_threshold
 
         for v in range(len(deposits.volumes)):
             vol_grp = evt.create_group(f'volume_{v}')
@@ -331,7 +333,7 @@ def main():
             if g2t is not None:
                 vol_grp.create_dataset('group_to_track',
                                        data=g2t, compression='gzip')
-            for (vi, pi), csr in corr_data.items():
+            for (vi, pi), csr in inst_data.items():
                 if vi != v:
                     continue
                 g = vol_grp.create_group(_plane_label(pi, vi, cfg))
@@ -342,13 +344,13 @@ def main():
                 delta_key = 'delta_py' if 'delta_py' in csr else 'delta_wires'
                 g.attrs['n_entries'] = len(csr[delta_key])
 
-    def save_worker(f_resp, f_seg, f_corr, save_queue):
+    def save_worker(f_sensor, f_seg, f_inst, save_queue):
         """Worker thread: pull items from queue, encode + save."""
         while True:
             item = save_queue.get()
             if item is None:
                 break
-            save_one_event(f_resp, f_seg, f_corr, item)
+            save_one_event(f_sensor, f_seg, f_inst, item)
             save_queue.task_done()
 
     # ---- Process events ----
@@ -358,23 +360,23 @@ def main():
             event_end = min(event_start + events_per_file, num_events)
             n_in_file = event_end - event_start
 
-            resp_path = os.path.join(resp_dir,
-                f'{dataset_name}_resp_{file_idx:04d}.h5')
+            sensor_path = os.path.join(sensor_dir,
+                f'{dataset_name}_sensor_{file_idx:04d}.h5')
             seg_path = os.path.join(seg_dir,
                 f'{dataset_name}_seg_{file_idx:04d}.h5')
-            corr_path = os.path.join(corr_dir,
-                f'{dataset_name}_corr_{file_idx:04d}.h5') if corr_dir else None
+            inst_path = os.path.join(inst_dir,
+                f'{dataset_name}_inst_{file_idx:04d}.h5') if inst_dir else None
 
             print(f'File {file_idx:04d}: events {event_start}–{event_end-1} '
                   f'({n_in_file} events)')
 
-            with h5py.File(resp_path, 'w') as f_resp, \
+            with h5py.File(sensor_path, 'w') as f_sensor, \
                  h5py.File(seg_path, 'w') as f_seg:
 
-                f_corr_ctx = h5py.File(corr_path, 'w') if corr_path else None
+                f_inst_ctx = h5py.File(inst_path, 'w') if inst_path else None
                 try:
-                    write_config_resp(
-                        f_resp, cfg, params, simulator.recomb_model,
+                    write_config_sensor(
+                        f_sensor, cfg, params, simulator.recomb_model,
                         dataset_name, file_idx, args.data,
                         n_in_file, event_start, threshold_adc,
                         digitization_config=dig_config,
@@ -384,9 +386,9 @@ def main():
                         n_in_file, event_start,
                         args.group_size, args.gap_threshold,
                         run_id=run_id, git_info=git_info)
-                    if f_corr_ctx:
-                        write_config_corr(
-                            f_corr_ctx, cfg, dataset_name, file_idx, args.data,
+                    if f_inst_ctx:
+                        write_config_inst(
+                            f_inst_ctx, cfg, dataset_name, file_idx, args.data,
                             n_in_file, event_start,
                             args.group_size, args.gap_threshold,
                             run_id=run_id, git_info=git_info)
@@ -399,7 +401,7 @@ def main():
                         for w in range(num_workers):
                             t = threading.Thread(
                                 target=save_worker,
-                                args=(f_resp, f_seg, f_corr_ctx, save_queue))
+                                args=(f_sensor, f_seg, f_inst_ctx, save_queue))
                             t.daemon = True
                             t.start()
                             workers.append(t)
@@ -445,7 +447,7 @@ def main():
                         if num_workers > 0:
                             save_queue.put(item)
                         else:
-                            save_one_event(f_resp, f_seg, f_corr_ctx, item)
+                            save_one_event(f_sensor, f_seg, f_inst_ctx, item)
                         t_save = time.time() - t_save
 
                         t_total = t_load + t_sim + t_save
@@ -465,16 +467,16 @@ def main():
                             t.join()
 
                 finally:
-                    if f_corr_ctx:
-                        f_corr_ctx.close()
+                    if f_inst_ctx:
+                        f_inst_ctx.close()
 
             # Print file sizes
-            resp_mb = os.path.getsize(resp_path) / (1024 * 1024)
+            sensor_mb = os.path.getsize(sensor_path) / (1024 * 1024)
             seg_mb = os.path.getsize(seg_path) / (1024 * 1024)
-            print(f'  → resp: {resp_mb:.1f} MB, seg: {seg_mb:.1f} MB', end='')
-            if corr_path and os.path.exists(corr_path):
-                corr_mb = os.path.getsize(corr_path) / (1024 * 1024)
-                print(f', corr: {corr_mb:.1f} MB')
+            print(f'  → sensor: {sensor_mb:.1f} MB, seg: {seg_mb:.1f} MB', end='')
+            if inst_path and os.path.exists(inst_path):
+                inst_mb = os.path.getsize(inst_path) / (1024 * 1024)
+                print(f', inst: {inst_mb:.1f} MB')
             else:
                 print()
             print()
@@ -483,7 +485,7 @@ def main():
     print(f'{"=" * 60}')
     print(f'  Done. {num_events} events in {total_elapsed:.1f}s')
     print(f'  Average: {total_elapsed/num_events:.2f}s/event')
-    print(f'  Files:   {num_files} × 3 in {args.outdir}/{{resp,seg,corr}}/')
+    print(f'  Files:   {num_files} × 3 in {args.outdir}/{{sensor,seg,inst}}/')
     print(f'{"=" * 60}')
 
 

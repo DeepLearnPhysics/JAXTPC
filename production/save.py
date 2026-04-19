@@ -1,12 +1,11 @@
 """
 Production HDF5 save functions.
 
-Writes simulation output to three file types:
-    resp — sparse thresholded wire signals (delta-encoded + lzf)
-    seg  — 3D truth deposits (uint16 positions + float16 physics)
-    corr — 3D-to-2D correspondence (CSR + delta + uint16/peak)
-
-See DATA_FORMAT.md for the full schema.
+Writes simulation output to three file types (canonical names; see
+docs/DATASET_DESIGN.md in particle-imaging-models):
+    sensor — sparse thresholded wire/pixel readout (delta-encoded + lzf)
+    seg    — 3D truth deposits (uint16 positions + float16 physics)
+    inst   — per-instance sensor decomposition (CSR + delta + uint16/peak)
 """
 
 import numpy as np
@@ -35,10 +34,10 @@ def _write_provenance(g, run_id, git_info):
             g.attrs[key] = val
 
 
-def write_config_resp(f, cfg, params, recomb_model, dataset_name, file_index,
-                      source_file, n_events, global_offset, threshold_adc,
-                      digitization_config=None, run_id=None, git_info=None):
-    """Write config group for response file."""
+def write_config_sensor(f, cfg, params, recomb_model, dataset_name, file_index,
+                        source_file, n_events, global_offset, threshold_adc,
+                        digitization_config=None, run_id=None, git_info=None):
+    """Write config group for sensor (raw readout) file."""
     if 'config' in f:
         return
     g = f.create_group('config')
@@ -121,10 +120,10 @@ def write_config_seg(f, cfg, dataset_name, file_index, source_file,
     g.create_dataset('volume_ranges', data=vol_ranges)
 
 
-def write_config_corr(f, cfg, dataset_name, file_index, source_file,
+def write_config_inst(f, cfg, dataset_name, file_index, source_file,
                       n_events, global_offset, group_size, gap_threshold_mm,
                       run_id=None, git_info=None):
-    """Write config group for correspondence file."""
+    """Write config group for inst (per-instance sensor decomposition) file."""
     if 'config' in f:
         return
     g = f.create_group('config')
@@ -255,10 +254,10 @@ def _save_pixel_plane(g, sparse_dict):
     g.attrs['n_pixels'] = len(py_s)
 
 
-def save_event_resp(f, event_key, response_signals, threshold_adc,
-                    source_event_idx, deposits, cfg=None,
-                    digitized=False):
-    """Save one event's response signals (sparse, delta-encoded, gzip).
+def save_event_sensor(f, event_key, response_signals, threshold_adc,
+                      source_event_idx, deposits, cfg=None,
+                      digitized=False):
+    """Save one event's raw sensor readout (sparse, delta-encoded, gzip).
 
     Handles both wire (2D) and pixel (3D) output formats.
     For pixel volumes, the signal must be densified before calling this
@@ -514,17 +513,20 @@ def encode_correspondence_csr_pixel(gp_sk, gp_tk, gp_gid, gp_ch, gp_count,
     }
 
 
-def save_event_corr(f, event_key, raw_track_hits, deposits,
+def save_event_inst(f, event_key, raw_track_hits, deposits,
                     source_event_idx, num_time_steps,
-                    corr_threshold=0.0, cfg=None):
-    """Save one event's correspondence in CSR format.
+                    inst_threshold=0.0, cfg=None):
+    """Save one event's per-instance sensor decomposition (CSR format).
 
-    Handles both wire (2D) and pixel (3D) correspondence.
+    Handles both wire (2D) and pixel (3D) decompositions. The inst
+    modality stores the sensor-level signal split by the finest
+    simulator-provided instance (group / track / particle) with a
+    foreign-key mapping back to labl's canonical track identifier.
     """
     evt = f.create_group(event_key)
     evt.attrs['source_event_idx'] = source_event_idx
     evt.attrs['n_volumes'] = len(deposits.volumes)
-    evt.attrs['threshold'] = corr_threshold
+    evt.attrs['threshold'] = inst_threshold
 
     for v in range(len(deposits.volumes)):
         vol_grp = evt.create_group(f'volume_{v}')
@@ -549,14 +551,14 @@ def save_event_corr(f, event_key, raw_track_hits, deposits,
                 num_pz = cfg.volumes[v].pixel_shape[1]
                 csr = encode_correspondence_csr_pixel(
                     sk, tk, gid, ch, count, num_pz,
-                    threshold=corr_threshold)
+                    threshold=inst_threshold)
                 g.attrs['readout_type'] = 'pixel'
                 delta_key = 'delta_py'  # for n_entries
             else:
                 pk = sk * num_time_steps + tk
                 csr = encode_correspondence_csr(
                     pk, gid, ch, count, num_time_steps,
-                    threshold=corr_threshold)
+                    threshold=inst_threshold)
                 delta_key = 'delta_wires'
 
             for k, arr in csr.items():

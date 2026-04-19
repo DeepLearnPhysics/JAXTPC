@@ -1,12 +1,11 @@
 """
 Production HDF5 load functions.
 
-Reads simulation output from the three file types produced by run_batch.py:
-    resp — sparse thresholded wire signals
-    seg  — 3D truth deposits (per-volume)
-    corr — 3D-to-2D correspondence
-
-See DATA_FORMAT.md for the full schema.
+Reads simulation output from the three file types produced by
+``run_batch.py`` (canonical names):
+    sensor — sparse thresholded raw readout
+    seg    — 3D truth deposits (per-volume)
+    inst   — per-instance sensor decomposition
 """
 
 import os
@@ -28,12 +27,11 @@ def _plane_label(plane_idx):
 # =============================================================================
 
 def get_file_paths(production_dir, dataset, file_index):
-    """Return (resp_path, seg_path, corr_path) for a given batch file."""
-    tag = f'{dataset}_{{}}{file_index:04d}.h5'
-    return (
-        os.path.join(production_dir, 'resp', tag.format('resp_')),
-        os.path.join(production_dir, 'seg', tag.format('seg_')),
-        os.path.join(production_dir, 'corr', tag.format('corr_')),
+    """Return (sensor_path, seg_path, inst_path) for a given batch file."""
+    return tuple(
+        os.path.join(production_dir, stem,
+                     f'{dataset}_{stem}_{file_index:04d}.h5')
+        for stem in ('sensor', 'seg', 'inst')
     )
 
 
@@ -48,24 +46,24 @@ _ConfigMin = namedtuple('_ConfigMin', [
     'plane_names'])
 
 
-def load_config(resp_path):
+def load_config(sensor_path):
     """Load production metadata from a response file.
 
     Returns a dict with all config attributes plus 'num_wires_arr'.
     """
-    with h5py.File(resp_path, 'r') as f:
+    with h5py.File(sensor_path, 'r') as f:
         cfg = f['config']
         meta = dict(cfg.attrs)
         meta['num_wires_arr'] = cfg['num_wires'][:]
     return meta
 
 
-def build_viz_config(resp_path):
+def build_viz_config(sensor_path):
     """Build a minimal config object for visualization functions.
 
     Only requires the response file — no YAML or generate_detector needed.
     """
-    meta = load_config(resp_path)
+    meta = load_config(sensor_path)
     readout_type = meta.get('readout_type', 'wire')
     nw = meta['num_wires_arr']
     n_vol = nw.shape[0]
@@ -96,7 +94,7 @@ def build_viz_config(resp_path):
 # Response loading
 # =============================================================================
 
-def load_event_resp(resp_path, event_idx):
+def load_event_sensor(sensor_path, event_idx):
     """Load one event's response signals as dense arrays.
 
     Automatically detects wire (2D) vs pixel (3D) format, and
@@ -112,7 +110,7 @@ def load_event_resp(resp_path, event_idx):
     """
     event_key = f'event_{event_idx:03d}'
 
-    with h5py.File(resp_path, 'r') as f:
+    with h5py.File(sensor_path, 'r') as f:
         cfg_grp = f['config']
         num_time_steps = int(cfg_grp.attrs['num_time_steps'])
         num_wires_arr = cfg_grp['num_wires'][:]
@@ -282,7 +280,7 @@ def load_event_seg(seg_path, event_idx):
 # Correspondence loading
 # =============================================================================
 
-def _decode_plane_corr(g, num_time_steps):
+def _decode_plane_inst(g, num_time_steps):
     """Decode one plane's CSR correspondence into flat arrays."""
     grp_ids = g['group_ids'][:]
     grp_sizes = g['group_sizes'][:]
@@ -314,7 +312,7 @@ def _decode_plane_corr(g, num_time_steps):
     return pk_flat, gid_flat, ch_flat, n_entries
 
 
-def _decode_plane_corr_pixel(g):
+def _decode_plane_inst_pixel(g):
     """Decode one pixel plane's CSR correspondence into flat arrays."""
     grp_ids = g['group_ids'][:]
     grp_sizes = g['group_sizes'][:]
@@ -353,12 +351,12 @@ def _decode_plane_corr_pixel(g):
     return py_flat, pz_flat, t_flat, gid_flat, ch_flat, n_entries
 
 
-def load_event_corr(corr_path, event_idx, num_time_steps, n_volumes=2, max_planes=3):
+def load_event_inst(inst_path, event_idx, num_time_steps, n_volumes=2, max_planes=3):
     """Load correspondence and derive track labels + diffused charge.
 
     Parameters
     ----------
-    corr_path : str
+    inst_path : str
     event_idx : int
     num_time_steps : int
     n_volumes : int
@@ -378,7 +376,7 @@ def load_event_corr(corr_path, event_idx, num_time_steps, n_volumes=2, max_plane
     track_hits = {}
     truth_dense = {}
 
-    with h5py.File(corr_path, 'r') as f:
+    with h5py.File(inst_path, 'r') as f:
         evt = f[event_key]
         nw_arr = f['config']['num_wires'][:]
 
@@ -409,7 +407,7 @@ def load_event_corr(corr_path, event_idx, num_time_steps, n_volumes=2, max_plane
                 p = {'U': 0, 'V': 1, 'Y': 2, 'Pixel': 0}.get(plabel, 0)
 
                 if is_pixel:
-                    py, pz, t, gid, ch, n_entries = _decode_plane_corr_pixel(g)
+                    py, pz, t, gid, ch, n_entries = _decode_plane_inst_pixel(g)
 
                     # Diffused charge as sparse dict (no dense 3D array)
                     truth_dense[(v, p)] = {
@@ -434,7 +432,7 @@ def load_event_corr(corr_path, event_idx, num_time_steps, n_volumes=2, max_plane
                     if nw == 0:
                         continue
 
-                    pk, gid, ch, n_entries = _decode_plane_corr(g, num_time_steps)
+                    pk, gid, ch, n_entries = _decode_plane_inst(g, num_time_steps)
 
                     dense = np.zeros((nw, num_time_steps), dtype=np.float32)
                     all_w = pk // num_time_steps
