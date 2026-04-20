@@ -4,7 +4,7 @@
 Serves production HDF5 files + the viewer frontend. Files are matched
 by dataset_name (embedded in filenames as {dataset}_{kind}_{batch}.h5).
 
-Supports both flat directories and seg/corr/resp subdirectory layouts.
+Supports both flat directories and seg/inst/sensor subdirectory layouts.
 
 Usage:
     python3 viewer/serve_viewer.py production_run/
@@ -22,8 +22,8 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from glob import glob
 
-KINDS = ('seg', 'corr', 'resp')
-OPTIONAL_KINDS = ('optical',)
+KINDS = ('seg', 'inst', 'sensor')
+OPTIONAL_KINDS = ('labl', 'optical')
 
 
 # ── File discovery ──────────────────────────────────────────────
@@ -75,7 +75,7 @@ def select_dataset(prod_dir, requested=None):
     datasets = discover_datasets(prod_dir)
 
     if not datasets:
-        sys.exit(f"Error: no HDF5 files matching *_{{seg,corr,resp}}_*.h5 found in {prod_dir}")
+        sys.exit(f"Error: no HDF5 files matching *_{{seg,inst,sensor}}_*.h5 found in {prod_dir}")
 
     if requested:
         if requested not in datasets:

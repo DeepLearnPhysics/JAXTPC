@@ -17,9 +17,11 @@ Interactive 3D/2D visualization and GIF export for JAXTPC production data.
 
 ## Interactive Viewer
 
-Serves production HDF5 files (seg/corr/resp) and opens a browser-based viewer
-with 3D segment display, 2D wire response panels, correspondence highlighting,
-drift animation, and track/PDG/ancestor/interaction color modes.
+Serves production HDF5 files (seg/inst/sensor, plus the optional labl) and
+opens a browser-based viewer with 3D segment display, 2D wire/pixel sensor
+panels, correspondence highlighting, drift animation, and (when labl is
+present) track/PDG/ancestor/interaction color modes. If labl is missing the
+LABEL color mode and per-track filters are hidden; everything else still works.
 
 ### Usage
 
@@ -32,12 +34,12 @@ python3 viewer/serve_viewer.py production_run/ --dataset myrun --port 9000
 ```
 
 Supports both flat directories (`production_run/*.h5`) and subdirectory layouts
-(`production_run/seg/`, `production_run/corr/`, `production_run/resp/`).
+(`production_run/{seg,inst,sensor}/`, plus optional `production_run/labl/`).
 
 ### Controls
 
-- **View modes**: HITS (truth segments), RESP (wire response), OPTICAL (light)
-- **Color modes**: dE (energy deposit) or categorical (Track, PDG, Ancestor, Interaction)
+- **View modes**: HITS (truth segments), SENSOR (raw wire/pixel readout), OPTICAL (light)
+- **Color modes**: dE (energy deposit) or categorical (Track, PDG, Ancestor, Interaction — requires labl)
 - **Correspondence**: hover 3D segments to highlight 2D pixels (and vice versa)
 - **Drift animation**: play/pause animated charge drift toward anodes
 - **Volume selection**: view all volumes or a single volume
@@ -45,12 +47,16 @@ Supports both flat directories (`production_run/*.h5`) and subdirectory layouts
 - **Double-click**: expand a 2D panel to full size
 - **Save/Copy**: download PNG or copy to clipboard (buttons on each panel)
 - **Theme**: dark/light mode toggle
-- **Settings**: dE emphasis, drift speed, response gamma, optical thresholds
+- **Settings**: dE emphasis, drift speed, sensor gamma, optical thresholds
 
 ## GIF Export
 
 Generates a rotating 3D point cloud GIF cycling through color modes:
 Energy Deposit, Track ID, PDG, Ancestor ID, Interaction ID.
+
+The categorical color modes pull labels from the matching `labl/` file
+(auto-detected next to the seg path). If no labl file is found, only the
+Energy Deposit mode is rendered.
 
 ### Usage
 
@@ -91,6 +97,7 @@ python3 viewer/export_gif.py path/to/sim_seg_0000.h5 -e 0 -o event.mp4
 | `--emph-pow` | 5.0 | dE emphasis power (steepness) |
 | `--emph-amt` | 0.75 | dE emphasis amount (0=uniform, 1=full) |
 | `--light` | off | Light background mode |
+| `--labl` | auto | Override labl path (auto-detected sibling by default) |
 
 ### Performance
 

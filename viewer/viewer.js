@@ -29,12 +29,18 @@ let topTracks = [];
 let vizReady = false;
 
 let curViewMode = 'hits';
-let respVols = []; // [ {U:{wires,times,values,n},...}, ... ] per volume
-let respLoadedFor = -1;
-let respGamma = 0.2;
-let respDeadband = 2.0;
+let sensorVols = []; // [ {U:{wires,times,values,n},...}, ... ] per volume
+let sensorLoadedFor = -1;
+let sensorGamma = 0.2;
+let sensorDeadband = 2.0;
 let deEmphPow = 5.0;
 let deEmphAmt = 0.75;
+
+// Labels (per-track metadata: track/pdg/ancestor/interaction)
+// Sourced from the optional labl/ file. When absent, label color modes
+// and the LABEL UI are hidden; correspondence highlighting still works
+// because gids come from inst/.
+let hasLabl = false;
 
 // Optical
 let hasOptical = false;
@@ -70,9 +76,11 @@ let timeStepUs = 0.5;
 // Stored 3D arrays for color mode switching
 let _3dPdg=null,_3dAnc=null,_3dInt=null,_3dTids=null;
 let _3dTrkWt=null,_3dAncWt=null,_3dIntWt=null,_3dPdgWt=null;
-let respNorms = {};
+let sensorNorms = {};
 
-let volumes = []; // [ {pos,de,tids,gids,n,planes:{U:{corrPK,...},...}}, ... ]
+let volumes = []; // [ {pos,de,gids,n,planes:{U:{corrPK,...},...}, tids?,pdg?,ancTids?,intIds?}, ... ]
+                  // gids comes from inst/segment_to_group; tids/pdg/ancTids/intIds
+                  // are populated only when labl/ is present.
 let volRanges = null; // [ [[xmin,xmax],[ymin,ymax],[zmin,zmax]], ... ] in mm
 
 let renderer, scene, camera, controls;
@@ -125,13 +133,13 @@ function txCol(){return lightMode?'#777777':'#555555';}
 function sweepCol(){return lightMode?'rgba(250,250,250,0.88)':'rgba(8,8,8,0.85)';}
 
 // Mode-aware colormap selectors
-function respCmapRGB(t){return lightMode?seismicRGB(t):obsidianRGB(t);}
+function sensorCmapRGB(t){return lightMode?seismicRGB(t):obsidianRGB(t);}
 function hitsCmapRGB(t){return lightMode?infernoRGB(t):warmRGB(t);}
 
 function getDispForPanel(p){
   if(!p) return null;
-  if(curViewMode==='resp'&&respVols[p.vol]&&respVols[p.vol][p.plane]){
-    const rp=respVols[p.vol][p.plane];
+  if(curViewMode==='sensor'&&sensorVols[p.vol]&&sensorVols[p.vol][p.plane]){
+    const rp=sensorVols[p.vol][p.plane];
     return{w:rp.wires,t:rp.times,v:rp.values,n:rp.n};
   }
   const pd=volumes[p.vol]&&volumes[p.vol].planes[p.plane];
@@ -207,7 +215,7 @@ async function loadEvent(idx){
   D.config.max_time=d.config.max_time;
   volumes=d.volumes;
   curEvent=idx;
-  respLoadedFor=-1;
+  sensorLoadedFor=-1;
   document.getElementById('evInput').value=idx;
   selectedTrack=null;
   document.getElementById('catFilterSelect').value='all';
@@ -228,7 +236,7 @@ async function loadEvent(idx){
     loopPaused=false;
     updateDriftUI();
   }
-  await loadResp(idx);
+  await loadSensor(idx);
   lightLoadedFor=-1; // invalidate cached light, load on demand
   if(curViewMode==='optical'){
     await loadLight(idx);
@@ -243,12 +251,12 @@ async function loadEvent(idx){
   setStatus('Event '+idx+' (source '+d.config.event_idx+')');
 }
 
-async function loadResp(idx){
-  if(respLoadedFor===idx) return;
-  const d=await workerCall('loadResp',{idx});
-  respVols=d.respVols;
-  respNorms=d.respNorms;
-  respLoadedFor=idx;
+async function loadSensor(idx){
+  if(sensorLoadedFor===idx) return;
+  const d=await workerCall('loadSensor',{idx});
+  sensorVols=d.sensorVols;
+  sensorNorms=d.sensorNorms;
+  sensorLoadedFor=idx;
 }
 
 async function loadLight(idx,forceReload){
@@ -306,11 +314,13 @@ function rebuildAllLookups(){
 }
 
 function getIdsForLabel(vol,label){
-  if(label==='track') return vol.tids;
-  if(label==='pdg') return vol.pdg;
-  if(label==='ancestor') return vol.ancTids;
-  if(label==='interaction') return vol.intIds;
-  return vol.tids;
+  // All label arrays are sourced from labl/. Returns null when the
+  // labl file is absent; callers must null-check.
+  if(label==='track') return vol.tids||null;
+  if(label==='pdg') return vol.pdg||null;
+  if(label==='ancestor') return vol.ancTids||null;
+  if(label==='interaction') return vol.intIds||null;
+  return vol.tids||null;
 }
 
 function computeTopTracks(){
@@ -365,7 +375,7 @@ function computePanelDomIds(){
     p.pixelDomTrack=new Int32Array(n);
     p.pixelDomPdg=new Int32Array(n);
     p.pixelDomAnc=new Int32Array(n);
-    p.pixelDomInt=new Int16Array(n);
+    p.pixelDomInt=new Int32Array(n);
     for(let i=0;i<n;i++){
       const pk=pd.dispW[i]*mod2+pd.dispT[i];
       const groups=p.pxToGrps.get(pk);
@@ -375,7 +385,7 @@ function computePanelDomIds(){
       const segs=g2s.get(maxGid);
       if(segs&&segs.length>0){
         const si=segs[0];
-        p.pixelDomTrack[i]=vd.tids[si];
+        p.pixelDomTrack[i]=vd.tids?vd.tids[si]:0;
         p.pixelDomPdg[i]=vd.pdg?vd.pdg[si]:0;
         p.pixelDomAnc[i]=vd.ancTids?vd.ancTids[si]:0;
         p.pixelDomInt[i]=vd.intIds?vd.intIds[si]:0;
@@ -529,10 +539,12 @@ function buildPoints(){
 
   const pos=new Float32Array(totalN*3), de=new Float32Array(totalN);
   const tids=new Int32Array(totalN), gids=new Int32Array(totalN);
-  const allPdg=new Int32Array(totalN), allAnc=new Int32Array(totalN), allInt=new Int16Array(totalN);
+  const allPdg=new Int32Array(totalN), allAnc=new Int32Array(totalN), allInt=new Int32Array(totalN);
   let off=0;
   for(const v of volsToShow){
-    pos.set(v.pos,off*3); de.set(v.de,off); tids.set(v.tids,off); gids.set(v.gids,off);
+    pos.set(v.pos,off*3); de.set(v.de,off);
+    if(v.tids) tids.set(v.tids,off);
+    if(v.gids) gids.set(v.gids,off);
     if(v.pdg) allPdg.set(v.pdg,off);
     if(v.ancTids) allAnc.set(v.ancTids,off);
     if(v.intIds) allInt.set(v.intIds,off);
@@ -842,11 +854,11 @@ function precomputeAllPanelColors(){
     const n=dd.n;
     p.dispColors=new Uint8Array(n*3);
     p.dispAlpha=null; // per-pixel alpha (only for track mode)
-    if(curViewMode==='resp'){
-      const norms=respNorms[p.plane]||[-25,25];
+    if(curViewMode==='sensor'){
+      const norms=sensorNorms[p.plane]||[-25,25];
       for(let i=0;i<n;i++){
-        const t=dbNorm(dd.v[i],norms[0],norms[1],respDeadband,respGamma);
-        const[r,g,b]=respCmapRGB(t);
+        const t=dbNorm(dd.v[i],norms[0],norms[1],sensorDeadband,sensorGamma);
+        const[r,g,b]=sensorCmapRGB(t);
         p.dispColors[i*3]=r;p.dispColors[i*3+1]=g;p.dispColors[i*3+2]=b;
       }
     } else if(curColor!=='de'){
@@ -1024,14 +1036,14 @@ function drawPanelAxes(p,pi){
     ctx.restore();
   }
   // Colorbar (skip in categorical label modes — colorbar is meaningless for hashed hues)
-  if(curColor==='de'||curViewMode==='resp'){
+  if(curColor==='de'||curViewMode==='sensor'){
     const bx=ox+r.w-margin.r+4, bw=8, by=oy+margin.t, bh=pH;
-    if(curViewMode==='resp'){
-      const norms=respNorms[p.plane]||[-25,25];
-      for(let y=0;y<bh;y++){const t=1-y/bh;const[cr,cg,cb]=respCmapRGB(t);ctx.fillStyle=`rgb(${cr},${cg},${cb})`;ctx.fillRect(bx,by+y,bw,1);}
+    if(curViewMode==='sensor'){
+      const norms=sensorNorms[p.plane]||[-25,25];
+      for(let y=0;y<bh;y++){const t=1-y/bh;const[cr,cg,cb]=sensorCmapRGB(t);ctx.fillStyle=`rgb(${cr},${cg},${cb})`;ctx.fillRect(bx,by+y,bw,1);}
       ctx.strokeStyle=axCol();ctx.strokeRect(bx,by,bw,bh);
       ctx.textAlign='left';ctx.font=fs+' monospace';ctx.fillStyle=txCol();
-      for(let i=0;i<=4;i++){const tn=i/4;const v=dbInverse(tn,norms[0],norms[1],respDeadband,respGamma);ctx.fillText(v.toFixed(0),bx+bw+2,by+bh*(1-tn)+fsPx/3);}
+      for(let i=0;i<=4;i++){const tn=i/4;const v=dbInverse(tn,norms[0],norms[1],sensorDeadband,sensorGamma);ctx.fillText(v.toFixed(0),bx+bw+2,by+bh*(1-tn)+fsPx/3);}
     } else {
       for(let y=0;y<bh;y++){const t=1-y/bh;const[cr,cg,cb]=hitsCmapRGB(t);ctx.fillStyle=`rgb(${cr},${cg},${cb})`;ctx.fillRect(bx,by+y,bw,1);}
       ctx.strokeStyle=axCol();ctx.strokeRect(bx,by,bw,bh);
@@ -1054,7 +1066,7 @@ function drawPanelAxes(p,pi){
 
 function drawAllPanelAxes(){
   for(let i=0;i<panels.length;i++) drawPanelAxes(panels[i],i);
-  const modeLabel=curViewMode==='resp'?'Response':'Hits';
+  const modeLabel=curViewMode==='sensor'?'Sensor':'Hits';
   let volLabel=curVol<0?'All Volumes':'Vol '+curVol;
   if(curVol<0&&nVolumes>3){
     const nShown=new Set(panels.map(p=>p.vol)).size;
@@ -1074,8 +1086,8 @@ function symLogNorm(v,vmax,linthresh){
 }
 
 function optCmapRGB(t){
-  // Use response colormap (obsidian/seismic) for optical too
-  return respCmapRGB(t);
+  // Use sensor colormap (obsidian/seismic) for optical too
+  return sensorCmapRGB(t);
 }
 
 function renderOptical(){
@@ -1223,7 +1235,8 @@ function highlightFromOptical(intId){
   renderOpticalFrame(intId);
   const lbl=optLabelKey==='ancestor'?'Ancestor':'Interaction';
   const pe=lightData.pePerLabel?lightData.pePerLabel[intId]:null;
-  setStatus(`${lbl} ${intId} \u00B7 ${nHit} segments \u00B7 ${pe?pe.total.toLocaleString():0} PE`);
+  const tail=hasLabl?`${nHit} segments`:'no labl: 3D link unavailable';
+  setStatus(`${lbl} ${intId} \u00B7 ${tail} \u00B7 ${pe?pe.total.toLocaleString():0} PE`);
 }
 
 function renderOpticalDrift(){
@@ -1317,12 +1330,14 @@ function highlightFromGroup(gid, volIdx){
   const si0=segs?segs[0]:0;
 
   if(curViewMode==='optical'&&lightData){
-    // Optical correspondence: find label id (interaction or ancestor) of this segment
+    // Optical correspondence: find label id (interaction or ancestor) of this segment.
+    // Requires labl/ for the per-deposit→track→interaction lookup.
     const intId=vd?getOptId(vd,si0):-1;
     renderOpticalFrame(intId>=0?intId:null);
-    const trackId=(segs&&vd)?vd.tids[si0]:'?';
+    const trackId=(segs&&vd&&vd.tids)?vd.tids[si0]:'?';
     const pdgCode=(segs&&vd&&vd.pdg)?vd.pdg[si0]:0;
-    setStatus(`Grp ${gid} \u00B7 Trk ${trackId} \u00B7 ${pdgName(pdgCode)} \u00B7 Int ${intId} \u00B7 ${segs?segs.length:0} seg`);
+    const intStr=hasLabl?`Int ${intId}`:'(no labl: optical link unavailable)';
+    setStatus(`Grp ${gid} \u00B7 Trk ${trackId} \u00B7 ${pdgName(pdgCode)} \u00B7 ${intStr} \u00B7 ${segs?segs.length:0} seg`);
   } else {
     // Wire plane correspondence
     const hlMap=new Map();
@@ -1342,7 +1357,7 @@ function highlightFromGroup(gid, volIdx){
     const nSeg=segs?segs.length:0;
     let avgDE=0;
     if(segs&&vd){for(const si2 of segs) avgDE+=vd.de[si2]; avgDE/=nSeg;}
-    const trackId=(segs&&vd)?vd.tids[si0]:'?';
+    const trackId=(segs&&vd&&vd.tids)?vd.tids[si0]:'?';
     const pdgCode=(segs&&vd&&vd.pdg)?vd.pdg[si0]:0;
     let totalHL=0; for(const a of hlMap.values()) totalHL+=a.length;
     setStatus(`Grp ${gid} \u00B7 Trk ${trackId} \u00B7 ${pdgName(pdgCode)} (${pdgCode}) \u00B7 ${nSeg} seg \u00B7 dE ${avgDE.toFixed(3)} \u00B7 ${totalHL} px`);
@@ -1435,7 +1450,7 @@ async function toggleTheme(){
 // ============================================================
 function saveFilename(panel){
   const evt='evt'+String(curEvent).padStart(3,'0');
-  const mode=curViewMode==='resp'?'resp':curViewMode==='optical'?'optical':'hits';
+  const mode=curViewMode==='sensor'?'sensor':curViewMode==='optical'?'optical':'hits';
   if(panel==='3d') return `${evt}_3d_${curColor==='de'?'de':curColor}.png`;
   if(expandedPanel>=0){
     const p=panels[expandedPanel];
@@ -1490,7 +1505,7 @@ async function copy2D(){
 // 3D INTERACTION (GPU PICKING)
 // ============================================================
 function on3dMove(e){
-  if(!corrMode||is2dHover||curViewMode==='resp') return;
+  if(!corrMode||is2dHover||curViewMode==='sensor') return;
   pendingPick={x:e.offsetX, y:e.offsetY};
 }
 
@@ -1570,7 +1585,7 @@ function on2dMove(e){
     render2DBase();render2DFrame(null);
     return;
   }
-  if(!corrMode||curViewMode==='resp') return;
+  if(!corrMode||curViewMode==='sensor') return;
   // Optical → 3D correspondence
   if(curViewMode==='optical'){
     const optId=opticalAtMouse(e.offsetX,e.offsetY);
@@ -1654,6 +1669,7 @@ function setupUI(){
   // Color mode: dE vs LABEL toggle
   document.getElementById('colorModeGrp').addEventListener('click',e=>{
     const b=e.target.closest('button');if(!b) return;
+    if(b.dataset.v==='label'&&!hasLabl) return;  // no per-track labels available
     curColorMode=b.dataset.v;
     document.querySelectorAll('#colorModeGrp button').forEach(x=>x.classList.toggle('active',x===b));
     const isLabel=curColorMode==='label';
@@ -1754,7 +1770,7 @@ function setupUI(){
   document.addEventListener('fullscreenchange',()=>{
     document.getElementById('fsBtn').classList.toggle('active',!!document.fullscreenElement);
   });
-  // View mode (HITS / RESP)
+  // View mode (HITS / SENSOR)
   document.getElementById('viewGrp').addEventListener('click',e=>{
     const b=e.target.closest('button');if(!b) return;
     const newMode=b.dataset.v;
@@ -1773,16 +1789,16 @@ function setupUI(){
     document.getElementById('settingsPanel').classList.remove('visible');
   });
   document.getElementById('gammaSlider').addEventListener('input',e=>{
-    respGamma=parseFloat(e.target.value);
-    document.getElementById('gammaVal').textContent=respGamma.toFixed(2);
-    if(curViewMode==='resp'){
+    sensorGamma=parseFloat(e.target.value);
+    document.getElementById('gammaVal').textContent=sensorGamma.toFixed(2);
+    if(curViewMode==='sensor'){
       showOverlay('Recomputing...');
       setTimeout(()=>{precomputeAllPanelColors();render2DBase();render2DFrame(null);hideOverlay();},50);
     }
   });
   document.getElementById('deadbandInput').addEventListener('change',e=>{
-    respDeadband=parseFloat(e.target.value)||0;
-    if(curViewMode==='resp'){
+    sensorDeadband=parseFloat(e.target.value)||0;
+    if(curViewMode==='sensor'){
       showOverlay('Recomputing...');
       setTimeout(()=>{precomputeAllPanelColors();render2DBase();render2DFrame(null);hideOverlay();},50);
     }
@@ -1941,7 +1957,7 @@ function switchColorMode(){
 
 function updateCorrBtnState(){
   const btn=document.getElementById('corrBtn');
-  if(curViewMode==='resp'){
+  if(curViewMode==='sensor'){
     btn.classList.remove('active');
     btn.classList.add('disabled');
     btn.textContent='\u2715 CORR';
@@ -1953,14 +1969,14 @@ function updateCorrBtnState(){
 }
 
 async function switchViewMode(){
-  const label=curViewMode==='resp'?'response':curViewMode==='optical'?'optical':'hits';
+  const label=curViewMode==='sensor'?'sensor':curViewMode==='optical'?'optical':'hits';
   showOverlay('Switching to '+label+'...');
   await new Promise(r=>setTimeout(r,50));
   // Collapse expanded panel when switching modes
   if(expandedPanel>=0){expandedPanel=-1;document.getElementById('panelCloseBtn').classList.remove('visible');updatePanelRects();}
   clearHL();
   updateCorrBtnState();
-  if(curViewMode==='resp') await loadResp(curEvent);
+  if(curViewMode==='sensor') await loadSensor(curEvent);
   if(curViewMode==='optical') await loadLight(curEvent);
   if(curViewMode==='optical'&&lightData){
     renderOptical();
@@ -2101,12 +2117,26 @@ function populateVolSelect(){
     numPy=cfg.numPy||0;
     numPz=cfg.numPz||0;
     const readoutWindowUs=cfg.readoutWindowUs||1350;
+    hasLabl=!!cfg.hasLabl;
     hasOptical=!!cfg.hasOptical;
     optConfig=cfg.optConfig||null;
     if(optConfig){nPmtsPerSide=Math.floor(optConfig.nChannels/2);optLabelKey=optConfig.labelKey||'interaction';}
     // Show/hide optical button
     const ob=document.getElementById('opticalBtn');
     if(ob) ob.style.display=hasOptical?'':'none';
+    // Hide LABEL color mode + selects when no labl file is present.
+    // Per-track metadata (track/pdg/ancestor/interaction) is unavailable.
+    if(!hasLabl){
+      const lblBtn=document.querySelector('#colorModeGrp button[data-v="label"]');
+      if(lblBtn) lblBtn.style.display='none';
+      const ls2=document.getElementById('labelSelect');
+      if(ls2) ls2.style.display='none';
+      const cfs=document.getElementById('catFilterSelect');
+      if(cfs) cfs.style.display='none';
+      const cfi=document.getElementById('catFilterInput');
+      if(cfi) cfi.style.display='none';
+      curColorMode='de'; curColor='de';
+    }
 
     document.getElementById('loading').style.display='none';
     document.getElementById('app').style.display='flex';

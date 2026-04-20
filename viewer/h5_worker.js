@@ -1,6 +1,7 @@
 import h5wasm from 'https://cdn.jsdelivr.net/npm/h5wasm@0.10.1/dist/esm/hdf5_hl.js';
 
-let mod, segF, corrF, respF, optF, maxTime, nEvents, nVolumes, nPlanes;
+let mod, segF, instF, sensorF, lablF, optF, maxTime, nEvents, nVolumes, nPlanes;
+let hasLabl = false;
 let hasOptical = false;
 let isPixel = false;     // pixel vs wire readout
 let numPy = 0, numPz = 0; // pixel grid dimensions (when isPixel)
@@ -88,7 +89,8 @@ function aggregateDisplay(pk, ch, mod2) {
 function decodeEvent(idx) {
   const key = 'event_' + String(idx).padStart(3, '0');
   const sEvt = segF.get(key);
-  const cEvt = corrF.get(key);
+  const cEvt = instF.get(key);
+  const lEvt = hasLabl ? lablF.get(key) : null;
   const srcIdx = readAttr(sEvt, 'source_event_idx') || idx;
   const nVol = readAttr(sEvt, 'n_volumes') || nVolumes;
 
@@ -108,11 +110,48 @@ function decodeEvent(idx) {
     for (let i = 0; i < n * 3; i++) pos[i] = posRaw[i] * posStep + origin[i % 3];
 
     const de = readF16(vg.get('de'));
-    const tids = new Int32Array(vg.get('track_ids').value);
-    const gids = new Int32Array(vg.get('group_ids').value);
-    const pdg = vg.get('pdg') ? new Int32Array(vg.get('pdg').value) : new Int32Array(n);
-    const ancTids = vg.get('ancestor_track_ids') ? new Int32Array(vg.get('ancestor_track_ids').value) : new Int32Array(n);
-    const intIds = vg.get('interaction_ids') ? new Int16Array(vg.get('interaction_ids').value) : new Int16Array(n);
+
+    // Per-volume per-instance decomposition (inst owns segment_to_group)
+    const volPlanes = {};
+    const iVol = cEvt.get(vKey);
+    let gids;
+    if (iVol && iVol.get('segment_to_group')) {
+      gids = new Int32Array(iVol.get('segment_to_group').value);
+    } else {
+      gids = new Int32Array(n);  // no inst data: zeros (highlighting will no-op)
+    }
+
+    // Per-deposit labels via labl (optional). labl carries
+    // segment_to_track (N,) FK + per-unique-track dimension table
+    // (track_ids, track_pdg, track_interaction, track_ancestor).
+    let tids = null, pdg = null, ancTids = null, intIds = null;
+    if (lEvt) {
+      const lVol = lEvt.get(vKey);
+      if (lVol && lVol.get('segment_to_track')) {
+        tids = new Int32Array(lVol.get('segment_to_track').value);
+        const trackIds = lVol.get('track_ids') ? new Int32Array(lVol.get('track_ids').value) : null;
+        if (trackIds && trackIds.length > 0) {
+          // Build track_id -> dim-table index map (T is small: ~few thousand)
+          const tidToRow = new Map();
+          for (let r = 0; r < trackIds.length; r++) tidToRow.set(trackIds[r], r);
+          const trkPdg = lVol.get('track_pdg') ? new Int32Array(lVol.get('track_pdg').value) : null;
+          const trkInt = lVol.get('track_interaction') ? new Int32Array(lVol.get('track_interaction').value) : null;
+          const trkAnc = lVol.get('track_ancestor') ? new Int32Array(lVol.get('track_ancestor').value) : null;
+          if (trkPdg) {
+            pdg = new Int32Array(n);
+            for (let i = 0; i < n; i++) { const r = tidToRow.get(tids[i]); if (r !== undefined) pdg[i] = trkPdg[r]; }
+          }
+          if (trkAnc) {
+            ancTids = new Int32Array(n);
+            for (let i = 0; i < n; i++) { const r = tidToRow.get(tids[i]); if (r !== undefined) ancTids[i] = trkAnc[r]; }
+          }
+          if (trkInt) {
+            intIds = new Int32Array(n);
+            for (let i = 0; i < n; i++) { const r = tidToRow.get(tids[i]); if (r !== undefined) intIds[i] = trkInt[r]; }
+          }
+        }
+      }
+    }
 
     // t0_us (float16) and drift arrival time
     let t0 = null, arrivalTime = null;
@@ -124,14 +163,10 @@ function decodeEvent(idx) {
         arrivalTime[i] = t0[i] + driftDist / velocityMmUs;
       }
     }
-
-    // Per-volume correspondence
-    const volPlanes = {};
-    const cVol = cEvt.get(vKey);
-    if (cVol) {
+    if (iVol) {
       if (isPixel) {
         // Pixel mode: decode (py, pz, time) voxels → 3 projected planes
-        const g = cVol.get('Pixel');
+        const g = iVol.get('Pixel');
         if (g && g.get('group_ids')) {
           const grpIds = new Int32Array(g.get('group_ids').value);
           const grpSz = new Uint8Array(g.get('group_sizes').value);
@@ -186,10 +221,10 @@ function decodeEvent(idx) {
             dispW: dispYZ.w, dispT: dispYZ.t, dispCH: dispYZ.c, nDisp: dispYZ.n };
         }
       } else {
-        // Wire mode: decode per-plane (wire, time) correspondence
+        // Wire mode: decode per-plane (wire, time) per-instance entries
         for (let p = 0; p < nPlanes; p++) {
           const pl = WIRE_LABELS[p];
-          const g = cVol.get(pl);
+          const g = iVol.get(pl);
           if (!g || !g.get('group_ids')) continue;
 
           const grpIds = new Int32Array(g.get('group_ids').value);
@@ -226,13 +261,13 @@ function decodeEvent(idx) {
   return { volumes, config: { event_idx: srcIdx, max_time: maxTime, n_volumes: nVol } };
 }
 
-function decodeResp(idx) {
+function decodeSensor(idx) {
   const key = 'event_' + String(idx).padStart(3, '0');
-  const rEvt = respF.get(key);
+  const rEvt = sensorF.get(key);
   const nVol = readAttr(rEvt, 'n_volumes') || nVolumes;
   const labels = isPixel ? PIXEL_LABELS : WIRE_LABELS;
 
-  const respVols = [];
+  const sensorVols = [];
   const norms = {};
   for (let v = 0; v < nVol; v++) {
     const vKey = 'volume_' + v;
@@ -321,7 +356,7 @@ function decodeResp(idx) {
         }
       }
     }
-    respVols.push(volPlanes);
+    sensorVols.push(volPlanes);
   }
 
   // Per-plane-type norms across all volumes
@@ -329,7 +364,7 @@ function decodeResp(idx) {
     const pl = labels[p];
     let mn = Infinity, mx = -Infinity;
     for (let v = 0; v < nVol; v++) {
-      const d = respVols[v][pl]; if (!d) continue;
+      const d = sensorVols[v][pl]; if (!d) continue;
       for (let i = 0; i < d.n; i++) { if (d.values[i] < mn) mn = d.values[i]; if (d.values[i] > mx) mx = d.values[i]; }
     }
     if (mn === Infinity) { mn = -25; mx = 25; }
@@ -338,7 +373,7 @@ function decodeResp(idx) {
     norms[pl] = [mn, mx];
   }
 
-  return { respVols, respNorms: norms };
+  return { sensorVols, sensorNorms: norms };
 }
 
 function decodeLight(idx, activityThresh, gapNs) {
@@ -504,34 +539,47 @@ self.onmessage = async function(e) {
     const base = e.data.base;
     const manifest = e.data.manifest;
     mountUrl(base + '/' + manifest.seg, 'seg.h5');
-    mountUrl(base + '/' + manifest.corr, 'corr.h5');
-    mountUrl(base + '/' + manifest.resp, 'resp.h5');
+    mountUrl(base + '/' + manifest.inst, 'inst.h5');
+    mountUrl(base + '/' + manifest.sensor, 'sensor.h5');
     segF = new h5wasm.File('/seg.h5', 'r');
-    corrF = new h5wasm.File('/corr.h5', 'r');
-    respF = new h5wasm.File('/resp.h5', 'r');
+    instF = new h5wasm.File('/inst.h5', 'r');
+    sensorF = new h5wasm.File('/sensor.h5', 'r');
+
+    // Optional labl file (per-track label dimension table)
+    if (manifest.labl) {
+      mountUrl(base + '/' + manifest.labl, 'labl.h5');
+      lablF = new h5wasm.File('/labl.h5', 'r');
+      hasLabl = true;
+    }
 
     // Verify run_id consistency across files
     const segRid = readAttr(segF.get('config'), 'run_id');
-    const corrRid = readAttr(corrF.get('config'), 'run_id');
-    const respRid = readAttr(respF.get('config'), 'run_id');
-    if (segRid != null && corrRid != null && respRid != null) {
-      if (segRid !== corrRid || segRid !== respRid) {
-        throw new Error(`run_id mismatch: seg=${segRid}, corr=${corrRid}, resp=${respRid}`);
+    const instRid = readAttr(instF.get('config'), 'run_id');
+    const sensorRid = readAttr(sensorF.get('config'), 'run_id');
+    if (segRid != null && instRid != null && sensorRid != null) {
+      if (segRid !== instRid || segRid !== sensorRid) {
+        throw new Error(`run_id mismatch: seg=${segRid}, inst=${instRid}, sensor=${sensorRid}`);
+      }
+    }
+    if (hasLabl) {
+      const lablRid = readAttr(lablF.get('config'), 'run_id');
+      if (segRid != null && lablRid != null && segRid !== lablRid) {
+        throw new Error(`run_id mismatch: seg=${segRid}, labl=${lablRid}`);
       }
     }
 
-    maxTime = readAttr(corrF.get('config'), 'num_time_steps');
+    maxTime = readAttr(instF.get('config'), 'num_time_steps');
     nEvents = readAttr(segF.get('config'), 'n_events');
     nVolumes = readAttr(segF.get('config'), 'n_volumes') || 2;
-    const nwRaw = corrF.get('config/num_wires').value;
+    const nwRaw = instF.get('config/num_wires').value;
     nPlanes = nwRaw.length / nVolumes;
     isPixel = (nPlanes === 0);
 
     const numWires = [];
     if (isPixel) {
-      // Infer pixel grid from first event's resp data
+      // Infer pixel grid from first event's sensor data
       nPlanes = 3; // 3 projections: Y-T, Z-T, Y-Z
-      const rEvt = respF.get('event_000');
+      const rEvt = sensorF.get('event_000');
       let maxPyVal = 100, maxPzVal = 100;
       for (let v = 0; v < nVolumes; v++) {
         const pg = rEvt.get('volume_' + v + '/Pixel');
@@ -567,11 +615,11 @@ self.onmessage = async function(e) {
         volRanges.push(r);
       }
     }
-    // Read drift velocity from resp config
-    const respCfg = respF.get('config');
-    const vCmUs = readAttr(respCfg, 'velocity_cm_us') || 0.16;
+    // Read drift velocity from sensor config
+    const sensorCfg = sensorF.get('config');
+    const vCmUs = readAttr(sensorCfg, 'velocity_cm_us') || 0.16;
     velocityMmUs = vCmUs * 10;
-    const timeStepUs = readAttr(respCfg, 'time_step_us') || 0.5;
+    const timeStepUs = readAttr(sensorCfg, 'time_step_us') || 0.5;
 
     // Compute per-volume anode positions and drift directions from ranges
     // Vol with x_max <= 0: anode at x_min (drift toward -x), drift_dir = -1
@@ -609,13 +657,13 @@ self.onmessage = async function(e) {
     const readoutWindowUs = maxTime * timeStepUs;
     self.postMessage({ action: 'ready', nEvents, maxTime, nVolumes, numWires, planeLabels, volRanges,
       velocityMmUs, volAnodes, volDriftDirs, timeStepUs, readoutWindowUs,
-      hasOptical, optConfig, isPixel, numPy, numPz });
+      hasLabl, hasOptical, optConfig, isPixel, numPy, numPz });
   } else if (action === 'loadEvent') {
     const d = decodeEvent(e.data.idx);
     self.postMessage({ action: 'eventLoaded', ...d }, collectTransfers(d));
-  } else if (action === 'loadResp') {
-    const d = decodeResp(e.data.idx);
-    self.postMessage({ action: 'respLoaded', ...d }, collectTransfers(d));
+  } else if (action === 'loadSensor') {
+    const d = decodeSensor(e.data.idx);
+    self.postMessage({ action: 'sensorLoaded', ...d }, collectTransfers(d));
   } else if (action === 'loadLight') {
     const d = decodeLight(e.data.idx, e.data.activityThresh, e.data.gapNs);
     self.postMessage({ action: 'lightLoaded', ...d }, collectTransfers(d));

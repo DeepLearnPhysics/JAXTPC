@@ -107,49 +107,132 @@ def categorical_colors(ids, alpha=0.7):
 
 # ── Data loading ─────────────────────────────────────────────────
 
-def load_seg_data(seg_path, event_idx):
-    """Load segment data including pdg/ancestor/interaction fields."""
+def _default_labl_path(seg_path):
+    """Auto-locate the labl file alongside seg, if any.
+
+    Looks first for sibling layout (..../seg/{ds}_seg_NNNN.h5 ->
+    ..../labl/{ds}_labl_NNNN.h5), then for a flat layout where files
+    share a directory.
+    """
+    base = os.path.basename(seg_path)
+    if '_seg_' not in base:
+        return None
+    labl_base = base.replace('_seg_', '_labl_')
+    parent = os.path.dirname(seg_path)
+    # Sibling subdir layout
+    sibling = os.path.normpath(os.path.join(parent, '..', 'labl', labl_base))
+    if os.path.isfile(sibling):
+        return sibling
+    # Flat layout
+    flat = os.path.join(parent, labl_base)
+    if os.path.isfile(flat):
+        return flat
+    return None
+
+
+def _per_deposit_labels(labl_vol_group, n):
+    """Resolve per-deposit (track, pdg, ancestor, interaction) from a
+    labl volume group containing segment_to_track + per-track table.
+
+    Returns a dict of (n,) int32 arrays, zero-filled for unmapped tracks.
+    """
+    if 'segment_to_track' not in labl_vol_group:
+        return None
+    seg_to_trk = labl_vol_group['segment_to_track'][:].astype(np.int32)
+    track_ids = labl_vol_group['track_ids'][:].astype(np.int32) \
+        if 'track_ids' in labl_vol_group else np.array([], dtype=np.int32)
+    if track_ids.size == 0:
+        return {
+            'track_ids': seg_to_trk,
+            'pdg': np.zeros(n, dtype=np.int32),
+            'ancestor_ids': np.zeros(n, dtype=np.int32),
+            'interaction_ids': np.zeros(n, dtype=np.int32),
+        }
+    # Build track_id -> row index map and broadcast per-track columns.
+    tid_to_row = {int(t): r for r, t in enumerate(track_ids)}
+    rows = np.array([tid_to_row.get(int(t), -1) for t in seg_to_trk],
+                    dtype=np.int64)
+    valid = rows >= 0
+
+    def gather(col):
+        out = np.zeros(n, dtype=np.int32)
+        if col not in labl_vol_group:
+            return out
+        arr = labl_vol_group[col][:].astype(np.int32)
+        out[valid] = arr[rows[valid]]
+        return out
+
+    return {
+        'track_ids': seg_to_trk,
+        'pdg': gather('track_pdg'),
+        'ancestor_ids': gather('track_ancestor'),
+        'interaction_ids': gather('track_interaction'),
+    }
+
+
+def load_seg_data(seg_path, event_idx, labl_path=None):
+    """Load 3D deposits from seg, joined with per-track labels from labl
+    if available. ``labl_path=None`` triggers auto-detection."""
+    if labl_path is None:
+        labl_path = _default_labl_path(seg_path)
+    has_labl = labl_path is not None and os.path.isfile(labl_path)
+
     event_key = f'event_{event_idx:03d}'
 
     with h5py.File(seg_path, 'r') as f:
         evt = f[event_key]
         n_volumes = int(evt.attrs.get('n_volumes', 2))
 
-        volumes = []
-        for v in range(n_volumes):
-            vg_key = f'volume_{v}'
-            if vg_key not in evt:
-                volumes.append(None)
-                continue
+        labl_evt = None
+        labl_file = None
+        if has_labl:
+            labl_file = h5py.File(labl_path, 'r')
+            if event_key in labl_file:
+                labl_evt = labl_file[event_key]
 
-            vg = evt[vg_key]
-            n = int(vg.attrs['n_actual'])
-            if n == 0:
-                volumes.append(None)
-                continue
+        try:
+            volumes = []
+            for v in range(n_volumes):
+                vg_key = f'volume_{v}'
+                if vg_key not in evt:
+                    volumes.append(None)
+                    continue
 
-            pos_step = float(vg.attrs['pos_step_mm'])
-            origin = np.array([vg.attrs['pos_origin_x'],
-                               vg.attrs['pos_origin_y'],
-                               vg.attrs['pos_origin_z']])
-            positions = vg['positions'][:].astype(np.float32) * pos_step + origin
+                vg = evt[vg_key]
+                n = int(vg.attrs['n_actual'])
+                if n == 0:
+                    volumes.append(None)
+                    continue
 
-            vol = {
-                'positions_mm': positions,
-                'de': vg['de'][:].astype(np.float32),
-                'track_ids': vg['track_ids'][:],
-                'pdg': vg['pdg'][:] if 'pdg' in vg else np.zeros(n, dtype=np.int32),
-                'ancestor_ids': (vg['ancestor_track_ids'][:]
-                                 if 'ancestor_track_ids' in vg
-                                 else np.zeros(n, dtype=np.int32)),
-                'interaction_ids': (vg['interaction_ids'][:]
-                                    if 'interaction_ids' in vg
-                                    else np.zeros(n, dtype=np.int16)),
-                'n': n,
-            }
-            volumes.append(vol)
+                pos_step = float(vg.attrs['pos_step_mm'])
+                origin = np.array([vg.attrs['pos_origin_x'],
+                                   vg.attrs['pos_origin_y'],
+                                   vg.attrs['pos_origin_z']])
+                positions = vg['positions'][:].astype(np.float32) * pos_step + origin
 
-    return volumes
+                labels = None
+                if labl_evt is not None and vg_key in labl_evt:
+                    labels = _per_deposit_labels(labl_evt[vg_key], n)
+                if labels is None:
+                    labels = {
+                        'track_ids': np.zeros(n, dtype=np.int32),
+                        'pdg': np.zeros(n, dtype=np.int32),
+                        'ancestor_ids': np.zeros(n, dtype=np.int32),
+                        'interaction_ids': np.zeros(n, dtype=np.int32),
+                    }
+
+                vol = {
+                    'positions_mm': positions,
+                    'de': vg['de'][:].astype(np.float32),
+                    **labels,
+                    'n': n,
+                }
+                volumes.append(vol)
+        finally:
+            if labl_file is not None:
+                labl_file.close()
+
+    return volumes, has_labl
 
 
 def merge_volumes(volumes, vol_idx=None):
@@ -242,11 +325,14 @@ def compute_sizes(emph_factor, base=1.5, scale=4.0):
 # ── Rendering ────────────────────────────────────────────────────
 
 def make_gif(data, output, fps=30, duration=12.0, rotations=1, dpi=200,
-             size=(1080, 1080), light=False, emph_pow=5.0, emph_amt=0.75):
+             size=(1080, 1080), light=False, emph_pow=5.0, emph_amt=0.75,
+             color_modes=None):
     """Render rotating 3D GIF cycling through color modes."""
+    if color_modes is None:
+        color_modes = COLOR_MODES
     total_duration = duration * rotations
     n_frames = int(fps * total_duration)
-    n_modes = len(COLOR_MODES)
+    n_modes = len(color_modes)
     frames_per_mode = n_frames // n_modes
     n_frames = frames_per_mode * n_modes  # round to exact multiple
 
@@ -260,7 +346,7 @@ def make_gif(data, output, fps=30, duration=12.0, rotations=1, dpi=200,
 
     # Precompute colors for each mode (alpha modulated by emphasis)
     all_colors = []
-    for label, key in COLOR_MODES:
+    for label, key in color_modes:
         all_colors.append(compute_colors(data, key, norm, emph, light=light))
 
     # Figure setup
@@ -309,7 +395,7 @@ def make_gif(data, output, fps=30, duration=12.0, rotations=1, dpi=200,
         # Update colors on mode switch
         scatter.set_facecolors(all_colors[mode_idx])
 
-        label, key = COLOR_MODES[mode_idx]
+        label, key = color_modes[mode_idx]
         title.set_text(label)
 
         # Progress bar
@@ -333,7 +419,7 @@ def make_gif(data, output, fps=30, duration=12.0, rotations=1, dpi=200,
     ext = os.path.splitext(output)[1].lower()
     print(f"Rendering {n_frames} frames at {fps} fps "
           f"({total_duration:.1f}s, {rotations} rotation{'s' if rotations>1 else ''})...")
-    print(f"  Modes: {' → '.join(l for l,_ in COLOR_MODES)}")
+    print(f"  Modes: {' → '.join(l for l,_ in color_modes)}")
     print(f"  Points: {len(x):,}")
 
     anim = FuncAnimation(fig, update, frames=n_frames, blit=False, interval=1000/fps)
@@ -391,23 +477,31 @@ def main():
                         help='dE emphasis amount 0-1 (default: 0.75)')
     parser.add_argument('--light', action='store_true',
                         help='Use light background')
+    parser.add_argument('--labl', default=None,
+                        help='Path to *_labl_*.h5 (auto-detected next to '
+                             'seg by default; categorical color modes are '
+                             'skipped if labl is unavailable).')
     args = parser.parse_args()
 
     if not os.path.isfile(args.seg_file):
         sys.exit(f"Error: {args.seg_file} not found")
 
     print(f"Loading {args.seg_file} event {args.event}...")
-    volumes = load_seg_data(args.seg_file, args.event)
+    volumes, has_labl = load_seg_data(args.seg_file, args.event,
+                                      labl_path=args.labl)
+    if not has_labl:
+        print("  Note: no labl file found — only the dE color mode will render.")
     data = merge_volumes(volumes, args.volume)
     n_orig = len(data['de'])
     data = subsample(data, args.max_points)
     if len(data['de']) < n_orig:
         print(f"  Subsampled {n_orig:,} → {len(data['de']):,} points")
 
+    color_modes = COLOR_MODES if has_labl else [COLOR_MODES[0]]
     make_gif(data, args.output, fps=args.fps, duration=args.duration,
              rotations=args.rotations, dpi=args.dpi, size=tuple(args.size),
              emph_pow=args.emph_pow, emph_amt=args.emph_amt,
-             light=args.light)
+             light=args.light, color_modes=color_modes)
 
 
 if __name__ == '__main__':
