@@ -3,12 +3,16 @@
 # References: arXiv:2103.13910 (ND CDR), arXiv:2403.03212 (Module-0),
 #             arXiv:2509.07012 (2x2 Demonstrator), dunendggd GDML configs
 #
-# 35 modules in a 7x5 grid (7 along beam z, 5 transverse x)
-# Each module: dual-drift with central cathode, 46.79 cm drift per side
-# Module footprint: 100 cm x 100 cm, height: ~303 cm active
+# 35 modules in a 5x7 grid (5 along x [transverse], 7 along z [beam])
+# Each module: dual-drift with central cathode, 46.788 cm drift per side
+# Cathode thickness: 6.35 mm (±3.175 mm around module center in x)
+# Module active footprint: 94.211 cm (x) x 297.6 cm (y) x 95.232 cm (z)
+# Module center-to-center: 100 cm in both x and z
 #
-# LArPix pixel readout: 4mm pitch
-# Each drift volume has its own pixel grid.
+# LArPix pixel readout: 3.72 mm pitch
+# Pixel grid per volume (y,z): 800 x 256
+#   y: 2976 mm / 3.72 mm = 800
+#   z: 952.32 mm / 3.72 mm = 256
 #
 # Coordinate system:
 #   x = transverse to beam (drift direction within each module)
@@ -21,1192 +25,1192 @@ volumes:
   description: Module(0,0) left drift
   geometry:
     ranges:
-    - - -247.11
-      - -200.32
-    - - -151.3
-      - 151.3
-    - - -347.11
-      - -252.89
+    - - -247.1055
+      - -200.3175
+    - - -148.8
+      - 148.8
+    - - -347.616
+      - -252.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 1
   description: Module(0,0) right drift
   geometry:
     ranges:
-    - - -199.68
-      - -152.89
-    - - -151.3
-      - 151.3
-    - - -347.11
-      - -252.89
+    - - -199.6825
+      - -152.8945
+    - - -148.8
+      - 148.8
+    - - -347.616
+      - -252.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 2
   description: Module(0,1) left drift
   geometry:
     ranges:
-    - - -247.11
-      - -200.32
-    - - -151.3
-      - 151.3
-    - - -247.11
-      - -152.89
+    - - -247.1055
+      - -200.3175
+    - - -148.8
+      - 148.8
+    - - -247.616
+      - -152.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 3
   description: Module(0,1) right drift
   geometry:
     ranges:
-    - - -199.68
-      - -152.89
-    - - -151.3
-      - 151.3
-    - - -247.11
-      - -152.89
+    - - -199.6825
+      - -152.8945
+    - - -148.8
+      - 148.8
+    - - -247.616
+      - -152.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 4
   description: Module(0,2) left drift
   geometry:
     ranges:
-    - - -247.11
-      - -200.32
-    - - -151.3
-      - 151.3
-    - - -147.11
-      - -52.89
+    - - -247.1055
+      - -200.3175
+    - - -148.8
+      - 148.8
+    - - -147.616
+      - -52.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 5
   description: Module(0,2) right drift
   geometry:
     ranges:
-    - - -199.68
-      - -152.89
-    - - -151.3
-      - 151.3
-    - - -147.11
-      - -52.89
+    - - -199.6825
+      - -152.8945
+    - - -148.8
+      - 148.8
+    - - -147.616
+      - -52.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 6
   description: Module(0,3) left drift
   geometry:
     ranges:
-    - - -247.11
-      - -200.32
-    - - -151.3
-      - 151.3
-    - - -47.11
-      - 47.11
+    - - -247.1055
+      - -200.3175
+    - - -148.8
+      - 148.8
+    - - -47.616
+      - 47.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 7
   description: Module(0,3) right drift
   geometry:
     ranges:
-    - - -199.68
-      - -152.89
-    - - -151.3
-      - 151.3
-    - - -47.11
-      - 47.11
+    - - -199.6825
+      - -152.8945
+    - - -148.8
+      - 148.8
+    - - -47.616
+      - 47.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 8
   description: Module(0,4) left drift
   geometry:
     ranges:
-    - - -247.11
-      - -200.32
-    - - -151.3
-      - 151.3
-    - - 52.89
-      - 147.11
+    - - -247.1055
+      - -200.3175
+    - - -148.8
+      - 148.8
+    - - 52.384
+      - 147.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 9
   description: Module(0,4) right drift
   geometry:
     ranges:
-    - - -199.68
-      - -152.89
-    - - -151.3
-      - 151.3
-    - - 52.89
-      - 147.11
+    - - -199.6825
+      - -152.8945
+    - - -148.8
+      - 148.8
+    - - 52.384
+      - 147.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 10
   description: Module(0,5) left drift
   geometry:
     ranges:
-    - - -247.11
-      - -200.32
-    - - -151.3
-      - 151.3
-    - - 152.89
-      - 247.11
+    - - -247.1055
+      - -200.3175
+    - - -148.8
+      - 148.8
+    - - 152.384
+      - 247.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 11
   description: Module(0,5) right drift
   geometry:
     ranges:
-    - - -199.68
-      - -152.89
-    - - -151.3
-      - 151.3
-    - - 152.89
-      - 247.11
+    - - -199.6825
+      - -152.8945
+    - - -148.8
+      - 148.8
+    - - 152.384
+      - 247.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 12
   description: Module(0,6) left drift
   geometry:
     ranges:
-    - - -247.11
-      - -200.32
-    - - -151.3
-      - 151.3
-    - - 252.89
-      - 347.11
+    - - -247.1055
+      - -200.3175
+    - - -148.8
+      - 148.8
+    - - 252.384
+      - 347.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 13
   description: Module(0,6) right drift
   geometry:
     ranges:
-    - - -199.68
-      - -152.89
-    - - -151.3
-      - 151.3
-    - - 252.89
-      - 347.11
+    - - -199.6825
+      - -152.8945
+    - - -148.8
+      - 148.8
+    - - 252.384
+      - 347.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 14
   description: Module(1,0) left drift
   geometry:
     ranges:
-    - - -147.11
-      - -100.32
-    - - -151.3
-      - 151.3
-    - - -347.11
-      - -252.89
+    - - -147.1055
+      - -100.3175
+    - - -148.8
+      - 148.8
+    - - -347.616
+      - -252.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 15
   description: Module(1,0) right drift
   geometry:
     ranges:
-    - - -99.68
-      - -52.89
-    - - -151.3
-      - 151.3
-    - - -347.11
-      - -252.89
+    - - -99.6825
+      - -52.8945
+    - - -148.8
+      - 148.8
+    - - -347.616
+      - -252.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 16
   description: Module(1,1) left drift
   geometry:
     ranges:
-    - - -147.11
-      - -100.32
-    - - -151.3
-      - 151.3
-    - - -247.11
-      - -152.89
+    - - -147.1055
+      - -100.3175
+    - - -148.8
+      - 148.8
+    - - -247.616
+      - -152.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 17
   description: Module(1,1) right drift
   geometry:
     ranges:
-    - - -99.68
-      - -52.89
-    - - -151.3
-      - 151.3
-    - - -247.11
-      - -152.89
+    - - -99.6825
+      - -52.8945
+    - - -148.8
+      - 148.8
+    - - -247.616
+      - -152.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 18
   description: Module(1,2) left drift
   geometry:
     ranges:
-    - - -147.11
-      - -100.32
-    - - -151.3
-      - 151.3
-    - - -147.11
-      - -52.89
+    - - -147.1055
+      - -100.3175
+    - - -148.8
+      - 148.8
+    - - -147.616
+      - -52.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 19
   description: Module(1,2) right drift
   geometry:
     ranges:
-    - - -99.68
-      - -52.89
-    - - -151.3
-      - 151.3
-    - - -147.11
-      - -52.89
+    - - -99.6825
+      - -52.8945
+    - - -148.8
+      - 148.8
+    - - -147.616
+      - -52.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 20
   description: Module(1,3) left drift
   geometry:
     ranges:
-    - - -147.11
-      - -100.32
-    - - -151.3
-      - 151.3
-    - - -47.11
-      - 47.11
+    - - -147.1055
+      - -100.3175
+    - - -148.8
+      - 148.8
+    - - -47.616
+      - 47.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 21
   description: Module(1,3) right drift
   geometry:
     ranges:
-    - - -99.68
-      - -52.89
-    - - -151.3
-      - 151.3
-    - - -47.11
-      - 47.11
+    - - -99.6825
+      - -52.8945
+    - - -148.8
+      - 148.8
+    - - -47.616
+      - 47.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 22
   description: Module(1,4) left drift
   geometry:
     ranges:
-    - - -147.11
-      - -100.32
-    - - -151.3
-      - 151.3
-    - - 52.89
-      - 147.11
+    - - -147.1055
+      - -100.3175
+    - - -148.8
+      - 148.8
+    - - 52.384
+      - 147.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 23
   description: Module(1,4) right drift
   geometry:
     ranges:
-    - - -99.68
-      - -52.89
-    - - -151.3
-      - 151.3
-    - - 52.89
-      - 147.11
+    - - -99.6825
+      - -52.8945
+    - - -148.8
+      - 148.8
+    - - 52.384
+      - 147.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 24
   description: Module(1,5) left drift
   geometry:
     ranges:
-    - - -147.11
-      - -100.32
-    - - -151.3
-      - 151.3
-    - - 152.89
-      - 247.11
+    - - -147.1055
+      - -100.3175
+    - - -148.8
+      - 148.8
+    - - 152.384
+      - 247.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 25
   description: Module(1,5) right drift
   geometry:
     ranges:
-    - - -99.68
-      - -52.89
-    - - -151.3
-      - 151.3
-    - - 152.89
-      - 247.11
+    - - -99.6825
+      - -52.8945
+    - - -148.8
+      - 148.8
+    - - 152.384
+      - 247.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 26
   description: Module(1,6) left drift
   geometry:
     ranges:
-    - - -147.11
-      - -100.32
-    - - -151.3
-      - 151.3
-    - - 252.89
-      - 347.11
+    - - -147.1055
+      - -100.3175
+    - - -148.8
+      - 148.8
+    - - 252.384
+      - 347.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 27
   description: Module(1,6) right drift
   geometry:
     ranges:
-    - - -99.68
-      - -52.89
-    - - -151.3
-      - 151.3
-    - - 252.89
-      - 347.11
+    - - -99.6825
+      - -52.8945
+    - - -148.8
+      - 148.8
+    - - 252.384
+      - 347.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 28
   description: Module(2,0) left drift
   geometry:
     ranges:
-    - - -47.11
-      - -0.32
-    - - -151.3
-      - 151.3
-    - - -347.11
-      - -252.89
+    - - -47.1055
+      - -0.3175
+    - - -148.8
+      - 148.8
+    - - -347.616
+      - -252.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 29
   description: Module(2,0) right drift
   geometry:
     ranges:
-    - - 0.32
-      - 47.11
-    - - -151.3
-      - 151.3
-    - - -347.11
-      - -252.89
+    - - 0.3175
+      - 47.1055
+    - - -148.8
+      - 148.8
+    - - -347.616
+      - -252.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 30
   description: Module(2,1) left drift
   geometry:
     ranges:
-    - - -47.11
-      - -0.32
-    - - -151.3
-      - 151.3
-    - - -247.11
-      - -152.89
+    - - -47.1055
+      - -0.3175
+    - - -148.8
+      - 148.8
+    - - -247.616
+      - -152.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 31
   description: Module(2,1) right drift
   geometry:
     ranges:
-    - - 0.32
-      - 47.11
-    - - -151.3
-      - 151.3
-    - - -247.11
-      - -152.89
+    - - 0.3175
+      - 47.1055
+    - - -148.8
+      - 148.8
+    - - -247.616
+      - -152.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 32
   description: Module(2,2) left drift
   geometry:
     ranges:
-    - - -47.11
-      - -0.32
-    - - -151.3
-      - 151.3
-    - - -147.11
-      - -52.89
+    - - -47.1055
+      - -0.3175
+    - - -148.8
+      - 148.8
+    - - -147.616
+      - -52.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 33
   description: Module(2,2) right drift
   geometry:
     ranges:
-    - - 0.32
-      - 47.11
-    - - -151.3
-      - 151.3
-    - - -147.11
-      - -52.89
+    - - 0.3175
+      - 47.1055
+    - - -148.8
+      - 148.8
+    - - -147.616
+      - -52.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 34
   description: Module(2,3) left drift
   geometry:
     ranges:
-    - - -47.11
-      - -0.32
-    - - -151.3
-      - 151.3
-    - - -47.11
-      - 47.11
+    - - -47.1055
+      - -0.3175
+    - - -148.8
+      - 148.8
+    - - -47.616
+      - 47.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 35
   description: Module(2,3) right drift
   geometry:
     ranges:
-    - - 0.32
-      - 47.11
-    - - -151.3
-      - 151.3
-    - - -47.11
-      - 47.11
+    - - 0.3175
+      - 47.1055
+    - - -148.8
+      - 148.8
+    - - -47.616
+      - 47.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 36
   description: Module(2,4) left drift
   geometry:
     ranges:
-    - - -47.11
-      - -0.32
-    - - -151.3
-      - 151.3
-    - - 52.89
-      - 147.11
+    - - -47.1055
+      - -0.3175
+    - - -148.8
+      - 148.8
+    - - 52.384
+      - 147.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 37
   description: Module(2,4) right drift
   geometry:
     ranges:
-    - - 0.32
-      - 47.11
-    - - -151.3
-      - 151.3
-    - - 52.89
-      - 147.11
+    - - 0.3175
+      - 47.1055
+    - - -148.8
+      - 148.8
+    - - 52.384
+      - 147.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 38
   description: Module(2,5) left drift
   geometry:
     ranges:
-    - - -47.11
-      - -0.32
-    - - -151.3
-      - 151.3
-    - - 152.89
-      - 247.11
+    - - -47.1055
+      - -0.3175
+    - - -148.8
+      - 148.8
+    - - 152.384
+      - 247.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 39
   description: Module(2,5) right drift
   geometry:
     ranges:
-    - - 0.32
-      - 47.11
-    - - -151.3
-      - 151.3
-    - - 152.89
-      - 247.11
+    - - 0.3175
+      - 47.1055
+    - - -148.8
+      - 148.8
+    - - 152.384
+      - 247.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 40
   description: Module(2,6) left drift
   geometry:
     ranges:
-    - - -47.11
-      - -0.32
-    - - -151.3
-      - 151.3
-    - - 252.89
-      - 347.11
+    - - -47.1055
+      - -0.3175
+    - - -148.8
+      - 148.8
+    - - 252.384
+      - 347.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 41
   description: Module(2,6) right drift
   geometry:
     ranges:
-    - - 0.32
-      - 47.11
-    - - -151.3
-      - 151.3
-    - - 252.89
-      - 347.11
+    - - 0.3175
+      - 47.1055
+    - - -148.8
+      - 148.8
+    - - 252.384
+      - 347.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 42
   description: Module(3,0) left drift
   geometry:
     ranges:
-    - - 52.89
-      - 99.68
-    - - -151.3
-      - 151.3
-    - - -347.11
-      - -252.89
+    - - 52.8945
+      - 99.6825
+    - - -148.8
+      - 148.8
+    - - -347.616
+      - -252.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 43
   description: Module(3,0) right drift
   geometry:
     ranges:
-    - - 100.32
-      - 147.11
-    - - -151.3
-      - 151.3
-    - - -347.11
-      - -252.89
+    - - 100.3175
+      - 147.1055
+    - - -148.8
+      - 148.8
+    - - -347.616
+      - -252.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 44
   description: Module(3,1) left drift
   geometry:
     ranges:
-    - - 52.89
-      - 99.68
-    - - -151.3
-      - 151.3
-    - - -247.11
-      - -152.89
+    - - 52.8945
+      - 99.6825
+    - - -148.8
+      - 148.8
+    - - -247.616
+      - -152.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 45
   description: Module(3,1) right drift
   geometry:
     ranges:
-    - - 100.32
-      - 147.11
-    - - -151.3
-      - 151.3
-    - - -247.11
-      - -152.89
+    - - 100.3175
+      - 147.1055
+    - - -148.8
+      - 148.8
+    - - -247.616
+      - -152.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 46
   description: Module(3,2) left drift
   geometry:
     ranges:
-    - - 52.89
-      - 99.68
-    - - -151.3
-      - 151.3
-    - - -147.11
-      - -52.89
+    - - 52.8945
+      - 99.6825
+    - - -148.8
+      - 148.8
+    - - -147.616
+      - -52.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 47
   description: Module(3,2) right drift
   geometry:
     ranges:
-    - - 100.32
-      - 147.11
-    - - -151.3
-      - 151.3
-    - - -147.11
-      - -52.89
+    - - 100.3175
+      - 147.1055
+    - - -148.8
+      - 148.8
+    - - -147.616
+      - -52.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 48
   description: Module(3,3) left drift
   geometry:
     ranges:
-    - - 52.89
-      - 99.68
-    - - -151.3
-      - 151.3
-    - - -47.11
-      - 47.11
+    - - 52.8945
+      - 99.6825
+    - - -148.8
+      - 148.8
+    - - -47.616
+      - 47.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 49
   description: Module(3,3) right drift
   geometry:
     ranges:
-    - - 100.32
-      - 147.11
-    - - -151.3
-      - 151.3
-    - - -47.11
-      - 47.11
+    - - 100.3175
+      - 147.1055
+    - - -148.8
+      - 148.8
+    - - -47.616
+      - 47.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 50
   description: Module(3,4) left drift
   geometry:
     ranges:
-    - - 52.89
-      - 99.68
-    - - -151.3
-      - 151.3
-    - - 52.89
-      - 147.11
+    - - 52.8945
+      - 99.6825
+    - - -148.8
+      - 148.8
+    - - 52.384
+      - 147.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 51
   description: Module(3,4) right drift
   geometry:
     ranges:
-    - - 100.32
-      - 147.11
-    - - -151.3
-      - 151.3
-    - - 52.89
-      - 147.11
+    - - 100.3175
+      - 147.1055
+    - - -148.8
+      - 148.8
+    - - 52.384
+      - 147.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 52
   description: Module(3,5) left drift
   geometry:
     ranges:
-    - - 52.89
-      - 99.68
-    - - -151.3
-      - 151.3
-    - - 152.89
-      - 247.11
+    - - 52.8945
+      - 99.6825
+    - - -148.8
+      - 148.8
+    - - 152.384
+      - 247.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 53
   description: Module(3,5) right drift
   geometry:
     ranges:
-    - - 100.32
-      - 147.11
-    - - -151.3
-      - 151.3
-    - - 152.89
-      - 247.11
+    - - 100.3175
+      - 147.1055
+    - - -148.8
+      - 148.8
+    - - 152.384
+      - 247.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 54
   description: Module(3,6) left drift
   geometry:
     ranges:
-    - - 52.89
-      - 99.68
-    - - -151.3
-      - 151.3
-    - - 252.89
-      - 347.11
+    - - 52.8945
+      - 99.6825
+    - - -148.8
+      - 148.8
+    - - 252.384
+      - 347.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 55
   description: Module(3,6) right drift
   geometry:
     ranges:
-    - - 100.32
-      - 147.11
-    - - -151.3
-      - 151.3
-    - - 252.89
-      - 347.11
+    - - 100.3175
+      - 147.1055
+    - - -148.8
+      - 148.8
+    - - 252.384
+      - 347.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 56
   description: Module(4,0) left drift
   geometry:
     ranges:
-    - - 152.89
-      - 199.68
-    - - -151.3
-      - 151.3
-    - - -347.11
-      - -252.89
+    - - 152.8945
+      - 199.6825
+    - - -148.8
+      - 148.8
+    - - -347.616
+      - -252.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 57
   description: Module(4,0) right drift
   geometry:
     ranges:
-    - - 200.32
-      - 247.11
-    - - -151.3
-      - 151.3
-    - - -347.11
-      - -252.89
+    - - 200.3175
+      - 247.1055
+    - - -148.8
+      - 148.8
+    - - -347.616
+      - -252.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 58
   description: Module(4,1) left drift
   geometry:
     ranges:
-    - - 152.89
-      - 199.68
-    - - -151.3
-      - 151.3
-    - - -247.11
-      - -152.89
+    - - 152.8945
+      - 199.6825
+    - - -148.8
+      - 148.8
+    - - -247.616
+      - -152.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 59
   description: Module(4,1) right drift
   geometry:
     ranges:
-    - - 200.32
-      - 247.11
-    - - -151.3
-      - 151.3
-    - - -247.11
-      - -152.89
+    - - 200.3175
+      - 247.1055
+    - - -148.8
+      - 148.8
+    - - -247.616
+      - -152.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 60
   description: Module(4,2) left drift
   geometry:
     ranges:
-    - - 152.89
-      - 199.68
-    - - -151.3
-      - 151.3
-    - - -147.11
-      - -52.89
+    - - 152.8945
+      - 199.6825
+    - - -148.8
+      - 148.8
+    - - -147.616
+      - -52.384
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 61
   description: Module(4,2) right drift
   geometry:
     ranges:
-    - - 200.32
-      - 247.11
-    - - -151.3
-      - 151.3
-    - - -147.11
-      - -52.89
+    - - 200.3175
+      - 247.1055
+    - - -148.8
+      - 148.8
+    - - -147.616
+      - -52.384
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 62
   description: Module(4,3) left drift
   geometry:
     ranges:
-    - - 152.89
-      - 199.68
-    - - -151.3
-      - 151.3
-    - - -47.11
-      - 47.11
+    - - 152.8945
+      - 199.6825
+    - - -148.8
+      - 148.8
+    - - -47.616
+      - 47.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 63
   description: Module(4,3) right drift
   geometry:
     ranges:
-    - - 200.32
-      - 247.11
-    - - -151.3
-      - 151.3
-    - - -47.11
-      - 47.11
+    - - 200.3175
+      - 247.1055
+    - - -148.8
+      - 148.8
+    - - -47.616
+      - 47.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 64
   description: Module(4,4) left drift
   geometry:
     ranges:
-    - - 152.89
-      - 199.68
-    - - -151.3
-      - 151.3
-    - - 52.89
-      - 147.11
+    - - 152.8945
+      - 199.6825
+    - - -148.8
+      - 148.8
+    - - 52.384
+      - 147.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 65
   description: Module(4,4) right drift
   geometry:
     ranges:
-    - - 200.32
-      - 247.11
-    - - -151.3
-      - 151.3
-    - - 52.89
-      - 147.11
+    - - 200.3175
+      - 247.1055
+    - - -148.8
+      - 148.8
+    - - 52.384
+      - 147.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 66
   description: Module(4,5) left drift
   geometry:
     ranges:
-    - - 152.89
-      - 199.68
-    - - -151.3
-      - 151.3
-    - - 152.89
-      - 247.11
+    - - 152.8945
+      - 199.6825
+    - - -148.8
+      - 148.8
+    - - 152.384
+      - 247.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 67
   description: Module(4,5) right drift
   geometry:
     ranges:
-    - - 200.32
-      - 247.11
-    - - -151.3
-      - 151.3
-    - - 152.89
-      - 247.11
+    - - 200.3175
+      - 247.1055
+    - - -148.8
+      - 148.8
+    - - 152.384
+      - 247.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 68
   description: Module(4,6) left drift
   geometry:
     ranges:
-    - - 152.89
-      - 199.68
-    - - -151.3
-      - 151.3
-    - - 252.89
-      - 347.11
+    - - 152.8945
+      - 199.6825
+    - - -148.8
+      - 148.8
+    - - 252.384
+      - 347.616
     drift_direction: -1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 - id: 69
   description: Module(4,6) right drift
   geometry:
     ranges:
-    - - 200.32
-      - 247.11
-    - - -151.3
-      - 151.3
-    - - 252.89
-      - 347.11
+    - - 200.3175
+      - 247.1055
+    - - -148.8
+      - 148.8
+    - - 252.384
+      - 347.616
     drift_direction: 1
   readout:
     type: pixel
-    pixel_pitch: 0.4
+    pixel_pitch: 0.372
     pixel_shape:
-    - 756
-    - 235
+    - 800
+    - 256
 
 readout:
   sampling_rate: 2.0
