@@ -42,7 +42,7 @@ from tools.loader import ParticleStepExtractor, build_deposit_data, compute_inte
 from production.save import (
     write_config_sensor, write_config_seg, write_config_inst,
     save_event_sensor, save_event_seg, save_event_inst,
-    encode_correspondence_csr, encode_correspondence_csr_pixel, _plane_label,
+    encode_correspondence_csr, encode_correspondence_csr_pixel,
 )
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -317,64 +317,9 @@ def main():
                             digitized=include_digitize)
             save_event_seg(f_seg, event_key, deposits, source_idx, cfg=cfg)
             if inst_data is not None and f_inst is not None:
-                _write_inst_event(f_inst, event_key, inst_data,
-                                  deposits, source_idx)
-
-    def _write_inst_event(f, event_key, inst_data, deposits, source_idx):
-        """Write the inst file's event group.
-
-        Per-volume we store:
-          - ``segment_to_group`` (N_deposits,) int32 — per-deposit group
-            assignment. Moved out of seg because groups are an inst
-            concept (they partition seg deposits for sensor
-            correspondence).
-          - ``qs_fractions`` (N_deposits,) float16 — each deposit's share
-            of its group's recombined charge. Used for deposit-level
-            disaggregation when traversing inst → seg.
-          - ``group_to_track`` (G,) int32 — per-group Geant4 track_id.
-          - one subgroup per readout plane holding the CSR-encoded
-            per-pixel entries.
-        """
-        evt = f.create_group(event_key)
-        evt.attrs['source_event_idx'] = source_idx
-        evt.attrs['n_volumes'] = len(deposits.volumes)
-        evt.attrs['threshold'] = args.inst_threshold
-
-        for v in range(len(deposits.volumes)):
-            vol = deposits.volumes[v]
-            n = int(vol.n_actual)
-            vol_grp = evt.create_group(f'volume_{v}')
-            vol_grp.attrs['n_actual'] = n
-
-            # Per-deposit arrays (moved from seg)
-            if n > 0:
-                vol_grp.create_dataset(
-                    'segment_to_group',
-                    data=np.asarray(vol.group_ids[:n]).astype(np.int32),
-                    compression='gzip')
-                vol_grp.create_dataset(
-                    'qs_fractions',
-                    data=np.asarray(vol.qs_fractions[:n]).astype(np.float16),
-                    compression='gzip')
-
-            # Per-group lookup
-            g2t = deposits.group_to_track[v]
-            if g2t is not None:
-                vol_grp.create_dataset('group_to_track',
-                                       data=g2t, compression='gzip')
-                vol_grp.attrs['n_groups'] = len(g2t)
-
-            # Per-plane CSR entries
-            for (vi, pi), csr in inst_data.items():
-                if vi != v:
-                    continue
-                g = vol_grp.create_group(_plane_label(pi, vi, cfg))
-                for k, arr in csr.items():
-                    g.create_dataset(k, data=arr, compression='gzip')
-                g.attrs['n_groups_plane'] = len(csr['group_ids'])
-                # delta key name differs: wire uses 'delta_wires', pixel uses 'delta_py'
-                delta_key = 'delta_py' if 'delta_py' in csr else 'delta_wires'
-                g.attrs['n_entries'] = len(csr[delta_key])
+                save_event_inst(f_inst, event_key, inst_data, deposits,
+                                source_idx,
+                                inst_threshold=args.inst_threshold, cfg=cfg)
 
     def save_worker(f_sensor, f_seg, f_inst, save_queue):
         """Worker thread: pull items from queue, encode + save."""

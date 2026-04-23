@@ -500,15 +500,44 @@ def encode_correspondence_csr_pixel(gp_sk, gp_tk, gp_gid, gp_ch, gp_count,
     }
 
 
-def save_event_inst(f, event_key, raw_track_hits, deposits,
-                    source_event_idx, num_time_steps,
+def save_event_inst(f, event_key, inst_data, deposits, source_event_idx,
                     inst_threshold=0.0, cfg=None):
-    """Save one event's per-instance sensor decomposition (CSR format).
+    """Save one event's per-instance sensor decomposition.
 
-    Handles both wire (2D) and pixel (3D) decompositions. The inst
-    modality stores the sensor-level signal split by the finest
-    simulator-provided instance (group / track / particle) with a
-    foreign-key mapping back to labl's canonical track identifier.
+    Writes the inst file's event group with the full schema:
+      - ``segment_to_group`` (N_deposits,) int32 — per-deposit group id,
+        row-aligned with seg[v]. Lives in inst (not seg) because groups
+        are an inst concept that partitions seg deposits for sensor
+        correspondence.
+      - ``qs_fractions`` (N_deposits,) float16 — each deposit's share of
+        its group's recombined charge (sums to ~1 per group). Used for
+        deposit-level disaggregation when traversing inst → seg.
+      - ``group_to_track`` (G,) int32 — per-group Geant4 track_id. A
+        convenience label; not part of the hit↔segment correspondence.
+      - one subgroup per readout plane with CSR-encoded per-pixel
+        entries.
+
+    Parameters
+    ----------
+    f : h5py.File
+    event_key : str
+        e.g. ``f'event_{i:03d}'``.
+    inst_data : dict
+        ``{(vol_idx, plane_idx): csr_dict}`` — pre-encoded CSR per plane
+        from :func:`encode_correspondence_csr` (wire) or
+        :func:`encode_correspondence_csr_pixel` (pixel). Encoding is kept
+        outside this function so callers can do it in parallel worker
+        threads (GIL-free numpy) before the file-lock-serialized HDF5
+        write.
+    deposits : DepositData
+        Used for ``n_actual`` and per-deposit ``group_ids``/``qs_fractions``
+        + per-volume ``group_to_track``.
+    source_event_idx : int
+    inst_threshold : float
+        Threshold used during CSR encoding; stored in attrs for
+        provenance.
+    cfg : SimConfig, optional
+        Used for plane label lookup via ``cfg.plane_names``.
     """
     evt = f.create_group(event_key)
     evt.attrs['source_event_idx'] = source_event_idx
@@ -516,39 +545,33 @@ def save_event_inst(f, event_key, raw_track_hits, deposits,
     evt.attrs['threshold'] = inst_threshold
 
     for v in range(len(deposits.volumes)):
+        vol = deposits.volumes[v]
+        n = int(vol.n_actual)
         vol_grp = evt.create_group(f'volume_{v}')
+        vol_grp.attrs['n_actual'] = n
+
+        if n > 0:
+            vol_grp.create_dataset(
+                'segment_to_group',
+                data=np.asarray(vol.group_ids[:n]).astype(np.int32),
+                compression='gzip')
+            vol_grp.create_dataset(
+                'qs_fractions',
+                data=np.asarray(vol.qs_fractions[:n]).astype(np.float16),
+                compression='gzip')
 
         g2t = deposits.group_to_track[v]
         if g2t is not None:
-            vol_grp.create_dataset('group_to_track', data=g2t, compression='gzip')
+            vol_grp.create_dataset('group_to_track', data=g2t,
+                                   compression='gzip')
+            vol_grp.attrs['n_groups'] = len(g2t)
 
-        is_pixel = (cfg is not None and cfg.volumes[v].readout_type == 'pixel')
-
-        for key, raw in raw_track_hits.items():
-            if not isinstance(key, tuple):
+        for (vi, pi), csr in inst_data.items():
+            if vi != v:
                 continue
-            vol_idx, plane_idx = key
-            if vol_idx != v:
-                continue
-            sk, tk, gid, ch, count, _row_sums = raw
-
-            g = vol_grp.create_group(_plane_label(plane_idx, vol_idx, cfg))
-
-            if is_pixel:
-                num_pz = cfg.volumes[v].pixel_shape[1]
-                csr = encode_correspondence_csr_pixel(
-                    sk, tk, gid, ch, count, num_pz,
-                    threshold=inst_threshold)
-                g.attrs['readout_type'] = 'pixel'
-                delta_key = 'delta_py'  # for n_entries
-            else:
-                pk = sk * num_time_steps + tk
-                csr = encode_correspondence_csr(
-                    pk, gid, ch, count, num_time_steps,
-                    threshold=inst_threshold)
-                delta_key = 'delta_wires'
-
+            g = vol_grp.create_group(_plane_label(pi, vi, cfg))
             for k, arr in csr.items():
                 g.create_dataset(k, data=arr, compression='gzip')
             g.attrs['n_groups_plane'] = len(csr['group_ids'])
+            delta_key = 'delta_py' if 'delta_py' in csr else 'delta_wires'
             g.attrs['n_entries'] = len(csr[delta_key])
