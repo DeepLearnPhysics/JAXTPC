@@ -400,18 +400,20 @@ dep_ch = corr['qs'][i] * plane['charge'][mask]       # this deposit's share (e-)
 `inst_threshold` (default 25 e⁻) have no plane entries, so deposits in
 those groups produce no pixels (~70% of deposits in typical events).
 
-**Backward (pixel → deposits):**
+**Backward (pixel → deposits)** — straight inversion of the forward
+filter (`plane.gid == s2g[i]`). `(gid, wire, time)` is unique on each
+plane — the CSR stores one row per (group, pixel) — so the gids at a
+hit are already distinct and no `unique` is needed:
 ```python
 plane = corr['planes']['U']
 hit = (plane['wire'] == w_q) & (plane['time'] == t_q)
-gids_at_pixel = np.unique(plane['gid'][hit])         # usually >1 group
-deposits = np.concatenate([np.where(corr['s2g'] == g)[0]
-                           for g in gids_at_pixel])
+deposits = np.where(np.isin(corr['s2g'], plane['gid'][hit]))[0]
 ```
 A single pixel is typically shared by several groups (≥3 groups at more
 than half of active pixels in dense events). Per-group charge
 contributions at this pixel are `plane['charge'][hit]` (one row per
-contributing group).
+contributing group) — multiply by `corr['qs'][member_idx]` to split a
+group's pixel charge across its deposits.
 
 **Per-segment total charge landing on a plane** (fast, vectorized):
 ```python
