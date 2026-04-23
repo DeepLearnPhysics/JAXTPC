@@ -214,13 +214,15 @@ def load_event_sensor(sensor_path, event_idx):
 def load_event_seg(seg_path, event_idx):
     """Load one event's 3D truth deposits (per-volume).
 
+    Per the design (see particle-imaging-models/docs/DATASET_DESIGN.md),
+    seg holds pure physics only. Group/instance fields live in inst,
+    per-track labels in labl.
+
     Returns
     -------
     volumes : list of dict, one per volume. Each has:
         positions_mm (N, 3), de (N,), dx (N,), theta (N,), phi (N,),
-        track_ids (N,), group_ids (N,), group_to_track (G,) or None,
-        qs_fractions (N,) or None, original_indices (N,) or None,
-        n_actual (int).
+        t0_us (N,), charge (N,), photons (N,), n_actual (int).
     """
     event_key = f'event_{event_idx:03d}'
 
@@ -254,22 +256,10 @@ def load_event_seg(seg_path, event_idx):
                 'dx': vg['dx'][:].astype(np.float32),
                 'theta': vg['theta'][:].astype(np.float32),
                 'phi': vg['phi'][:].astype(np.float32),
-                'track_ids': vg['track_ids'][:],
-                'group_ids': vg['group_ids'][:],
-                'group_to_track': (vg['group_to_track'][:] if 'group_to_track' in vg
-                                   else None),
-                't0_us': (vg['t0_us'][:].astype(np.float32) if 't0_us' in vg
-                          else None),
+                't0_us': vg['t0_us'][:].astype(np.float32),
+                'charge': vg['charge'][:].astype(np.float32),
+                'photons': vg['photons'][:].astype(np.float32),
                 'n_actual': n,
-                'n_groups': int(vg.attrs.get('n_groups', 0)),
-                'charge': (vg['charge'][:].astype(np.float32)
-                           if 'charge' in vg else None),
-                'photons': (vg['photons'][:].astype(np.float32)
-                             if 'photons' in vg else None),
-                'qs_fractions': (vg['qs_fractions'][:].astype(np.float32)
-                                  if 'qs_fractions' in vg else None),
-                'original_indices': (vg['original_indices'][:]
-                                      if 'original_indices' in vg else None),
             }
             volumes.append(vol)
 
@@ -351,15 +341,18 @@ def _decode_plane_inst_pixel(g):
     return py_flat, pz_flat, t_flat, gid_flat, ch_flat, n_entries
 
 
-def load_event_inst(inst_path, event_idx, num_time_steps, n_volumes=2, max_planes=3):
+def load_event_inst(inst_path, event_idx, num_time_steps=None,
+                    n_volumes=None, max_planes=3):
     """Load correspondence and derive track labels + diffused charge.
 
     Parameters
     ----------
     inst_path : str
     event_idx : int
-    num_time_steps : int
-    n_volumes : int
+    num_time_steps : int, optional
+        If ``None``, read from inst ``/config`` attrs.
+    n_volumes : int, optional
+        If ``None``, read from inst ``/config`` attrs.
     max_planes : int
 
     Returns
@@ -369,6 +362,10 @@ def load_event_inst(inst_path, event_idx, num_time_steps, n_volumes=2, max_plane
     truth_dense : dict
         {(vol, plane): (num_wires, num_time) ndarray}
     group_to_track : list of arrays, one per volume
+    segment_to_group : list of arrays, one per volume (per-deposit group id;
+        row-aligned with seg deposits in the same volume; None where missing)
+    qs_fractions : list of arrays, one per volume (per-deposit fraction of
+        its group's recombined charge; None where missing)
     """
     from tools.track_hits import label_from_groups
 
@@ -377,17 +374,32 @@ def load_event_inst(inst_path, event_idx, num_time_steps, n_volumes=2, max_plane
     truth_dense = {}
 
     with h5py.File(inst_path, 'r') as f:
+        if num_time_steps is None:
+            num_time_steps = int(f['config'].attrs['num_time_steps'])
+        if n_volumes is None:
+            n_volumes = int(f['config'].attrs['n_volumes'])
         evt = f[event_key]
         nw_arr = f['config']['num_wires'][:]
 
-        # Load per-volume group_to_track
+        # Load per-volume group_to_track + per-deposit group/qs assignments
         g2t_per_vol = []
+        s2g_per_vol = []
+        qs_per_vol = []
         for v in range(n_volumes):
             vol_key = f'volume_{v}'
-            if vol_key in evt and 'group_to_track' in evt[vol_key]:
-                g2t_per_vol.append(evt[vol_key]['group_to_track'][:])
+            if vol_key in evt:
+                vol_grp = evt[vol_key]
+                g2t_per_vol.append(vol_grp['group_to_track'][:]
+                                   if 'group_to_track' in vol_grp
+                                   else np.array([0], dtype=np.int32))
+                s2g_per_vol.append(vol_grp['segment_to_group'][:]
+                                   if 'segment_to_group' in vol_grp else None)
+                qs_per_vol.append(vol_grp['qs_fractions'][:].astype(np.float32)
+                                  if 'qs_fractions' in vol_grp else None)
             else:
                 g2t_per_vol.append(np.array([0], dtype=np.int32))
+                s2g_per_vol.append(None)
+                qs_per_vol.append(None)
 
         for v in range(n_volumes):
             vol_key = f'volume_{v}'
@@ -447,4 +459,84 @@ def load_event_inst(inst_path, event_idx, num_time_steps, n_volumes=2, max_plane
                         g2t_per_vol[v])
                     track_hits[(v, p)] = result
 
-    return track_hits, truth_dense, g2t_per_vol
+    return track_hits, truth_dense, g2t_per_vol, s2g_per_vol, qs_per_vol
+
+
+# =============================================================================
+# Segment <-> pixel correspondence
+# =============================================================================
+
+def load_correspondence(inst_path, event_idx, v, num_time_steps=None):
+    """Per-volume deposit<->pixel correspondence tables from inst.
+
+    Unlike ``load_event_inst`` (which sums per-pixel charge and erases
+    group identity), this returns each plane's raw group-keyed entries
+    so forward/backward correspondence is a direct lookup.
+
+    Parameters
+    ----------
+    inst_path : str
+    event_idx : int
+    v : int
+        Volume index.
+    num_time_steps : int, optional
+        If ``None``, read from the file's ``/config`` attrs.
+
+    Returns
+    -------
+    dict with keys:
+        's2g'    (N_dep,) int32    — segment_to_group (row-aligned with seg[v])
+        'qs'     (N_dep,) float32  — qs_fractions
+        'g2t'    (n_groups,) int32 — group_to_track (optional label)
+        'planes' {label: {'wire', 'time', 'charge', 'gid'}} — per-plane flat
+                 arrays; wire/pixel-y + pixel-z for pixel readouts.
+    """
+    with h5py.File(inst_path, 'r') as f:
+        if num_time_steps is None:
+            num_time_steps = int(f['config'].attrs['num_time_steps'])
+        evt = f[f'event_{event_idx:03d}']
+        vg_key = f'volume_{v}'
+        if vg_key not in evt:
+            return None
+        vg = evt[vg_key]
+        s2g = vg['segment_to_group'][:]
+        qs  = vg['qs_fractions'][:].astype(np.float32)
+        g2t = vg['group_to_track'][:]
+
+        planes = {}
+        for plabel in vg:
+            g = vg[plabel]
+            if not isinstance(g, h5py.Group) or 'group_ids' not in g:
+                continue
+            if 'delta_py' in g:
+                py, pz, t, gid, ch, _ = _decode_plane_inst_pixel(g)
+                planes[plabel] = dict(pixel_y=py, pixel_z=pz,
+                                      time=t, charge=ch, gid=gid)
+            else:
+                pk, gid, ch, _ = _decode_plane_inst(g, num_time_steps)
+                planes[plabel] = dict(wire=pk // num_time_steps,
+                                      time=pk % num_time_steps,
+                                      charge=ch, gid=gid)
+
+    return {'s2g': s2g, 'qs': qs, 'g2t': g2t, 'planes': planes}
+
+
+def segment_charge_per_plane(corr, plane_label):
+    """Total electrons from each deposit landing on pixels of one plane.
+
+    Parameters
+    ----------
+    corr : dict
+        Output of :func:`load_correspondence`.
+    plane_label : str
+        'U', 'V', 'Y', or 'Pixel'.
+
+    Returns
+    -------
+    (N_dep,) float32. Entries are zero for deposits whose group fell
+    below the inst write threshold on this plane (no pixel entries).
+    """
+    d = corr['planes'][plane_label]
+    grp_tot = np.bincount(d['gid'], weights=d['charge'],
+                          minlength=corr['g2t'].size).astype(np.float32)
+    return corr['qs'] * grp_tot[corr['s2g']]

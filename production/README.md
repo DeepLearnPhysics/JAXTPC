@@ -155,10 +155,13 @@ from production.load import (
 sensor_path, seg_path, inst_path = get_file_paths('output/', 'myrun', file_index=0)
 viz_config = build_viz_config(sensor_path)  # minimal config from HDF5 metadata
 dense_signals, attrs, pedestals = load_event_sensor(sensor_path, event_idx=0)
-# pedestals is {(side, plane): int} if digitized, None otherwise
-# To get signed ADC: signal = dense_signals[(s,p)].astype(int) - pedestals[(s,p)]
-seg = load_event_seg(seg_path, event_idx=0)
-track_hits, truth_dense, g2t = load_event_inst(inst_path, event_idx=0, num_time_steps=2701)
+# pedestals is {(vol, plane): int} if digitized, None otherwise
+# To get signed ADC: signal = dense_signals[(v,p)].astype(int) - pedestals[(v,p)]
+seg = load_event_seg(seg_path, event_idx=0)         # list of per-volume dicts
+track_hits, truth_dense, g2t, s2g, qs = load_event_inst(
+    inst_path, event_idx=0, num_time_steps=2701)
+# g2t, s2g, qs are lists of per-volume arrays (segment_to_group is the
+# per-deposit group id, qs_fractions is the per-deposit charge weight).
 ```
 
 ---
@@ -188,8 +191,10 @@ Sparse thresholded raw readout after full detector simulation.
     pedestals           (2, 3) int32    per-plane pedestal (if digitized)
 
 /event_{NNN}/
-    attrs: source_event_idx, n_deposits, n_east, n_west
-    {plane}/                           6 planes: east_U/V/Y, west_U/V/Y
+    attrs: source_event_idx, n_volumes, n_vol0, n_vol1, ...
+    volume_N/{plane}/                  per-volume groups; plane labels
+                                       come from cfg.plane_names (e.g.
+                                       U/V/Y for wire, "Pixel" for pixel)
         delta_wire      (P,) int16     delta-encoded wire indices
         delta_time      (P,) int16     delta-encoded time indices
         values          (P,) uint16    unsigned ADC (pedestal added) if digitized
@@ -359,22 +364,75 @@ an edepsim-side integrated writer when productionizing.
 
 ## Bidirectional Correspondence
 
-**Forward (deposit -> pixels):**
+Correspondence between 3D deposits (seg) and 2D pixels (sensor) is
+carried by **group ids only** — `group_to_track` is a *label*, not part
+of the mapping. The three inst arrays below are all you need:
+
+| Array | Shape | Meaning |
+|---|---|---|
+| `segment_to_group` (`s2g`) | `(N_dep,)` | per-deposit → group id (row-aligned with seg[v]) |
+| `qs_fractions` (`qs`)      | `(N_dep,)` | per-deposit share of its group's recombined charge (sums to ~1 per group) |
+| per-plane CSR (`group_ids`, `delta_wires`/`delta_times`, `peak_charges`, `charges_u16`) | `(N_entries,)` flat | each entry = one group's charge contribution at one pixel |
+
+`load_correspondence(inst_path, event_idx, v)` returns a decoded
+per-volume dict:
+
 ```python
-# seg has no group info; use inst:
-g = inst[v].segment_to_group[deposit_idx]
-# Find group g in inst[v][plane].group_ids, decode entries -> (wire, time, charge)
-deposit_charge_at_pixel = inst[v].qs_fractions[deposit_idx] * group_charge_at_pixel
+from production.load import load_correspondence, segment_charge_per_plane
+
+corr = load_correspondence(inst_p, event_idx=0, v=0)
+# corr['s2g'], corr['qs'], corr['g2t'],
+# corr['planes'] = {'U': {'wire','time','charge','gid'}, 'V': ..., 'Y': ...}
+#                  (pixel readouts replace 'wire' with 'pixel_y'+'pixel_z')
 ```
 
-**Backward (hit -> deposits):**
+**Forward (deposit → pixels):**
 ```python
-# Scan inst per-pixel entries for matching (wire, time) -> group_id
-track_id = inst[v].group_to_track[group_id]
-# Deposits of this group: np.where(inst[v].segment_to_group == group_id)[0]
+i = deposit_idx
+plane = corr['planes']['U']                          # or V/Y/Pixel
+g = corr['s2g'][i]
+mask = plane['gid'] == g
+wires  = plane['wire'][mask]
+times  = plane['time'][mask]
+dep_ch = corr['qs'][i] * plane['charge'][mask]       # this deposit's share (e-)
 ```
+*Empty is legitimate.* Groups whose peak charge fell below
+`inst_threshold` (default 25 e⁻) have no plane entries, so deposits in
+those groups produce no pixels (~70% of deposits in typical events).
 
-**Deriving track labels (not stored, computed from correspondence):**
+**Backward (pixel → deposits):**
+```python
+plane = corr['planes']['U']
+hit = (plane['wire'] == w_q) & (plane['time'] == t_q)
+gids_at_pixel = np.unique(plane['gid'][hit])         # usually >1 group
+deposits = np.concatenate([np.where(corr['s2g'] == g)[0]
+                           for g in gids_at_pixel])
+```
+A single pixel is typically shared by several groups (≥3 groups at more
+than half of active pixels in dense events). Per-group charge
+contributions at this pixel are `plane['charge'][hit]` (one row per
+contributing group).
+
+**Per-segment total charge landing on a plane** (fast, vectorized):
+```python
+totals_U = segment_charge_per_plane(corr, 'U')   # (N_dep,) float32
+# totals_U[i] = qs[i] * sum of group[s2g[i]]'s charge on plane U.
+# Zero for deposits in sub-threshold groups.
+```
+For a typical event: `totals_U.sum()` is ~25–30% of `seg['charge'].sum()`
+(the rest is lifetime attenuation + sub-threshold charge not written).
+
+**Indexing note.** Group ids are **1-based** in `s2g` (`min=1`); entry
+`group_to_track[0]` is an unused slot.
+
+**Optional — track label for a group** (not correspondence):
+```python
+track_id = corr['g2t'][group_id]
+```
+For per-deposit track labels, prefer `labl/`'s `segment_to_track`
+(direct deposit → track_id, no group indirection).
+
+**Deriving labeled hits from correspondence:**
 ```python
 from tools.track_hits import label_from_groups
 result = label_from_groups(pk, gid, ch, count, group_to_track, max_time)
