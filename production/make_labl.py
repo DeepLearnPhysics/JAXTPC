@@ -1,14 +1,14 @@
 """
 Temporary labl generator.
 
-Produces the ``labl/`` directory from the inst/ output + the edepsim
-source file. Seg is **not** consulted because after the rename seg is
-pure physics and no longer carries track-related arrays.
+Produces the ``labl/`` directory from the hits/ output + the edepsim
+source file. Edep is **not** consulted because edep is pure physics
+and does not carry track-related arrays.
 
-Per-deposit → track_id comes from inst::
+Per-deposit → track_id comes from hits::
 
-    deposit i  -> inst.volume_N.segment_to_group[i] = g
-               -> inst.volume_N.group_to_track[g]   = track_id
+    deposit i  -> hits.volume_N.deposit_to_group[i] = g
+               -> hits.volume_N.group_to_track[g]   = track_id
 
 Per-track metadata (pdg, interaction, ancestor) comes from the edepsim
 source via :class:`tools.loader.ParticleStepExtractor`.
@@ -18,8 +18,8 @@ Output layout (matches pimm-data's ``JAXTPCLablReader``)::
     {outdir}/labl/{dataset}_labl_{NNNN}.h5
         /config/ attrs
         /event_NNN/volume_N/
-            # Per-deposit (N,) foreign key row-aligned with seg rows
-            segment_to_track    (N,) int32
+            # Per-deposit (N,) foreign key row-aligned with edep rows
+            deposit_to_track    (N,) int32
 
             # Per-unique-track (T,) dimension table
             track_ids           (T,) int32 — primary key
@@ -74,14 +74,14 @@ def _build_track_lookup(extractor, source_event_idx):
     pdata = getattr(extractor, '_last_particle_data', None) or {}
     interaction_ids = compute_interaction_ids(
         extractor.file, source_event_idx,
-        ancestor_track_ids=step_data.get('ancestor_track_id'),
+        root_track_ids=step_data.get('root_track_id'),
         particle_track_ids=pdata.get('track_id'),
         particle_parent_ids=pdata.get('parent_track_id'))
     interaction_ids = np.asarray(interaction_ids, dtype=np.int32)
 
     pdg = np.asarray(step_data.get('pdg', np.zeros_like(track_ids)),
                      dtype=np.int32)
-    ancestor = np.asarray(step_data.get('ancestor_track_id',
+    ancestor = np.asarray(step_data.get('root_track_id',
                                         np.zeros_like(track_ids)),
                           dtype=np.int32)
 
@@ -98,37 +98,35 @@ def _build_track_lookup(extractor, source_event_idx):
     }
 
 
-def _volume_labels(inst_vol_group, track_lookup):
+def _volume_labels(hits_vol_group, track_lookup):
     """Build per-deposit FK + per-unique-track dimension table for one
-    volume, sourcing deposit → track from inst.
+    volume, sourcing deposit → track from hits.
 
     Parameters
     ----------
-    inst_vol_group : h5py.Group
-        Volume group from the inst file. Must contain
-        ``segment_to_group`` (N,) and ``group_to_track`` (G,).
+    hits_vol_group : h5py.Group
+        Volume group from the hits file. Must contain
+        ``deposit_to_group`` (N,) and ``group_to_track`` (G,).
     track_lookup : dict[int, dict]
         Output of :func:`_build_track_lookup` for the matching edepsim
         event.
     """
-    if ('segment_to_group' not in inst_vol_group
-            or 'group_to_track' not in inst_vol_group):
+    d2g_key = 'deposit_to_group' if 'deposit_to_group' in hits_vol_group else 'segment_to_group'
+    if (d2g_key not in hits_vol_group
+            or 'group_to_track' not in hits_vol_group):
         empty = np.array([], dtype=np.int32)
-        return dict(segment_to_track=empty, track_ids=empty,
+        return dict(deposit_to_track=empty, track_ids=empty,
                     track_pdg=empty, track_interaction=empty,
                     track_cluster=empty, track_ancestor=empty)
 
-    seg_to_grp = inst_vol_group['segment_to_group'][:].astype(np.int32)
-    g2t = inst_vol_group['group_to_track'][:].astype(np.int32)
+    dep_to_grp = hits_vol_group[d2g_key][:].astype(np.int32)
+    g2t = hits_vol_group['group_to_track'][:].astype(np.int32)
 
-    # Per-deposit track via seg_to_grp ∘ g2t (bound-safe).
-    valid = (seg_to_grp >= 0) & (seg_to_grp < len(g2t))
-    segment_to_track = np.full(len(seg_to_grp), -1, dtype=np.int32)
-    segment_to_track[valid] = g2t[seg_to_grp[valid]]
+    valid = (dep_to_grp >= 0) & (dep_to_grp < len(g2t))
+    deposit_to_track = np.full(len(dep_to_grp), -1, dtype=np.int32)
+    deposit_to_track[valid] = g2t[dep_to_grp[valid]]
 
-    # Per-unique-track table (T rows): every track_id that appears at
-    # least once in this volume's deposits (drops -1 sentinel).
-    uniq = np.unique(segment_to_track[segment_to_track >= 0])
+    uniq = np.unique(deposit_to_track[deposit_to_track >= 0])
     T = len(uniq)
 
     track_pdg = np.full(T, -1, dtype=np.int32)
@@ -143,24 +141,24 @@ def _volume_labels(inst_vol_group, track_lookup):
         track_ancestor[i] = meta['ancestor']
 
     return dict(
-        segment_to_track=segment_to_track,
+        deposit_to_track=deposit_to_track,
         track_ids=uniq.astype(np.int32),
         track_pdg=track_pdg,
         track_interaction=track_interaction,
-        track_cluster=uniq.astype(np.int32),  # dummy: 1 track = 1 cluster
+        track_cluster=uniq.astype(np.int32),
         track_ancestor=track_ancestor,
     )
 
 
-def make_labl(inst_path, labl_path, source_file, dataset_name, file_index):
-    """Generate a labl file from inst + edepsim source."""
-    with h5py.File(inst_path, 'r') as f_inst, \
+def make_labl(hits_path, labl_path, source_file, dataset_name, file_index):
+    """Generate a labl file from hits + edepsim source."""
+    with h5py.File(hits_path, 'r') as f_hits, \
             h5py.File(labl_path, 'w') as f_labl, \
             ParticleStepExtractor(source_file) as extractor:
 
-        inst_cfg = f_inst['config']
-        n_events = int(inst_cfg.attrs['n_events'])
-        n_volumes = int(inst_cfg.attrs.get('n_volumes', 1))
+        hits_cfg = f_hits['config']
+        n_events = int(hits_cfg.attrs['n_events'])
+        n_volumes = int(hits_cfg.attrs.get('n_volumes', 1))
 
         g_cfg = f_labl.create_group('config')
         g_cfg.attrs['dataset_name'] = dataset_name
@@ -173,63 +171,65 @@ def make_labl(inst_path, labl_path, source_file, dataset_name, file_index):
         g_cfg.attrs['source'] = f'dummy-from-edepsim:{os.path.basename(source_file)}'
         g_cfg.attrs['generator'] = 'production/make_labl.py'
         for key in ('source_file', 'global_event_offset', 'group_size',
-                    'gap_threshold_mm', 'run_id', 'git_commit', 'git_dirty',
-                    'git_repo'):
-            if key in inst_cfg.attrs:
-                g_cfg.attrs[key] = inst_cfg.attrs[key]
+                    'gap_threshold_mm', 'production_version', 'run_id',
+                    'batch_timestamp', 'git_commit', 'git_dirty', 'git_repo'):
+            if key in hits_cfg.attrs:
+                g_cfg.attrs[key] = hits_cfg.attrs[key]
 
         for i in range(n_events):
             evt_key = f'event_{i:03d}'
-            if evt_key not in f_inst:
+            if evt_key not in f_hits:
                 continue
-            inst_evt = f_inst[evt_key]
-            source_event_idx = int(inst_evt.attrs.get('source_event_idx', i))
+            hits_evt = f_hits[evt_key]
+            source_event_idx = int(hits_evt.attrs.get('source_event_idx', i))
 
             track_lookup = _build_track_lookup(extractor, source_event_idx)
 
             labl_evt = f_labl.create_group(evt_key)
+            if 'event_id' in hits_evt.attrs:
+                labl_evt.attrs['event_id'] = hits_evt.attrs['event_id']
             for v in range(n_volumes):
                 vol_key = f'volume_{v}'
-                if vol_key not in inst_evt:
+                if vol_key not in hits_evt:
                     continue
-                inst_vol = inst_evt[vol_key]
+                hits_vol = hits_evt[vol_key]
                 labl_vol = labl_evt.create_group(vol_key)
 
-                labels = _volume_labels(inst_vol, track_lookup)
+                labels = _volume_labels(hits_vol, track_lookup)
                 for name, arr in labels.items():
                     labl_vol.create_dataset(name, data=arr, compression='gzip')
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate a dummy labl/ directory from inst + edepsim.")
+        description="Generate a dummy labl/ directory from hits + edepsim.")
     parser.add_argument('--outdir', required=True,
-                        help='Base dataset directory (must contain inst/). '
+                        help='Base dataset directory (must contain hits/). '
                              'labl/ is created here.')
     parser.add_argument('--source', default=None,
                         help='Path to the edepsim source HDF5 file. '
                              'Defaults to the per-file source_file attr '
-                             'stored in inst, resolved relative to cwd.')
+                             'stored in hits, resolved relative to cwd.')
     parser.add_argument('--dataset', default='sim',
                         help="File prefix (default: 'sim')")
-    parser.add_argument('--inst-subdir', default='inst')
+    parser.add_argument('--hits-subdir', default='hits')
     parser.add_argument('--labl-subdir', default='labl')
     args = parser.parse_args()
 
-    inst_dir = os.path.join(args.outdir, args.inst_subdir)
+    hits_dir = os.path.join(args.outdir, args.hits_subdir)
     labl_dir = os.path.join(args.outdir, args.labl_subdir)
 
-    if not os.path.isdir(inst_dir):
-        sys.exit(f"Inst directory not found: {inst_dir}")
+    if not os.path.isdir(hits_dir):
+        sys.exit(f"Hits directory not found: {hits_dir}")
     os.makedirs(labl_dir, exist_ok=True)
 
-    pattern = os.path.join(inst_dir, f'{args.dataset}_inst_*.h5')
-    inst_files = sorted(glob.glob(pattern))
-    if not inst_files:
-        sys.exit(f"No inst files matching {pattern}")
+    pattern = os.path.join(hits_dir, f'{args.dataset}_hits_*.h5')
+    hits_files = sorted(glob.glob(pattern))
+    if not hits_files:
+        sys.exit(f"No hits files matching {pattern}")
 
-    for inst_path in inst_files:
-        basename = os.path.basename(inst_path)
+    for hits_path in hits_files:
+        basename = os.path.basename(hits_path)
         stem = basename.rsplit('.', 1)[0]
         file_index = int(stem.rsplit('_', 1)[-1])
         labl_path = os.path.join(
@@ -238,17 +238,17 @@ def main():
         if args.source:
             source = args.source
         else:
-            with h5py.File(inst_path, 'r') as f:
+            with h5py.File(hits_path, 'r') as f:
                 source = str(f['config'].attrs.get('source_file', 'out.h5'))
         if not os.path.exists(source):
             sys.exit(f"edepsim source not found: {source} (use --source to override)")
 
         t0 = time.time()
-        make_labl(inst_path, labl_path, source, args.dataset, file_index)
+        make_labl(hits_path, labl_path, source, args.dataset, file_index)
         print(f'{basename} -> {os.path.basename(labl_path)} '
               f'[{time.time() - t0:.2f}s] (source={os.path.basename(source)})')
 
-    print(f'\nDone. {len(inst_files)} labl file(s) written to {labl_dir}/')
+    print(f'\nDone. {len(hits_files)} labl file(s) written to {labl_dir}/')
 
 
 if __name__ == '__main__':

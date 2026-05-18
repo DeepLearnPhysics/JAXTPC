@@ -4,8 +4,8 @@ Production HDF5 save functions.
 Writes simulation output to three file types (canonical names; see
 docs/DATASET_DESIGN.md in particle-imaging-models):
     sensor — sparse thresholded wire/pixel readout (delta-encoded + lzf)
-    seg    — 3D truth deposits (uint16 positions + float16 physics)
-    inst   — per-instance sensor decomposition (CSR + delta + uint16/peak)
+    edep   — 3D truth deposits (uint16 positions + float16 physics)
+    hits   — per-particle charge attribution at sensor elements (CSR + delta)
 """
 
 import numpy as np
@@ -25,10 +25,23 @@ def _plane_label(plane_idx, vol_idx=None, cfg=None):
 # File-level config writers (once per file)
 # =============================================================================
 
-def _write_provenance(g, run_id, git_info):
-    """Write run_id and git provenance attributes to a config group."""
-    if run_id is not None:
-        g.attrs['run_id'] = run_id
+def _write_provenance(g, provenance):
+    """Write provenance attributes to a config group.
+
+    Parameters
+    ----------
+    provenance : dict or None
+        Keys: production_version (str), run_id (int, edep-sim run),
+        batch_timestamp (int, unix time of this sim job),
+        git_info (dict with git_repo, git_commit, git_dirty).
+    """
+    if provenance is None:
+        return
+    for key in ('production_version', 'run_id', 'batch_timestamp'):
+        val = provenance.get(key)
+        if val is not None:
+            g.attrs[key] = val
+    git_info = provenance.get('git_info')
     if git_info:
         for key, val in git_info.items():
             g.attrs[key] = val
@@ -36,12 +49,12 @@ def _write_provenance(g, run_id, git_info):
 
 def write_config_sensor(f, cfg, params, recomb_model, dataset_name, file_index,
                         source_file, n_events, global_offset, threshold_adc,
-                        digitization_config=None, run_id=None, git_info=None):
+                        digitization_config=None, provenance=None):
     """Write config group for sensor (raw readout) file."""
     if 'config' in f:
         return
     g = f.create_group('config')
-    _write_provenance(g, run_id, git_info)
+    _write_provenance(g, provenance)
     g.attrs['dataset_name'] = dataset_name
     g.attrs['file_index'] = file_index
     g.attrs['source_file'] = source_file
@@ -89,14 +102,14 @@ def write_config_sensor(f, cfg, params, recomb_model, dataset_name, file_index,
         g.attrs['n_bits'] = digitization_config.n_bits
 
 
-def write_config_seg(f, cfg, dataset_name, file_index, source_file,
-                     n_events, global_offset, group_size, gap_threshold_mm,
-                     run_id=None, git_info=None):
-    """Write config group for segments file."""
+def write_config_edep(f, cfg, dataset_name, file_index, source_file,
+                      n_events, global_offset, group_size, gap_threshold_mm,
+                      provenance=None):
+    """Write config group for edep file."""
     if 'config' in f:
         return
     g = f.create_group('config')
-    _write_provenance(g, run_id, git_info)
+    _write_provenance(g, provenance)
     g.attrs['dataset_name'] = dataset_name
     g.attrs['file_index'] = file_index
     g.attrs['source_file'] = source_file
@@ -120,14 +133,14 @@ def write_config_seg(f, cfg, dataset_name, file_index, source_file,
     g.create_dataset('volume_ranges', data=vol_ranges)
 
 
-def write_config_inst(f, cfg, dataset_name, file_index, source_file,
+def write_config_hits(f, cfg, dataset_name, file_index, source_file,
                       n_events, global_offset, group_size, gap_threshold_mm,
-                      run_id=None, git_info=None):
-    """Write config group for inst (per-instance sensor decomposition) file."""
+                      provenance=None):
+    """Write config group for hits (per-particle pre-response) file."""
     if 'config' in f:
         return
     g = f.create_group('config')
-    _write_provenance(g, run_id, git_info)
+    _write_provenance(g, provenance)
     g.attrs['dataset_name'] = dataset_name
     g.attrs['file_index'] = file_index
     g.attrs['source_file'] = source_file
@@ -256,7 +269,7 @@ def _save_pixel_plane(g, sparse_dict):
 
 def save_event_sensor(f, event_key, response_signals, threshold_adc,
                       source_event_idx, deposits, cfg=None,
-                      digitized=False):
+                      digitized=False, event_id=None):
     """Save one event's raw sensor readout (sparse, delta-encoded, gzip).
 
     Handles both wire (2D) and pixel (3D) output formats.
@@ -269,6 +282,8 @@ def save_event_sensor(f, event_key, response_signals, threshold_adc,
     """
     evt = f.create_group(event_key)
     evt.attrs['source_event_idx'] = source_event_idx
+    if event_id is not None:
+        evt.attrs['event_id'] = event_id
     evt.attrs['n_volumes'] = len(deposits.volumes)
     for v in range(len(deposits.volumes)):
         evt.attrs[f'n_vol{v}'] = deposits.volumes[v].n_actual
@@ -296,14 +311,15 @@ def save_event_sensor(f, event_key, response_signals, threshold_adc,
                              vol_idx, plane_idx)
 
 
-def save_event_seg(f, event_key, deposits, source_event_idx, pos_step_mm=0.3, cfg=None):
+def save_event_edep(f, event_key, deposits, source_event_idx, pos_step_mm=0.3,
+                    cfg=None, event_id=None):
     """Save one event's 3D truth deposits — physics only.
 
     Per-volume contents: positions, de/dx/theta/phi/t0_us, charge, photons.
 
     This file does **not** carry instance identifiers or per-track
     metadata (track_ids, group_ids, group_to_track, pdg, interaction_id,
-    ancestor_track_id, qs_fractions). Those belong in ``inst/`` (group
+    root_track_id, qs_fractions). Those belong in ``hits/`` (group
     machinery + per-deposit group assignment + qs_fractions) and
     ``labl/`` (per-deposit → track_id map + per-unique-track metadata).
     See ``docs/DATASET_DESIGN.md`` in particle-imaging-models.
@@ -313,6 +329,8 @@ def save_event_seg(f, event_key, deposits, source_event_idx, pos_step_mm=0.3, cf
     """
     evt = f.create_group(event_key)
     evt.attrs['source_event_idx'] = source_event_idx
+    if event_id is not None:
+        evt.attrs['event_id'] = event_id
     evt.attrs['n_volumes'] = len(deposits.volumes)
 
     for v in range(len(deposits.volumes)):
@@ -448,7 +466,7 @@ def encode_correspondence_csr_pixel(gp_sk, gp_tk, gp_gid, gp_ch, gp_count,
     chs = np.asarray(gp_ch[:P])
 
     if threshold > 0:
-        keep = chs > threshold
+        keep = np.abs(chs) > threshold
         sks, tks, gids, chs = sks[keep], tks[keep], gids[keep], chs[keep]
 
     # Decode spatial key to (py, pz)
@@ -463,11 +481,12 @@ def encode_correspondence_csr_pixel(gp_sk, gp_tk, gp_gid, gp_ch, gp_count,
         s_gids, return_index=True, return_counts=True)
     G = len(unique_gids)
 
-    peak_vals = np.maximum.reduceat(s_chs, group_starts)
+    abs_chs = np.abs(s_chs)
+    peak_abs = np.maximum.reduceat(abs_chs, group_starts)
     group_labels = np.repeat(np.arange(G), group_counts)
-    peak_per_entry = peak_vals[group_labels]
+    peak_abs_per_entry = peak_abs[group_labels]
 
-    is_peak = s_chs == peak_per_entry
+    is_peak = abs_chs == peak_abs_per_entry
     peak_positions = np.where(is_peak)[0]
     first_peak_in_group = np.searchsorted(peak_positions, group_starts)
     peak_indices = peak_positions[first_peak_in_group]
@@ -486,9 +505,10 @@ def encode_correspondence_csr_pixel(gp_sk, gp_tk, gp_gid, gp_ch, gp_count,
     delta_pz = (s_pzs - cpz_per).astype(np.int8)
     delta_times = (s_tks - ct_per).astype(np.int8)
 
-    safe_pc = np.where(pc_per > 0, pc_per, 1.0)
-    charges_u16 = np.round(s_chs / safe_pc * 65535).clip(0, 65535).astype(np.uint16)
-    charges_u16 = np.where(pc_per > 0, charges_u16, 0)
+    abs_pc = np.abs(pc_per)
+    safe_pc = np.where(abs_pc > 0, abs_pc, 1.0)
+    charges_i16 = np.round(s_chs / safe_pc * 32767).clip(-32767, 32767).astype(np.int16)
+    charges_i16 = np.where(abs_pc > 0, charges_i16, 0)
 
     return {
         'group_ids': unique_gids.astype(np.int32),
@@ -496,24 +516,24 @@ def encode_correspondence_csr_pixel(gp_sk, gp_tk, gp_gid, gp_ch, gp_count,
         'center_py': center_py, 'center_pz': center_pz,
         'center_times': center_times, 'peak_charges': peak_charges,
         'delta_py': delta_py, 'delta_pz': delta_pz,
-        'delta_times': delta_times, 'charges_u16': charges_u16,
+        'delta_times': delta_times, 'charges_i16': charges_i16,
     }
 
 
-def save_event_inst(f, event_key, inst_data, deposits, source_event_idx,
-                    inst_threshold=0.0, cfg=None):
-    """Save one event's per-instance sensor decomposition.
+def save_event_hits(f, event_key, hits_data, deposits, source_event_idx,
+                    hits_threshold=0.0, cfg=None, event_id=None):
+    """Save one event's per-particle charge attribution at sensor elements.
 
-    Writes the inst file's event group with the full schema:
-      - ``segment_to_group`` (N_deposits,) int32 — per-deposit group id,
-        row-aligned with seg[v]. Lives in inst (not seg) because groups
-        are an inst concept that partitions seg deposits for sensor
+    Writes the hits file's event group with the full schema:
+      - ``deposit_to_group`` (N_deposits,) int32 — per-deposit group id,
+        row-aligned with edep[v]. Lives in hits (not edep) because groups
+        are a hits concept that partitions edep deposits for sensor
         correspondence.
       - ``qs_fractions`` (N_deposits,) float16 — each deposit's share of
         its group's recombined charge (sums to ~1 per group). Used for
-        deposit-level disaggregation when traversing inst → seg.
+        deposit-level disaggregation when traversing hits → edep.
       - ``group_to_track`` (G,) int32 — per-group Geant4 track_id. A
-        convenience label; not part of the hit↔segment correspondence.
+        convenience label; not part of the hit↔deposit correspondence.
       - one subgroup per readout plane with CSR-encoded per-pixel
         entries.
 
@@ -522,7 +542,7 @@ def save_event_inst(f, event_key, inst_data, deposits, source_event_idx,
     f : h5py.File
     event_key : str
         e.g. ``f'event_{i:03d}'``.
-    inst_data : dict
+    hits_data : dict
         ``{(vol_idx, plane_idx): csr_dict}`` — pre-encoded CSR per plane
         from :func:`encode_correspondence_csr` (wire) or
         :func:`encode_correspondence_csr_pixel` (pixel). Encoding is kept
@@ -533,16 +553,20 @@ def save_event_inst(f, event_key, inst_data, deposits, source_event_idx,
         Used for ``n_actual`` and per-deposit ``group_ids``/``qs_fractions``
         + per-volume ``group_to_track``.
     source_event_idx : int
-    inst_threshold : float
+    hits_threshold : float
         Threshold used during CSR encoding; stored in attrs for
         provenance.
     cfg : SimConfig, optional
         Used for plane label lookup via ``cfg.plane_names``.
+    event_id : int, optional
+        Globally unique event identifier within the run.
     """
     evt = f.create_group(event_key)
     evt.attrs['source_event_idx'] = source_event_idx
+    if event_id is not None:
+        evt.attrs['event_id'] = event_id
     evt.attrs['n_volumes'] = len(deposits.volumes)
-    evt.attrs['threshold'] = inst_threshold
+    evt.attrs['threshold'] = hits_threshold
 
     for v in range(len(deposits.volumes)):
         vol = deposits.volumes[v]
@@ -552,7 +576,7 @@ def save_event_inst(f, event_key, inst_data, deposits, source_event_idx,
 
         if n > 0:
             vol_grp.create_dataset(
-                'segment_to_group',
+                'deposit_to_group',
                 data=np.asarray(vol.group_ids[:n]).astype(np.int32),
                 compression='gzip')
             vol_grp.create_dataset(
@@ -566,7 +590,7 @@ def save_event_inst(f, event_key, inst_data, deposits, source_event_idx,
                                    compression='gzip')
             vol_grp.attrs['n_groups'] = len(g2t)
 
-        for (vi, pi), csr in inst_data.items():
+        for (vi, pi), csr in hits_data.items():
             if vi != v:
                 continue
             g = vol_grp.create_group(_plane_label(pi, vi, cfg))

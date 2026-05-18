@@ -79,7 +79,7 @@ let _3dTrkWt=null,_3dAncWt=null,_3dIntWt=null,_3dPdgWt=null;
 let sensorNorms = {};
 
 let volumes = []; // [ {pos,de,gids,n,planes:{U:{corrPK,...},...}, tids?,pdg?,ancTids?,intIds?}, ... ]
-                  // gids comes from inst/segment_to_group; tids/pdg/ancTids/intIds
+                  // gids comes from hits/deposit_to_group; tids/pdg/ancTids/intIds
                   // are populated only when labl/ is present.
 let volRanges = null; // [ [[xmin,xmax],[ymin,ymax],[zmin,zmax]], ... ] in mm
 
@@ -138,6 +138,13 @@ function hitsCmapRGB(t){return lightMode?infernoRGB(t):warmRGB(t);}
 
 function getDispForPanel(p){
   if(!p) return null;
+  // Pixel: inst IS the sensor — always use inst-derived display data
+  if(isPixelMode){
+    const pd=volumes[p.vol]&&volumes[p.vol].planes[p.plane];
+    if(!pd) return null;
+    return{w:pd.dispW,t:pd.dispT,v:pd.dispCH,n:pd.nDisp};
+  }
+  // Wire: separate sensor data source
   if(curViewMode==='sensor'&&sensorVols[p.vol]&&sensorVols[p.vol][p.plane]){
     const rp=sensorVols[p.vol][p.plane];
     return{w:rp.wires,t:rp.times,v:rp.values,n:rp.n};
@@ -236,7 +243,7 @@ async function loadEvent(idx){
     loopPaused=false;
     updateDriftUI();
   }
-  await loadSensor(idx);
+  if(!isPixelMode) await loadSensor(idx);
   lightLoadedFor=-1; // invalidate cached light, load on demand
   if(curViewMode==='optical'){
     await loadLight(idx);
@@ -381,7 +388,7 @@ function computePanelDomIds(){
       const groups=p.pxToGrps.get(pk);
       if(!groups||groups.length===0) continue;
       let maxCh=-1, maxGid=0;
-      for(const{gid,ch} of groups){if(ch>maxCh){maxCh=ch;maxGid=gid;}}
+      for(const{gid,ch} of groups){const a=Math.abs(ch);if(a>maxCh){maxCh=a;maxGid=gid;}}
       const segs=g2s.get(maxGid);
       if(segs&&segs.length>0){
         const si=segs[0];
@@ -847,57 +854,109 @@ function resetPanelViews(){
   }
 }
 
+function _pixelSymNorms(v,n){
+  let mn=Infinity,mx=-Infinity;
+  for(let i=0;i<n;i++){if(v[i]<mn)mn=v[i];if(v[i]>mx)mx=v[i];}
+  const m=Math.max(Math.abs(mn||0),Math.abs(mx||0))||25;
+  return[-m,m];
+}
+function _colorPanelPixel(p,dd){
+  // Pixel: inst IS the sensor. One data source, two coloring modes.
+  const n=dd.n;
+  p.dispColors=new Uint8Array(n*3);
+  p.dispAlpha=null;
+  if(curColor!=='de'){
+    // Categorical: track/pdg/ancestor/interaction
+    let domIds;
+    if(curColor==='track') domIds=p.pixelDomTrack;
+    else if(curColor==='pdg') domIds=p.pixelDomPdg;
+    else if(curColor==='ancestor') domIds=p.pixelDomAnc;
+    else domIds=p.pixelDomInt;
+    if(domIds){
+      const ch=dd.v;
+      let chAbsMax=0;
+      for(let i=0;i<n;i++){const a=Math.abs(ch[i]);if(a>chAbsMax)chAbsMax=a;}
+      if(chAbsMax<1)chAbsMax=1;
+      const logMax=Math.log10(chAbsMax),logRange=logMax||1;
+      p.dispAlpha=new Float32Array(n);
+      for(let i=0;i<n;i++){
+        const id=domIds[i];
+        const hue=(Math.abs(id)*0.618033988749895)%1.0;
+        const[r,g,b]=hsl2rgb(hue,.78,.55);
+        p.dispColors[i*3]=r;p.dispColors[i*3+1]=g;p.dispColors[i*3+2]=b;
+        const ach=Math.abs(ch[i])||1;
+        const t=Math.max(0,Math.min(1,Math.log10(ach)/logRange));
+        p.dispAlpha[i]=0.15+0.85*Math.pow(t,deEmphPow);
+      }
+    }
+  } else {
+    // Charge: seismic colormap, symmetric norm, dbNorm with gamma/deadband
+    const norms=_pixelSymNorms(dd.v,n);
+    p.chargeMin=norms[0];p.chargeMax=norms[1];
+    for(let i=0;i<n;i++){
+      const t=dbNorm(dd.v[i],norms[0],norms[1],sensorDeadband,sensorGamma);
+      const[r,g,b]=sensorCmapRGB(t);
+      p.dispColors[i*3]=r;p.dispColors[i*3+1]=g;p.dispColors[i*3+2]=b;
+    }
+  }
+}
+function _colorPanelWire(p,dd){
+  // Wire: separate hits and sensor data sources.
+  const n=dd.n;
+  p.dispColors=new Uint8Array(n*3);
+  p.dispAlpha=null;
+  if(curViewMode==='sensor'){
+    // Sensor readout: seismic colormap, symmetric norm
+    const norms=sensorNorms[p.plane]||[-25,25];
+    for(let i=0;i<n;i++){
+      const t=dbNorm(dd.v[i],norms[0],norms[1],sensorDeadband,sensorGamma);
+      const[r,g,b]=sensorCmapRGB(t);
+      p.dispColors[i*3]=r;p.dispColors[i*3+1]=g;p.dispColors[i*3+2]=b;
+    }
+  } else if(curColor!=='de'){
+    // Categorical: track/pdg/ancestor/interaction
+    let domIds;
+    if(curColor==='track') domIds=p.pixelDomTrack;
+    else if(curColor==='pdg') domIds=p.pixelDomPdg;
+    else if(curColor==='ancestor') domIds=p.pixelDomAnc;
+    else domIds=p.pixelDomInt;
+    if(domIds){
+      const ch=dd.v;
+      let chAbsMax=0;
+      for(let i=0;i<n;i++){const a=Math.abs(ch[i]);if(a>chAbsMax)chAbsMax=a;}
+      if(chAbsMax<1)chAbsMax=1;
+      const logMax=Math.log10(chAbsMax),logRange=logMax||1;
+      p.dispAlpha=new Float32Array(n);
+      for(let i=0;i<n;i++){
+        const id=domIds[i];
+        const hue=(Math.abs(id)*0.618033988749895)%1.0;
+        const[r,g,b]=hsl2rgb(hue,.78,.55);
+        p.dispColors[i*3]=r;p.dispColors[i*3+1]=g;p.dispColors[i*3+2]=b;
+        const ach=Math.abs(ch[i])||1;
+        const t=Math.max(0,Math.min(1,Math.log10(ach)/logRange));
+        p.dispAlpha[i]=0.15+0.85*Math.pow(t,deEmphPow);
+      }
+    }
+  } else {
+    // Hits dE: positive-only log scale, warm/inferno
+    const ch=dd.v;
+    p.chargeMin=Infinity;p.chargeMax=-Infinity;
+    for(let i=0;i<n;i++){if(ch[i]<p.chargeMin)p.chargeMin=ch[i];if(ch[i]>p.chargeMax)p.chargeMax=ch[i];}
+    if(p.chargeMin<=0)p.chargeMin=1;if(p.chargeMax<=p.chargeMin)p.chargeMax=p.chargeMin*10;
+    const logMin=Math.log10(p.chargeMin),logRange=Math.log10(p.chargeMax)-logMin||1;
+    for(let i=0;i<n;i++){
+      const t=Math.max(0,Math.min(1,(Math.log10(Math.max(ch[i],p.chargeMin))-logMin)/logRange));
+      const[r,g,b]=hitsCmapRGB(t);
+      p.dispColors[i*3]=r;p.dispColors[i*3+1]=g;p.dispColors[i*3+2]=b;
+    }
+  }
+}
 function precomputeAllPanelColors(){
   for(const p of panels){
     const dd=getDispForPanel(p);
     if(!dd||dd.n===0){p.dispColors=null;continue;}
-    const n=dd.n;
-    p.dispColors=new Uint8Array(n*3);
-    p.dispAlpha=null; // per-pixel alpha (only for track mode)
-    if(curViewMode==='sensor'){
-      const norms=sensorNorms[p.plane]||[-25,25];
-      for(let i=0;i<n;i++){
-        const t=dbNorm(dd.v[i],norms[0],norms[1],sensorDeadband,sensorGamma);
-        const[r,g,b]=sensorCmapRGB(t);
-        p.dispColors[i*3]=r;p.dispColors[i*3+1]=g;p.dispColors[i*3+2]=b;
-      }
-    } else if(curColor!=='de'){
-      // Categorical mode: track, pdg, ancestor, interaction
-      let domIds;
-      if(curColor==='track') domIds=p.pixelDomTrack;
-      else if(curColor==='pdg') domIds=p.pixelDomPdg;
-      else if(curColor==='ancestor') domIds=p.pixelDomAnc;
-      else domIds=p.pixelDomInt;
-      if(!domIds){/* fallback to charge */ domIds=null;}
-      if(domIds){
-        // Emphasis based on charge (2D equivalent of dE), not category count
-        const ch=dd.v;
-        let chMin=Infinity,chMax=-Infinity;
-        for(let i=0;i<n;i++){if(ch[i]<chMin)chMin=ch[i];if(ch[i]>chMax)chMax=ch[i];}
-        if(chMin<=0)chMin=1;if(chMax<=chMin)chMax=chMin*10;
-        const logMin=Math.log10(chMin),logRange=Math.log10(chMax)-logMin||1;
-        p.dispAlpha=new Float32Array(n);
-        for(let i=0;i<n;i++){
-          const id=domIds[i];
-          const hue=(Math.abs(id)*0.618033988749895)%1.0;
-          const[r,g,b]=hsl2rgb(hue,.78,.55);
-          p.dispColors[i*3]=r;p.dispColors[i*3+1]=g;p.dispColors[i*3+2]=b;
-          const t=Math.max(0,Math.min(1,(Math.log10(Math.max(ch[i],chMin))-logMin)/logRange));
-          p.dispAlpha[i]=0.15+0.85*Math.pow(t,deEmphPow);
-        }
-      }
-    } else {
-      const ch=dd.v;
-      p.chargeMin=Infinity;p.chargeMax=-Infinity;
-      for(let i=0;i<n;i++){if(ch[i]<p.chargeMin)p.chargeMin=ch[i];if(ch[i]>p.chargeMax)p.chargeMax=ch[i];}
-      if(p.chargeMin<=0)p.chargeMin=1;if(p.chargeMax<=p.chargeMin)p.chargeMax=p.chargeMin*10;
-      const logMin=Math.log10(p.chargeMin),logRange=Math.log10(p.chargeMax)-logMin||1;
-      for(let i=0;i<n;i++){
-        const t=Math.max(0,Math.min(1,(Math.log10(Math.max(ch[i],p.chargeMin))-logMin)/logRange));
-        const[r,g,b]=hitsCmapRGB(t);
-        p.dispColors[i*3]=r;p.dispColors[i*3+1]=g;p.dispColors[i*3+2]=b;
-      }
-    }
+    if(isPixelMode) _colorPanelPixel(p,dd);
+    else _colorPanelWire(p,dd);
   }
 }
 
@@ -1038,13 +1097,16 @@ function drawPanelAxes(p,pi){
   // Colorbar (skip in categorical label modes — colorbar is meaningless for hashed hues)
   if(curColor==='de'||curViewMode==='sensor'){
     const bx=ox+r.w-margin.r+4, bw=8, by=oy+margin.t, bh=pH;
-    if(curViewMode==='sensor'){
-      const norms=sensorNorms[p.plane]||[-25,25];
+    const useSensorCbar=isPixelMode||curViewMode==='sensor';
+    if(useSensorCbar){
+      // Seismic colorbar with symmetric norm (pixel dE or wire sensor)
+      const norms=isPixelMode?[p.chargeMin||(-25),p.chargeMax||25]:(sensorNorms[p.plane]||[-25,25]);
       for(let y=0;y<bh;y++){const t=1-y/bh;const[cr,cg,cb]=sensorCmapRGB(t);ctx.fillStyle=`rgb(${cr},${cg},${cb})`;ctx.fillRect(bx,by+y,bw,1);}
       ctx.strokeStyle=axCol();ctx.strokeRect(bx,by,bw,bh);
       ctx.textAlign='left';ctx.font=fs+' monospace';ctx.fillStyle=txCol();
       for(let i=0;i<=4;i++){const tn=i/4;const v=dbInverse(tn,norms[0],norms[1],sensorDeadband,sensorGamma);ctx.fillText(v.toFixed(0),bx+bw+2,by+bh*(1-tn)+fsPx/3);}
     } else {
+      // Warm/inferno colorbar with log scale (wire hits)
       for(let y=0;y<bh;y++){const t=1-y/bh;const[cr,cg,cb]=hitsCmapRGB(t);ctx.fillStyle=`rgb(${cr},${cg},${cb})`;ctx.fillRect(bx,by+y,bw,1);}
       ctx.strokeStyle=axCol();ctx.strokeRect(bx,by,bw,bh);
       if(p.chargeMin<p.chargeMax){
@@ -1505,7 +1567,7 @@ async function copy2D(){
 // 3D INTERACTION (GPU PICKING)
 // ============================================================
 function on3dMove(e){
-  if(!corrMode||is2dHover||curViewMode==='sensor') return;
+  if(!corrMode||is2dHover||(curViewMode==='sensor'&&!isPixelMode)) return;
   pendingPick={x:e.offsetX, y:e.offsetY};
 }
 
@@ -1585,7 +1647,7 @@ function on2dMove(e){
     render2DBase();render2DFrame(null);
     return;
   }
-  if(!corrMode||curViewMode==='sensor') return;
+  if(!corrMode||(curViewMode==='sensor'&&!isPixelMode)) return;
   // Optical → 3D correspondence
   if(curViewMode==='optical'){
     const optId=opticalAtMouse(e.offsetX,e.offsetY);
@@ -1791,14 +1853,14 @@ function setupUI(){
   document.getElementById('gammaSlider').addEventListener('input',e=>{
     sensorGamma=parseFloat(e.target.value);
     document.getElementById('gammaVal').textContent=sensorGamma.toFixed(2);
-    if(curViewMode==='sensor'){
+    if(curViewMode==='sensor'||(isPixelMode&&curColor==='de')){
       showOverlay('Recomputing...');
       setTimeout(()=>{precomputeAllPanelColors();render2DBase();render2DFrame(null);hideOverlay();},50);
     }
   });
   document.getElementById('deadbandInput').addEventListener('change',e=>{
     sensorDeadband=parseFloat(e.target.value)||0;
-    if(curViewMode==='sensor'){
+    if(curViewMode==='sensor'||(isPixelMode&&curColor==='de')){
       showOverlay('Recomputing...');
       setTimeout(()=>{precomputeAllPanelColors();render2DBase();render2DFrame(null);hideOverlay();},50);
     }
@@ -1957,7 +2019,7 @@ function switchColorMode(){
 
 function updateCorrBtnState(){
   const btn=document.getElementById('corrBtn');
-  if(curViewMode==='sensor'){
+  if(curViewMode==='sensor'&&!isPixelMode){
     btn.classList.remove('active');
     btn.classList.add('disabled');
     btn.textContent='\u2715 CORR';
@@ -2124,6 +2186,14 @@ function populateVolSelect(){
     // Show/hide optical button
     const ob=document.getElementById('opticalBtn');
     if(ob) ob.style.display=hasOptical?'':'none';
+    // Pixel: inst IS the sensor — hide HITS/SENSOR toggle, force hits mode
+    if(isPixelMode){
+      const hb=document.querySelector('#viewGrp button[data-v="hits"]');
+      const sb=document.querySelector('#viewGrp button[data-v="sensor"]');
+      if(hb) hb.style.display='none';
+      if(sb) sb.style.display='none';
+      curViewMode='hits';
+    }
     // Hide LABEL color mode + selects when no labl file is present.
     // Per-track metadata (track/pdg/ancestor/interaction) is unavailable.
     if(!hasLabl){

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Generate a rotating 3D GIF/MP4 of JAXTPC segments cycling through color modes.
 
-Reads production seg HDF5 files directly and renders with matplotlib.
+Reads production edep HDF5 files directly and renders with matplotlib.
 One full 360° rotation synchronized with dE → Track → PDG → Ancestor → Interaction.
 
 Usage:
-    python3 viewer/export_gif.py path/to/sim_seg_0000.h5 --event 0
-    python3 viewer/export_gif.py path/to/sim_seg_0000.h5 -e 0 -o rotate.mp4 --fps 30
-    python3 viewer/export_gif.py path/to/sim_seg_0000.h5 -e 0 --volume 0 --max-points 50000
+    python3 viewer/export_gif.py path/to/sim_edep_0000.h5 --event 0
+    python3 viewer/export_gif.py path/to/sim_edep_0000.h5 -e 0 -o rotate.mp4 --fps 30
+    python3 viewer/export_gif.py path/to/sim_edep_0000.h5 -e 0 --volume 0 --max-points 50000
 """
 
 import argparse
@@ -107,38 +107,42 @@ def categorical_colors(ids, alpha=0.7):
 
 # ── Data loading ─────────────────────────────────────────────────
 
-def _default_labl_path(seg_path):
-    """Auto-locate the labl file alongside seg, if any.
+def _default_labl_path(edep_path):
+    """Auto-locate the labl file alongside edep, if any.
 
-    Looks first for sibling layout (..../seg/{ds}_seg_NNNN.h5 ->
+    Looks first for sibling layout (..../edep/{ds}_edep_NNNN.h5 ->
     ..../labl/{ds}_labl_NNNN.h5), then for a flat layout where files
-    share a directory.
+    share a directory.  Falls back to the legacy _seg_ pattern for
+    backward compatibility.
     """
-    base = os.path.basename(seg_path)
-    if '_seg_' not in base:
-        return None
-    labl_base = base.replace('_seg_', '_labl_')
-    parent = os.path.dirname(seg_path)
-    # Sibling subdir layout
-    sibling = os.path.normpath(os.path.join(parent, '..', 'labl', labl_base))
-    if os.path.isfile(sibling):
-        return sibling
-    # Flat layout
-    flat = os.path.join(parent, labl_base)
-    if os.path.isfile(flat):
-        return flat
+    base = os.path.basename(edep_path)
+    # Try new naming first, then legacy
+    for old_pat, new_pat in [('_edep_', '_labl_'), ('_seg_', '_labl_')]:
+        if old_pat not in base:
+            continue
+        labl_base = base.replace(old_pat, new_pat)
+        parent = os.path.dirname(edep_path)
+        # Sibling subdir layout
+        sibling = os.path.normpath(os.path.join(parent, '..', 'labl', labl_base))
+        if os.path.isfile(sibling):
+            return sibling
+        # Flat layout
+        flat = os.path.join(parent, labl_base)
+        if os.path.isfile(flat):
+            return flat
     return None
 
 
 def _per_deposit_labels(labl_vol_group, n):
     """Resolve per-deposit (track, pdg, ancestor, interaction) from a
-    labl volume group containing segment_to_track + per-track table.
+    labl volume group containing deposit_to_track + per-track table.
 
     Returns a dict of (n,) int32 arrays, zero-filled for unmapped tracks.
     """
-    if 'segment_to_track' not in labl_vol_group:
+    d2t_key = 'deposit_to_track' if 'deposit_to_track' in labl_vol_group else 'segment_to_track'
+    if d2t_key not in labl_vol_group:
         return None
-    seg_to_trk = labl_vol_group['segment_to_track'][:].astype(np.int32)
+    seg_to_trk = labl_vol_group[d2t_key][:].astype(np.int32)
     track_ids = labl_vol_group['track_ids'][:].astype(np.int32) \
         if 'track_ids' in labl_vol_group else np.array([], dtype=np.int32)
     if track_ids.size == 0:
@@ -170,16 +174,16 @@ def _per_deposit_labels(labl_vol_group, n):
     }
 
 
-def load_seg_data(seg_path, event_idx, labl_path=None):
-    """Load 3D deposits from seg, joined with per-track labels from labl
+def load_edep_data(edep_path, event_idx, labl_path=None):
+    """Load 3D deposits from edep, joined with per-track labels from labl
     if available. ``labl_path=None`` triggers auto-detection."""
     if labl_path is None:
-        labl_path = _default_labl_path(seg_path)
+        labl_path = _default_labl_path(edep_path)
     has_labl = labl_path is not None and os.path.isfile(labl_path)
 
     event_key = f'event_{event_idx:03d}'
 
-    with h5py.File(seg_path, 'r') as f:
+    with h5py.File(edep_path, 'r') as f:
         evt = f[event_key]
         n_volumes = int(evt.attrs.get('n_volumes', 2))
 
@@ -451,8 +455,8 @@ def make_gif(data, output, fps=30, duration=12.0, rotations=1, dpi=200,
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate rotating 3D GIF of JAXTPC segments')
-    parser.add_argument('seg_file', help='Path to *_seg_*.h5 file')
+        description='Generate rotating 3D GIF of JAXTPC energy deposits')
+    parser.add_argument('edep_file', help='Path to *_edep_*.h5 (or legacy *_seg_*.h5) file')
     parser.add_argument('--event', '-e', type=int, default=0,
                         help='Event index (default: 0)')
     parser.add_argument('--volume', '-v', type=int, default=None,
@@ -479,16 +483,16 @@ def main():
                         help='Use light background')
     parser.add_argument('--labl', default=None,
                         help='Path to *_labl_*.h5 (auto-detected next to '
-                             'seg by default; categorical color modes are '
+                             'edep by default; categorical color modes are '
                              'skipped if labl is unavailable).')
     args = parser.parse_args()
 
-    if not os.path.isfile(args.seg_file):
-        sys.exit(f"Error: {args.seg_file} not found")
+    if not os.path.isfile(args.edep_file):
+        sys.exit(f"Error: {args.edep_file} not found")
 
-    print(f"Loading {args.seg_file} event {args.event}...")
-    volumes, has_labl = load_seg_data(args.seg_file, args.event,
-                                      labl_path=args.labl)
+    print(f"Loading {args.edep_file} event {args.event}...")
+    volumes, has_labl = load_edep_data(args.edep_file, args.event,
+                                       labl_path=args.labl)
     if not has_labl:
         print("  Note: no labl file found — only the dE color mode will render.")
     data = merge_volumes(volumes, args.volume)

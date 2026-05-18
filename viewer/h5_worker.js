@@ -1,9 +1,11 @@
 import h5wasm from 'https://cdn.jsdelivr.net/npm/h5wasm@0.10.1/dist/esm/hdf5_hl.js';
 
-let mod, segF, instF, sensorF, lablF, optF, maxTime, nEvents, nVolumes, nPlanes;
+let mod, edepF, hitsF, sensorF, lablF, optF, maxTime, nEvents, nVolumes, nPlanes;
+let hasSensor = false;
 let hasLabl = false;
 let hasOptical = false;
 let isPixel = false;     // pixel vs wire readout
+let cachedInstSensor = null; // pixel: inst-derived sensor data (when no sensor file)
 let numPy = 0, numPz = 0; // pixel grid dimensions (when isPixel)
 let velocityMmUs = 1.6; // default, read from config
 let volAnodes = [];      // x_anode per volume in mm
@@ -88,8 +90,8 @@ function aggregateDisplay(pk, ch, mod2) {
 
 function decodeEvent(idx) {
   const key = 'event_' + String(idx).padStart(3, '0');
-  const sEvt = segF.get(key);
-  const cEvt = instF.get(key);
+  const sEvt = edepF.get(key);
+  const cEvt = hitsF.get(key);
   const lEvt = hasLabl ? lablF.get(key) : null;
   const srcIdx = readAttr(sEvt, 'source_event_idx') || idx;
   const nVol = readAttr(sEvt, 'n_volumes') || nVolumes;
@@ -111,24 +113,26 @@ function decodeEvent(idx) {
 
     const de = readF16(vg.get('de'));
 
-    // Per-volume per-instance decomposition (inst owns segment_to_group)
+    // Per-volume per-particle decomposition (hits owns deposit_to_group)
     const volPlanes = {};
     const iVol = cEvt.get(vKey);
     let gids;
-    if (iVol && iVol.get('segment_to_group')) {
-      gids = new Int32Array(iVol.get('segment_to_group').value);
+    if (iVol && (iVol.get('deposit_to_group') || iVol.get('segment_to_group'))) {
+      const d2gDs = iVol.get('deposit_to_group') || iVol.get('segment_to_group');
+      gids = new Int32Array(d2gDs.value);
     } else {
-      gids = new Int32Array(n);  // no inst data: zeros (highlighting will no-op)
+      gids = new Int32Array(n);  // no hits data: zeros (highlighting will no-op)
     }
 
     // Per-deposit labels via labl (optional). labl carries
-    // segment_to_track (N,) FK + per-unique-track dimension table
+    // deposit_to_track (N,) FK + per-unique-track dimension table
     // (track_ids, track_pdg, track_interaction, track_ancestor).
     let tids = null, pdg = null, ancTids = null, intIds = null;
     if (lEvt) {
       const lVol = lEvt.get(vKey);
-      if (lVol && lVol.get('segment_to_track')) {
-        tids = new Int32Array(lVol.get('segment_to_track').value);
+      const d2tDs = lVol && (lVol.get('deposit_to_track') || lVol.get('segment_to_track'));
+      if (d2tDs) {
+        tids = new Int32Array(d2tDs.value);
         const trackIds = lVol.get('track_ids') ? new Int32Array(lVol.get('track_ids').value) : null;
         if (trackIds && trackIds.length > 0) {
           // Build track_id -> dim-table index map (T is small: ~few thousand)
@@ -177,7 +181,10 @@ function decodeEvent(idx) {
           const dpy = new Int8Array(g.get('delta_py').value);
           const dpz = new Int8Array(g.get('delta_pz').value);
           const dti = new Int8Array(g.get('delta_times').value);
-          const cu16 = new Uint16Array(g.get('charges_u16').value);
+          const hasI16 = g.get('charges_i16');
+          const chArr = hasI16 ? new Int16Array(hasI16.value)
+                               : new Uint16Array(g.get('charges_u16').value);
+          const chScale = hasI16 ? 32767 : 65535;
           const nG = grpIds.length;
           let nEnt = 0; for (let i = 0; i < nG; i++) nEnt += grpSz[i];
 
@@ -193,7 +200,7 @@ function decodeEvent(idx) {
               allPz[s+j] = cpz[i] + dpz[s+j];
               allT[s+j] = ct[i] + dti[s+j];
               allGid[s+j] = grpIds[i];
-              allCh[s+j] = pc[i] * cu16[s+j] / 65535;
+              allCh[s+j] = pc[i] * chArr[s+j] / chScale;
             }
             s += sz;
           }
@@ -258,10 +265,38 @@ function decodeEvent(idx) {
     volumes.push({ pos, de, tids, gids, pdg, ancTids, intIds, t0, arrivalTime, n, planes: volPlanes });
   }
 
+  // Pixel without sensor: cache inst-derived signal for decodeSensor
+  if (isPixel && !hasSensor) {
+    const labels = PIXEL_LABELS;
+    const sVols = [];
+    const norms = {};
+    for (let v = 0; v < nVol; v++) {
+      const vp = {};
+      for (const pl of labels) {
+        const d = volumes[v].planes[pl];
+        if (d) vp[pl] = { wires: d.dispW, times: d.dispT, values: d.dispCH, n: d.nDisp };
+      }
+      sVols.push(vp);
+    }
+    for (const pl of labels) {
+      let mn = Infinity, mx = -Infinity;
+      for (let v = 0; v < nVol; v++) {
+        const d = sVols[v][pl]; if (!d) continue;
+        for (let i = 0; i < d.n; i++) { if (d.values[i] < mn) mn = d.values[i]; if (d.values[i] > mx) mx = d.values[i]; }
+      }
+      if (mn === Infinity) { mn = -25; mx = 25; }
+      norms[pl] = [mn, mx];
+    }
+    cachedInstSensor = { sensorVols: sVols, sensorNorms: norms };
+  }
+
   return { volumes, config: { event_idx: srcIdx, max_time: maxTime, n_volumes: nVol } };
 }
 
 function decodeSensor(idx) {
+  // Pixel without sensor file: return inst-derived signal
+  if (isPixel && !hasSensor && cachedInstSensor) return cachedInstSensor;
+
   const key = 'event_' + String(idx).padStart(3, '0');
   const rEvt = sensorF.get(key);
   const nVol = readAttr(rEvt, 'n_volumes') || nVolumes;
@@ -538,12 +573,19 @@ self.onmessage = async function(e) {
     mod = await h5wasm.ready;
     const base = e.data.base;
     const manifest = e.data.manifest;
-    mountUrl(base + '/' + manifest.seg, 'seg.h5');
-    mountUrl(base + '/' + manifest.inst, 'inst.h5');
-    mountUrl(base + '/' + manifest.sensor, 'sensor.h5');
-    segF = new h5wasm.File('/seg.h5', 'r');
-    instF = new h5wasm.File('/inst.h5', 'r');
-    sensorF = new h5wasm.File('/sensor.h5', 'r');
+    const edepKey = manifest.edep || manifest.seg;
+    const hitsKey = manifest.hits || manifest.inst;
+    mountUrl(base + '/' + edepKey, 'edep.h5');
+    mountUrl(base + '/' + hitsKey, 'hits.h5');
+    edepF = new h5wasm.File('/edep.h5', 'r');
+    hitsF = new h5wasm.File('/hits.h5', 'r');
+
+    // Sensor file is optional for pixel (signal derivable from inst)
+    if (manifest.sensor) {
+      mountUrl(base + '/' + manifest.sensor, 'sensor.h5');
+      sensorF = new h5wasm.File('/sensor.h5', 'r');
+      hasSensor = true;
+    }
 
     // Optional labl file (per-track label dimension table)
     if (manifest.labl) {
@@ -553,46 +595,59 @@ self.onmessage = async function(e) {
     }
 
     // Verify run_id consistency across files
-    const segRid = readAttr(segF.get('config'), 'run_id');
-    const instRid = readAttr(instF.get('config'), 'run_id');
-    const sensorRid = readAttr(sensorF.get('config'), 'run_id');
-    if (segRid != null && instRid != null && sensorRid != null) {
-      if (segRid !== instRid || segRid !== sensorRid) {
-        throw new Error(`run_id mismatch: seg=${segRid}, inst=${instRid}, sensor=${sensorRid}`);
+    const edepRid = readAttr(edepF.get('config'), 'run_id');
+    const hitsRid = readAttr(hitsF.get('config'), 'run_id');
+    if (edepRid != null && hitsRid != null && edepRid !== hitsRid) {
+      throw new Error(`run_id mismatch: edep=${edepRid}, hits=${hitsRid}`);
+    }
+    if (hasSensor) {
+      const sensorRid = readAttr(sensorF.get('config'), 'run_id');
+      if (edepRid != null && sensorRid != null && edepRid !== sensorRid) {
+        throw new Error(`run_id mismatch: edep=${edepRid}, sensor=${sensorRid}`);
       }
     }
     if (hasLabl) {
       const lablRid = readAttr(lablF.get('config'), 'run_id');
-      if (segRid != null && lablRid != null && segRid !== lablRid) {
-        throw new Error(`run_id mismatch: seg=${segRid}, labl=${lablRid}`);
+      if (edepRid != null && lablRid != null && edepRid !== lablRid) {
+        throw new Error(`run_id mismatch: edep=${edepRid}, labl=${lablRid}`);
       }
     }
 
-    maxTime = readAttr(instF.get('config'), 'num_time_steps');
-    nEvents = readAttr(segF.get('config'), 'n_events');
-    nVolumes = readAttr(segF.get('config'), 'n_volumes') || 2;
-    const nwRaw = instF.get('config/num_wires').value;
+    maxTime = readAttr(hitsF.get('config'), 'num_time_steps');
+    nEvents = readAttr(edepF.get('config'), 'n_events');
+    nVolumes = readAttr(edepF.get('config'), 'n_volumes') || 2;
+    const nwRaw = hitsF.get('config/num_wires').value;
     nPlanes = nwRaw.length / nVolumes;
     isPixel = (nPlanes === 0);
 
     const numWires = [];
     if (isPixel) {
-      // Infer pixel grid from first event's sensor data
       nPlanes = 3; // 3 projections: Y-T, Z-T, Y-Z
-      const rEvt = sensorF.get('event_000');
+      // Infer pixel grid from inst or sensor data
+      const probeEvt = hasSensor ? sensorF.get('event_000') : hitsF.get('event_000');
       let maxPyVal = 100, maxPzVal = 100;
       for (let v = 0; v < nVolumes; v++) {
-        const pg = rEvt.get('volume_' + v + '/Pixel');
+        const pg = hasSensor
+          ? probeEvt.get('volume_' + v + '/Pixel')
+          : probeEvt.get('volume_' + v + '/Pixel');
         if (!pg) continue;
-        const dpy = pg.get('delta_py').value;
-        const dpz = pg.get('delta_pz').value;
-        let pyS = readAttr(pg, 'py_start') || 0, pzS = readAttr(pg, 'pz_start') || 0;
-        let pyMax = pyS, pzMax = pzS;
-        for (let i = 0; i < dpy.length; i++) { pyS += dpy[i]; pzS += dpz[i]; if (pyS > pyMax) pyMax = pyS; if (pzS > pzMax) pzMax = pzS; }
-        if (pyMax + 1 > maxPyVal) maxPyVal = pyMax + 1;
-        if (pzMax + 1 > maxPzVal) maxPzVal = pzMax + 1;
+        if (hasSensor && pg.get('delta_py')) {
+          const dpy = pg.get('delta_py').value;
+          const dpz = pg.get('delta_pz').value;
+          let pyS = readAttr(pg, 'py_start') || 0, pzS = readAttr(pg, 'pz_start') || 0;
+          let pyMax = pyS, pzMax = pzS;
+          for (let i = 0; i < dpy.length; i++) { pyS += dpy[i]; pzS += dpz[i]; if (pyS > pyMax) pyMax = pyS; if (pzS > pzMax) pzMax = pzS; }
+          if (pyMax + 1 > maxPyVal) maxPyVal = pyMax + 1;
+          if (pzMax + 1 > maxPzVal) maxPzVal = pzMax + 1;
+        } else if (pg.get('center_py')) {
+          const cpy = new Int16Array(pg.get('center_py').value);
+          const cpz = new Int16Array(pg.get('center_pz').value);
+          for (let i = 0; i < cpy.length; i++) {
+            if (cpy[i] + 1 > maxPyVal) maxPyVal = cpy[i] + 1;
+            if (cpz[i] + 1 > maxPzVal) maxPzVal = cpz[i] + 1;
+          }
+        }
       }
-      // Round up to nearest 100 (pixel grids are typically round numbers)
       numPy = Math.ceil(maxPyVal / 100) * 100;
       numPz = Math.ceil(maxPzVal / 100) * 100;
       for (let v = 0; v < nVolumes; v++) numWires.push([numPy, numPz, numPy]);
@@ -605,7 +660,7 @@ self.onmessage = async function(e) {
     }
     // Read volume ranges (n_volumes, 3, 2) in mm
     let volRanges = null;
-    const vrDs = segF.get('config/volume_ranges');
+    const vrDs = edepF.get('config/volume_ranges');
     if (vrDs) {
       const vr = new Float32Array(vrDs.value);
       volRanges = [];
@@ -615,11 +670,11 @@ self.onmessage = async function(e) {
         volRanges.push(r);
       }
     }
-    // Read drift velocity from sensor config
-    const sensorCfg = sensorF.get('config');
-    const vCmUs = readAttr(sensorCfg, 'velocity_cm_us') || 0.16;
+    // Read drift velocity from sensor or inst config
+    const cfgSrc = hasSensor ? sensorF.get('config') : hitsF.get('config');
+    const vCmUs = readAttr(cfgSrc, 'velocity_cm_us') || 0.16;
     velocityMmUs = vCmUs * 10;
-    const timeStepUs = readAttr(sensorCfg, 'time_step_us') || 0.5;
+    const timeStepUs = readAttr(cfgSrc, 'time_step_us') || 0.5;
 
     // Compute per-volume anode positions and drift directions from ranges
     // Vol with x_max <= 0: anode at x_min (drift toward -x), drift_dir = -1

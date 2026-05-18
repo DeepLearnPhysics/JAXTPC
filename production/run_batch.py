@@ -4,8 +4,8 @@ Batch simulation: run events and save to structured HDF5 files.
 Produces three file types per batch (canonical names; see
 docs/DATASET_DESIGN.md in particle-imaging-models):
     {dataset}_sensor_{NNNN}.h5  — sparse thresholded raw readout
-    {dataset}_seg_{NNNN}.h5     — 3D truth deposits (per-volume)
-    {dataset}_inst_{NNNN}.h5    — per-instance sensor decomposition
+    {dataset}_edep_{NNNN}.h5    — 3D truth energy deposits (per-volume)
+    {dataset}_hits_{NNNN}.h5    — per-particle charge attribution at sensor elements
 
 See README.md for pipeline details, output schema, and threading architecture.
 
@@ -18,6 +18,7 @@ Usage (from project root):
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
@@ -40,8 +41,8 @@ from tools.geometry import generate_detector
 from tools.loader import ParticleStepExtractor, build_deposit_data, compute_interaction_ids
 
 from production.save import (
-    write_config_sensor, write_config_seg, write_config_inst,
-    save_event_sensor, save_event_seg, save_event_inst,
+    write_config_sensor, write_config_edep, write_config_hits,
+    save_event_sensor, save_event_edep, save_event_hits,
     encode_correspondence_csr, encode_correspondence_csr_pixel,
 )
 
@@ -64,6 +65,26 @@ def _get_git_info():
     return repo, commit, dirty
 
 
+def _parse_edepsim_path(data_path):
+    """Try to extract identifiers from an edep-sim path convention.
+
+    Matches: .../{production_version}/run_{run_id}/edepsim_{file_idx}.h5
+    Returns (production_version, run_id, file_idx) or (None, None, None).
+    """
+    m = re.search(r'/([^/]+)/run_(\d+)/edepsim_(\d+)\.h5$', data_path)
+    if m:
+        return m.group(1), int(m.group(2)), int(m.group(3))
+    return None, None, None
+
+
+def _read_edepsim_event_table(data_path):
+    """Read run_id/event_id from edep-sim event/geant4 if present."""
+    with h5py.File(data_path, 'r') as f:
+        if 'event/geant4' not in f:
+            return None
+        return f['event/geant4'][:]
+
+
 # =============================================================================
 # EVENT LOADING
 # =============================================================================
@@ -82,7 +103,7 @@ def load_deposit(extractor, event_idx, sim_config,
     pdata = getattr(extractor, '_last_particle_data', None) or {}
     interaction_ids = compute_interaction_ids(
         extractor.file, event_idx,
-        ancestor_track_ids=step_data.get('ancestor_track_id'),
+        root_track_ids=step_data.get('root_track_id'),
         particle_track_ids=pdata.get('track_id'),
         particle_parent_ids=pdata.get('parent_track_id'))
     positions_mm = np.asarray(
@@ -103,7 +124,7 @@ def load_deposit(extractor, event_idx, sim_config,
         track_ids=np.asarray(step_data.get('track_id', np.ones((n,))), dtype=np.int32),
         t0_us=t0_us,
         interaction_ids=interaction_ids,
-        ancestor_track_ids=np.asarray(step_data.get('ancestor_track_id', np.zeros((n,))), dtype=np.int32),
+        root_track_ids=np.asarray(step_data.get('root_track_id', np.zeros((n,))), dtype=np.int32),
         pdg=np.asarray(step_data.get('pdg', np.zeros((n,))), dtype=np.int32),
         group_size=group_size,
         gap_threshold_mm=gap_threshold_mm,
@@ -146,9 +167,9 @@ def main():
     parser.add_argument('--group-size', type=int, default=5)
     parser.add_argument('--gap-threshold', type=float, default=5.0,
                         help='Gap threshold in mm for group splitting')
-    parser.add_argument('--inst-threshold', type=float, default=25.0,
-                        help='Charge threshold in electrons for inst (per-instance) '
-                             'entries (default: 25)')
+    parser.add_argument('--hits-threshold', type=float, default=1.0,
+                        help='Charge threshold for hits (per-particle) '
+                             'entries (default: 1.0)')
     parser.add_argument('--total-pad', type=int, default=500_000)
     parser.add_argument('--response-chunk', type=int, default=50_000,
                         help='Deposits per fori_loop batch (must divide total-pad)')
@@ -160,6 +181,22 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--production-config', default=None,
                         help='Load optimized params from profiler config YAML')
+    # Event identification
+    parser.add_argument('--production-version', default=None,
+                        help='Production version string (e.g. test_00_00_01). '
+                             'Auto-parsed from --data path if not set.')
+    parser.add_argument('--run-id', type=int, default=None,
+                        help='Edep-sim run ID (e.g. 26628546). '
+                             'Auto-parsed from --data path if not set.')
+    parser.add_argument('--event-id-offset', type=int, default=None,
+                        help='Offset added to source_event_idx to compute '
+                             'globally unique event_id within a run '
+                             '(e.g. edepsim_file_idx * events_per_file). '
+                             'Auto-computed from filename if not set.')
+    parser.add_argument('--edepsim-ids', action='store_true',
+                        help='Read run_id and event_id from the input file\'s '
+                             'event/geant4 dataset instead of CLI/path. '
+                             'Use when edep-sim files carry meaningful IDs.')
     args = parser.parse_args()
 
     # Apply production config (overrides defaults, CLI args re-override)
@@ -182,14 +219,23 @@ def main():
     num_events = min(args.events, total_events) if args.events else total_events
     num_files = (num_events + events_per_file - 1) // events_per_file
 
+    # Detect readout type early for pixel-specific defaults
+    detector_config = generate_detector(args.config)
+    readout_type = detector_config['volumes'][0].get('readout', {}).get('type', 'wire')
+
+    # Pixel readout: track hits are mandatory (single response pass)
+    if readout_type == 'pixel' and not include_track_hits:
+        print('  NOTE: pixel readout requires track hits — enabling')
+        include_track_hits = True
+
     # Output directories
     sensor_dir = os.path.join(args.outdir, 'sensor')
-    seg_dir = os.path.join(args.outdir, 'seg')
-    inst_dir = os.path.join(args.outdir, 'inst') if include_track_hits else None
-    for d in [sensor_dir, seg_dir]:
+    edep_dir = os.path.join(args.outdir, 'edep')
+    hits_dir = os.path.join(args.outdir, 'hits') if include_track_hits else None
+    for d in [sensor_dir, edep_dir]:
         os.makedirs(d, exist_ok=True)
-    if inst_dir:
-        os.makedirs(inst_dir, exist_ok=True)
+    if hits_dir:
+        os.makedirs(hits_dir, exist_ok=True)
 
     print('=' * 60)
     print(' JAXTPC Batch Simulation v2')
@@ -206,19 +252,21 @@ def main():
     print(f'  Track hits:    {"ON" if include_track_hits else "OFF"}')
     print(f'  Group size:    {args.group_size}')
     print(f'  Total pad:     {args.total_pad:,}')
-    print(f'  Bucketed:      {"ON (max_buckets=" + str(args.max_buckets) + ")" if args.bucketed else "OFF"}')
+    if readout_type == 'wire':
+        print(f'  Bucketed:      {"ON (max_buckets=" + str(args.max_buckets) + ")" if args.bucketed else "OFF"}')
     print(f'  Workers:       {args.workers} {"(serial)" if args.workers == 0 else "(threaded)"}')
     print(f'  Device:        {jax.devices()[0]}')
-    print(f'  Output:        {args.outdir}/{{sensor,seg,inst}}/')
-
-    # ---- Create simulator ----
-    detector_config = generate_detector(args.config)
-    readout_type = detector_config['volumes'][0].get('readout', {}).get('type', 'wire')
+    print(f'  Output:        {args.outdir}/{{sensor,edep,hits}}/')
     print(f'  Readout:       {readout_type}')
     print()
 
+    # Pixel defaults: smaller hits_chunk for optimal merge performance
+    hits_chunk = args.hits_chunk
+    if readout_type == 'pixel' and args.hits_chunk == 25_000:
+        hits_chunk = 5_000
+
     track_config = create_track_hits_config(
-        max_keys=args.max_keys, hits_chunk_size=args.hits_chunk,
+        max_keys=args.max_keys, hits_chunk_size=hits_chunk,
         inter_thresh=args.inter_thresh,
     ) if include_track_hits else None
 
@@ -228,7 +276,7 @@ def main():
         track_config=track_config,
         total_pad=args.total_pad,
         response_chunk_size=args.response_chunk,
-        use_bucketed=args.bucketed,
+        use_bucketed=args.bucketed if readout_type == 'wire' else False,
         max_active_buckets=args.max_buckets,
         include_noise=include_noise,
         include_electronics=include_electronics,
@@ -258,15 +306,62 @@ def main():
         args.group_size, args.gap_threshold)
     warmup_r, _, warmup_dep = simulator.process_event(warmup_dep, key=jax.random.PRNGKey(0))
     for a in warmup_r.values():
-        jax.block_until_ready(a)
+        if isinstance(a, dict):
+            for arr in a.values():
+                jax.block_until_ready(arr)
+        elif isinstance(a, tuple):
+            jax.block_until_ready(a[0])
+        else:
+            jax.block_until_ready(a)
     del warmup_r, warmup_dep
     gc.collect()
     print(f" {time.time() - t0:.1f}s\n")
 
-    # ---- Run ID (unique per invocation) ----
-    run_id = int(time.time())
-    run_timestamp = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(run_id))
-    print(f'  Run ID:        {run_id} ({run_timestamp} UTC)')
+    # ---- Event identification ----
+    batch_timestamp = int(time.time())
+    batch_ts_str = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(batch_timestamp))
+
+    production_version = args.production_version
+    run_id = args.run_id
+    event_id_offset = args.event_id_offset
+    edepsim_event_table = None
+
+    if args.edepsim_ids:
+        edepsim_event_table = _read_edepsim_event_table(args.data)
+        if edepsim_event_table is not None:
+            file_run_id = int(edepsim_event_table[0]['run_id'])
+            if run_id is None and file_run_id != 0:
+                run_id = file_run_id
+            print(f'  Edepsim IDs:   ON (file run_id={file_run_id}, '
+                  f'event_id range {int(edepsim_event_table["event_id"].min())}'
+                  f'-{int(edepsim_event_table["event_id"].max())})')
+        else:
+            print('  WARNING: --edepsim-ids set but event/geant4 not found; '
+                  'falling back to offset mode')
+
+    # Auto-parse from path if not explicitly set
+    if production_version is None or run_id is None or event_id_offset is None:
+        path_version, path_run_id, path_file_idx = _parse_edepsim_path(
+            os.path.abspath(args.data))
+        if path_version is not None:
+            if production_version is None:
+                production_version = path_version
+            if run_id is None:
+                run_id = path_run_id
+            if event_id_offset is None and not args.edepsim_ids:
+                event_id_offset = path_file_idx * total_events
+                print(f'  Auto offset:   {event_id_offset} '
+                      f'(file {path_file_idx} x {total_events} events)')
+
+    if event_id_offset is None:
+        event_id_offset = 0
+
+    print(f'  Batch time:    {batch_timestamp} ({batch_ts_str} UTC)')
+    if production_version is not None:
+        print(f'  Prod version:  {production_version}')
+    if run_id is not None:
+        print(f'  Run ID:        {run_id}')
+    print(f'  Event offset:  {event_id_offset}')
 
     # ---- Git provenance ----
     git_repo, git_commit, git_dirty = _get_git_info()
@@ -279,6 +374,14 @@ def main():
     print(f'  Git commit:    {git_commit[:12] if git_commit else "unknown"}'
           f'{"  (dirty)" if git_dirty else ""}')
 
+    # ---- Provenance dict (passed to all write_config_* calls) ----
+    provenance = {
+        'production_version': production_version,
+        'run_id': run_id,
+        'batch_timestamp': batch_timestamp,
+        'git_info': git_info,
+    }
+
     # ---- Save helpers ----
     key = jax.random.PRNGKey(args.seed)
     total_start = time.time()
@@ -286,14 +389,15 @@ def main():
     num_workers = args.workers
     file_lock = threading.Lock()
 
-    def save_one_event(f_sensor, f_seg, f_inst, item):
+    def save_one_event(f_sensor, f_edep, f_hits, item):
         """Save a single event (CSR encode + HDF5 write). Thread-safe."""
-        (event_key, response_np, track_hits_raw, deposits, source_idx) = item
+        (event_key, response_np, track_hits_raw, deposits,
+         source_idx, ev_id) = item
 
         # CSR encoding (numpy, GIL-free — runs in parallel across workers)
-        inst_data = None
-        if include_track_hits and f_inst is not None:
-            inst_data = {}
+        hits_data = None
+        if include_track_hits and f_hits is not None:
+            hits_data = {}
             for plane_key, raw in track_hits_raw.items():
                 if not isinstance(plane_key, tuple):
                     continue
@@ -301,33 +405,35 @@ def main():
                 sk, tk, gid, ch, count, _ = raw
                 if cfg.volumes[vol_idx].readout_type == 'pixel':
                     num_pz = cfg.volumes[vol_idx].pixel_shape[1]
-                    inst_data[plane_key] = encode_correspondence_csr_pixel(
+                    hits_data[plane_key] = encode_correspondence_csr_pixel(
                         sk, tk, gid, ch, count, num_pz,
-                        threshold=args.inst_threshold)
+                        threshold=args.hits_threshold)
                 else:
                     pk = sk * cfg.num_time_steps + tk
-                    inst_data[plane_key] = encode_correspondence_csr(
+                    hits_data[plane_key] = encode_correspondence_csr(
                         pk, gid, ch, count, cfg.num_time_steps,
-                        threshold=args.inst_threshold)
+                        threshold=args.hits_threshold)
 
         # HDF5 write (serialized through file lock)
         with file_lock:
             save_event_sensor(f_sensor, event_key, response_np, threshold_adc,
                             source_idx, deposits, cfg=cfg,
-                            digitized=include_digitize)
-            save_event_seg(f_seg, event_key, deposits, source_idx, cfg=cfg)
-            if inst_data is not None and f_inst is not None:
-                save_event_inst(f_inst, event_key, inst_data, deposits,
+                            digitized=include_digitize, event_id=ev_id)
+            save_event_edep(f_edep, event_key, deposits, source_idx, cfg=cfg,
+                            event_id=ev_id)
+            if hits_data is not None and f_hits is not None:
+                save_event_hits(f_hits, event_key, hits_data, deposits,
                                 source_idx,
-                                inst_threshold=args.inst_threshold, cfg=cfg)
+                                hits_threshold=args.hits_threshold, cfg=cfg,
+                                event_id=ev_id)
 
-    def save_worker(f_sensor, f_seg, f_inst, save_queue):
+    def save_worker(f_sensor, f_edep, f_hits, save_queue):
         """Worker thread: pull items from queue, encode + save."""
         while True:
             item = save_queue.get()
             if item is None:
                 break
-            save_one_event(f_sensor, f_seg, f_inst, item)
+            save_one_event(f_sensor, f_edep, f_hits, item)
             save_queue.task_done()
 
     # ---- Process events ----
@@ -339,36 +445,36 @@ def main():
 
             sensor_path = os.path.join(sensor_dir,
                 f'{dataset_name}_sensor_{file_idx:04d}.h5')
-            seg_path = os.path.join(seg_dir,
-                f'{dataset_name}_seg_{file_idx:04d}.h5')
-            inst_path = os.path.join(inst_dir,
-                f'{dataset_name}_inst_{file_idx:04d}.h5') if inst_dir else None
+            edep_path = os.path.join(edep_dir,
+                f'{dataset_name}_edep_{file_idx:04d}.h5')
+            hits_path = os.path.join(hits_dir,
+                f'{dataset_name}_hits_{file_idx:04d}.h5') if hits_dir else None
 
             print(f'File {file_idx:04d}: events {event_start}–{event_end-1} '
                   f'({n_in_file} events)')
 
             with h5py.File(sensor_path, 'w') as f_sensor, \
-                 h5py.File(seg_path, 'w') as f_seg:
+                 h5py.File(edep_path, 'w') as f_edep:
 
-                f_inst_ctx = h5py.File(inst_path, 'w') if inst_path else None
+                f_hits_ctx = h5py.File(hits_path, 'w') if hits_path else None
                 try:
                     write_config_sensor(
                         f_sensor, cfg, params, simulator.recomb_model,
                         dataset_name, file_idx, args.data,
                         n_in_file, event_start, threshold_adc,
                         digitization_config=dig_config,
-                        run_id=run_id, git_info=git_info)
-                    write_config_seg(
-                        f_seg, cfg, dataset_name, file_idx, args.data,
+                        provenance=provenance)
+                    write_config_edep(
+                        f_edep, cfg, dataset_name, file_idx, args.data,
                         n_in_file, event_start,
                         args.group_size, args.gap_threshold,
-                        run_id=run_id, git_info=git_info)
-                    if f_inst_ctx:
-                        write_config_inst(
-                            f_inst_ctx, cfg, dataset_name, file_idx, args.data,
+                        provenance=provenance)
+                    if f_hits_ctx:
+                        write_config_hits(
+                            f_hits_ctx, cfg, dataset_name, file_idx, args.data,
                             n_in_file, event_start,
                             args.group_size, args.gap_threshold,
-                            run_id=run_id, git_info=git_info)
+                            provenance=provenance)
 
                     # Start workers (if threaded)
                     save_queue = None
@@ -378,7 +484,7 @@ def main():
                         for w in range(num_workers):
                             t = threading.Thread(
                                 target=save_worker,
-                                args=(f_sensor, f_seg, f_inst_ctx, save_queue))
+                                args=(f_sensor, f_edep, f_hits_ctx, save_queue))
                             t.daemon = True
                             t.start()
                             workers.append(t)
@@ -387,6 +493,12 @@ def main():
                         key, subkey = jax.random.split(key)
                         local_idx = idx - event_start
                         event_key = f'event_{local_idx:03d}'
+
+                        # Compute event_id
+                        if edepsim_event_table is not None:
+                            event_id = int(edepsim_event_table[idx]['event_id'])
+                        else:
+                            event_id = event_id_offset + idx
 
                         # Load + build DepositData (volume split, group, pad)
                         t_load = time.time()
@@ -401,7 +513,13 @@ def main():
                         response_signals, track_hits, deposits = \
                             simulator.process_event(deposits, key=subkey)
                         for arr in response_signals.values():
-                            jax.block_until_ready(arr)
+                            if isinstance(arr, dict):
+                                for a in arr.values():
+                                    jax.block_until_ready(a)
+                            elif isinstance(arr, tuple):
+                                jax.block_until_ready(arr[0])
+                            else:
+                                jax.block_until_ready(arr)
                         t_sim = time.time() - t_sim
 
                         # Convert all formats → sparse before saving
@@ -417,14 +535,15 @@ def main():
                             else:
                                 response_np[k] = np.asarray(v)
 
-                        item = (event_key, response_np, track_hits, deposits, idx)
+                        item = (event_key, response_np, track_hits, deposits,
+                                idx, event_id)
 
                         # Save (serial or queued)
                         t_save = time.time()
                         if num_workers > 0:
                             save_queue.put(item)
                         else:
-                            save_one_event(f_sensor, f_seg, f_inst_ctx, item)
+                            save_one_event(f_sensor, f_edep, f_hits_ctx, item)
                         t_save = time.time() - t_save
 
                         t_total = t_load + t_sim + t_save
@@ -444,16 +563,16 @@ def main():
                             t.join()
 
                 finally:
-                    if f_inst_ctx:
-                        f_inst_ctx.close()
+                    if f_hits_ctx:
+                        f_hits_ctx.close()
 
             # Print file sizes
             sensor_mb = os.path.getsize(sensor_path) / (1024 * 1024)
-            seg_mb = os.path.getsize(seg_path) / (1024 * 1024)
-            print(f'  → sensor: {sensor_mb:.1f} MB, seg: {seg_mb:.1f} MB', end='')
-            if inst_path and os.path.exists(inst_path):
-                inst_mb = os.path.getsize(inst_path) / (1024 * 1024)
-                print(f', inst: {inst_mb:.1f} MB')
+            edep_mb = os.path.getsize(edep_path) / (1024 * 1024)
+            print(f'  → sensor: {sensor_mb:.1f} MB, edep: {edep_mb:.1f} MB', end='')
+            if hits_path and os.path.exists(hits_path):
+                hits_mb = os.path.getsize(hits_path) / (1024 * 1024)
+                print(f', hits: {hits_mb:.1f} MB')
             else:
                 print()
             print()
@@ -462,7 +581,7 @@ def main():
     print(f'{"=" * 60}')
     print(f'  Done. {num_events} events in {total_elapsed:.1f}s')
     print(f'  Average: {total_elapsed/num_events:.2f}s/event')
-    print(f'  Files:   {num_files} × 3 in {args.outdir}/{{sensor,seg,inst}}/')
+    print(f'  Files:   {num_files} × 3 in {args.outdir}/{{sensor,edep,hits}}/')
     print(f'{"=" * 60}')
 
 

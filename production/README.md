@@ -7,7 +7,7 @@ Batch simulation of particle events in a liquid argon TPC, producing structured 
 ```
 production/
 ├── run_batch.py              # Main batch simulation script
-├── save.py                   # HDF5 save functions (sensor/seg/inst encoding)
+├── save.py                   # HDF5 save functions (sensor/edep/hits encoding)
 ├── load.py                   # HDF5 load/decode functions
 ├── view_production.ipynb     # Visualize production output (no simulation needed)
 └── README.md                 # This file
@@ -68,7 +68,7 @@ hits_chunk: 25000
 max_keys: 4000000
 inter_thresh: 1.0
 threshold_adc: 2.0
-inst_threshold: 25.0
+hits_threshold: 25.0
 max_buckets: 1000
 ```
 
@@ -82,7 +82,7 @@ See `profiler/` for individual scripts to tune each parameter separately.
 | `--config` | `config/cubic_wireplane_config.yaml` | Detector configuration YAML |
 | `--production-config` | none | Load optimized params from profiler config YAML |
 | `--dataset` | `sim` | Dataset name prefix for output files |
-| `--outdir` | `.` | Output directory (creates `sensor/`, `seg/`, `inst/` subdirs) |
+| `--outdir` | `.` | Output directory (creates `sensor/`, `edep/`, `hits/` subdirs) |
 | `--events` | all | Number of events to process |
 | `--events-per-file` | 1000 | Events per output HDF5 file |
 | `--threshold-adc` | 2.0 | Minimum signal amplitude to store (ADC) |
@@ -90,16 +90,16 @@ See `profiler/` for individual scripts to tune each parameter separately.
 | `--noise` | off | Enable intrinsic noise |
 | `--electronics` | off | Enable RC-RC electronics response |
 | `--no-digitize` | on | Disable ADC digitization |
-| `--no-track-hits` | on | Disable per-instance decomposition (inst file) |
+| `--no-track-hits` | on | Disable per-particle decomposition (hits file) |
 | `--sce` | off | Path to SCE HDF5 map for E-field distortions |
 | `--total-pad` | 500,000 | Max deposits per volume (sets JIT compiled shape) |
 | `--response-chunk` | 50,000 | Deposits per response fori_loop batch (must divide total-pad) |
 | `--hits-chunk` | 25,000 | Deposits per track-hits fori_loop batch (must divide total-pad) |
 | `--max-keys` | 4,000,000 | Track-hits merge state capacity per plane (RuntimeError if exceeded) |
 | `--inter-thresh` | 1.0 | Track-hits intermediate pruning threshold (electrons) |
-| `--inst-threshold` | 25.0 | Charge threshold for inst (per-instance) entries (electrons) |
+| `--hits-threshold` | 1.0 | Charge threshold for hits (per-particle) entries |
 | `--max-buckets` | 1,000 | Max active buckets per plane (bucketed mode) |
-| `--group-size` | 5 | Deposits per inst (correspondence) group |
+| `--group-size` | 5 | Deposits per hits (correspondence) group |
 | `--gap-threshold` | 5.0 | Group split threshold in mm |
 | `--seed` | 42 | Random seed for noise generation |
 
@@ -117,8 +117,8 @@ For each event, `run_batch.py` performs:
    - Optional: electronics response, noise, ADC digitization
 4. **Save** to three HDF5 file types (offloaded to worker threads):
    - `sensor/`: sparse thresholded raw readout
-   - `seg/`: compact 3D truth deposits
-   - `inst/`: per-instance sensor decomposition (group-level 3D-to-2D mapping)
+   - `edep/`: compact 3D truth deposits
+   - `hits/`: per-particle sensor decomposition (group-level 3D-to-2D mapping)
 
 The canonical layout in ``docs/DATASET_DESIGN.md`` (in
 ``particle-imaging-models/``) defines a fourth directory, ``labl/``,
@@ -149,18 +149,18 @@ The `view_production.ipynb` notebook loads and visualizes production output with
 ```python
 from production.load import (
     get_file_paths, build_viz_config,
-    load_event_sensor, load_event_seg, load_event_inst,
+    load_event_sensor, load_event_edep, load_event_hits,
 )
 
-sensor_path, seg_path, inst_path = get_file_paths('output/', 'myrun', file_index=0)
+sensor_path, edep_path, hits_path = get_file_paths('output/', 'myrun', file_index=0)
 viz_config = build_viz_config(sensor_path)  # minimal config from HDF5 metadata
 dense_signals, attrs, pedestals = load_event_sensor(sensor_path, event_idx=0)
 # pedestals is {(vol, plane): int} if digitized, None otherwise
 # To get signed ADC: signal = dense_signals[(v,p)].astype(int) - pedestals[(v,p)]
-seg = load_event_seg(seg_path, event_idx=0)         # list of per-volume dicts
-track_hits, truth_dense, g2t, s2g, qs = load_event_inst(
-    inst_path, event_idx=0, num_time_steps=2701)
-# g2t, s2g, qs are lists of per-volume arrays (segment_to_group is the
+edep = load_event_edep(edep_path, event_idx=0)       # list of per-volume dicts
+track_hits, truth_dense, g2t, d2g, qs = load_event_hits(
+    hits_path, event_idx=0, num_time_steps=2701)
+# g2t, d2g, qs are lists of per-volume arrays (deposit_to_group is the
 # per-deposit group id, qs_fractions is the per-deposit charge weight).
 ```
 
@@ -172,8 +172,8 @@ Three file types per batch, split by `events_per_file`:
 
 ```
 {dataset}_sensor_{NNNN}.h5  — raw sensor readout (sparse wire/pixel signals)
-{dataset}_seg_{NNNN}.h5     — 3D truth deposits (segment data)
-{dataset}_inst_{NNNN}.h5    — per-instance sensor decomposition
+{dataset}_edep_{NNNN}.h5    — 3D truth deposits (energy deposit data)
+{dataset}_hits_{NNNN}.h5    — per-particle sensor decomposition
 ```
 
 ### 1. Sensor File (`_sensor_`)
@@ -210,14 +210,14 @@ times = time_start + np.cumsum(delta_time)
 signal_adc = values.astype(np.int32) - pedestal  # signed ADC
 ```
 
-### 2. Seg File (`_seg_`)
+### 2. Edep File (`_edep_`)
 
 Pure 3D truth physics. Deposit-level scalars only — no instance
 identifiers, no per-track metadata, no group machinery. Per the design
-doc (in ``particle-imaging-models/docs/DATASET_DESIGN.md``), seg is
+doc (in ``particle-imaging-models/docs/DATASET_DESIGN.md``), edep is
 loadable standalone for SSL on 3D deposits or per-deposit physics
 regression; any labeling / correspondence goes through ``labl/`` or
-``inst/``.
+``hits/``.
 
 ```
 /config/
@@ -239,9 +239,9 @@ regression; any labeling / correspondence goes through ``labl/`` or
         photons     (N,) float32     scintillation photons
 ```
 
-**NOT stored here** (moved to inst/ or labl/ per design):
+**NOT stored here** (moved to hits/ or labl/ per design):
 ``track_ids``, ``group_ids``, ``group_to_track``, ``qs_fractions``,
-``pdg``, ``interaction_ids``, ``ancestor_track_ids``,
+``pdg``, ``interaction_ids``, ``root_track_ids``,
 ``original_indices``.
 
 **Decode positions:**
@@ -250,7 +250,7 @@ positions_mm = positions.astype(np.float32) * pos_step_mm + \
                np.array([pos_origin_x, pos_origin_y, pos_origin_z])
 ```
 
-### 3. Inst File (`_inst_`)
+### 3. Hits File (`_hits_`)
 
 Per-instance sensor decomposition. Owns all group-related machinery:
 each deposit's group assignment, the per-group → track lookup, the
@@ -267,36 +267,51 @@ entries (which groups contributed to which pixels).
     attrs: source_event_idx, threshold
     volume_N/
         attrs: n_actual, n_groups
-        segment_to_group  (N,) int32     per-deposit: which group each
+        deposit_to_group  (N,) int32     per-deposit: which group each
                                          deposit belongs to. Row-aligned
-                                         with seg deposits in volume N.
+                                         with edep deposits in volume N.
         qs_fractions      (N,) float16   per-deposit: each deposit's
                                          share of its group's recombined
                                          charge. Used for deposit-level
                                          disaggregation when traversing
-                                         inst -> seg.
+                                         hits -> edep.
         group_to_track    (G,) int32     per-group: Geant4 track_id of
                                          each group.
         {plane_label}/                   one subgroup per readout plane
             group_ids       (G_p,) int32   active groups on this plane
             group_sizes     (G_p,) uint8   entries per group
-            center_wires    (G_p,) int16   wire idx of peak-charge pixel
+            center_wires    (G_p,) int16   wire idx of peak-charge pixel (wire readout)
+            center_py       (G_p,) int16   pixel y idx of peak (pixel readout)
+            center_pz       (G_p,) int16   pixel z idx of peak (pixel readout)
             center_times    (G_p,) int16   time idx of peak-charge pixel
-            peak_charges    (G_p,) float32 charge at peak pixel (e-)
-            delta_wires     (N_p,) int8    wire offset from group center
+            peak_charges    (G_p,) float32 charge at peak pixel
+            delta_wires     (N_p,) int8    wire offset from group center (wire readout)
+            delta_py        (N_p,) int8    pixel y offset from center (pixel readout)
+            delta_pz        (N_p,) int8    pixel z offset from center (pixel readout)
             delta_times     (N_p,) int8    time offset from group center
-            charges_u16     (N_p,) uint16  charge as fraction of peak
-                                           (x65535)
+            charges_u16     (N_p,) uint16  charge as fraction of peak (wire, x65535)
+            charges_i16     (N_p,) int16   signed charge fraction (pixel, x32767)
             attrs: n_groups_plane, n_entries
 ```
 
-**Decode:**
+Wire readout uses ``charges_u16`` (unsigned, diffusion-only truth).
+Pixel readout uses ``charges_i16`` (signed, post-response truth with
+bipolar induction).  The peak is the entry with largest absolute charge.
+
+**Decode (wire):**
 ```python
 group_starts = np.cumsum(group_sizes) - group_sizes
-# For group i, entries are [group_starts[i] : group_starts[i] + group_sizes[i]]
 wire = center_wires[i] + delta_wires[j]
 time = center_times[i] + delta_times[j]
 charge = peak_charges[i] * charges_u16[j] / 65535.0
+```
+
+**Decode (pixel):**
+```python
+py = center_py[i] + delta_py[j]
+pz = center_pz[i] + delta_pz[j]
+time = center_times[i] + delta_times[j]
+charge = peak_charges[i] * charges_i16[j] / 32767.0   # can be negative
 ```
 
 ---
@@ -315,8 +330,8 @@ stop-gap script `make_labl.py`, see below). Lives under
 
 /event_{NNN}/
     volume_N/
-        # Per-deposit FK (N,) — row-aligned with seg deposits for vol N
-        segment_to_track     (N,) int32    deposit i -> Geant4 track_id
+        # Per-deposit FK (N,) — row-aligned with edep deposits for vol N
+        deposit_to_track     (N,) int32    deposit i -> Geant4 track_id
 
         # Per-unique-track (T,) dimension table
         track_ids            (T,) int32    primary key: unique tracks
@@ -327,7 +342,7 @@ stop-gap script `make_labl.py`, see below). Lives under
 ```
 
 **Design rationale.** This is a two-section layout:
-- The per-deposit `segment_to_track` gives the track_id for each deposit
+- The per-deposit `deposit_to_track` gives the track_id for each deposit
   directly (no subgroup; its shape N_deposits distinguishes it).
 - The per-unique-track columns `track_{pdg, interaction, ancestor,
   cluster}` are a dimension table keyed by `track_ids`, avoiding
@@ -336,7 +351,7 @@ stop-gap script `make_labl.py`, see below). Lives under
 **Label lookup (per-deposit):**
 ```python
 # For deposit i in volume v:
-#   track_id = labl_v.segment_to_track[i]
+#   track_id = labl_v.deposit_to_track[i]
 #   j = np.searchsorted(sort(labl_v.track_ids), track_id)
 #   pdg = labl_v.track_pdg[j]
 ```
@@ -344,18 +359,18 @@ stop-gap script `make_labl.py`, see below). Lives under
 **Generating labl — `production/make_labl.py`**
 
 `make_labl.py` is a temporary stand-in for a proper edepsim-side labl
-writer. It pulls the deposit → group assignment from `inst/`, the
-group → track_id map from `inst/`, and the per-track metadata (pdg,
+writer. It pulls the deposit → group assignment from `hits/`, the
+group → track_id map from `hits/`, and the per-track metadata (pdg,
 interaction, ancestor) from the original edepsim HDF5 source file.
 
 ```bash
 python3 production/make_labl.py --outdir dataset_20 --source out.h5
 ```
 
-- `--outdir`: dataset directory; must contain `inst/`. Creates `labl/`
+- `--outdir`: dataset directory; must contain `hits/`. Creates `labl/`
   alongside.
 - `--source`: edepsim HDF5 file. Defaults to the `source_file` attr
-  recorded in the inst config.
+  recorded in the hits config.
 - `--dataset`: filename prefix (default `sim`).
 
 Runtime is trivial (<2 s per 20-event file). This script is explicitly
@@ -364,24 +379,24 @@ an edepsim-side integrated writer when productionizing.
 
 ## Bidirectional Correspondence
 
-Correspondence between 3D deposits (seg) and 2D pixels (sensor) is
+Correspondence between 3D deposits (edep) and 2D pixels (sensor) is
 carried by **group ids only** — `group_to_track` is a *label*, not part
-of the mapping. The three inst arrays below are all you need:
+of the mapping. The three hits arrays below are all you need:
 
 | Array | Shape | Meaning |
 |---|---|---|
-| `segment_to_group` (`s2g`) | `(N_dep,)` | per-deposit → group id (row-aligned with seg[v]) |
+| `deposit_to_group` (`d2g`) | `(N_dep,)` | per-deposit → group id (row-aligned with edep[v]) |
 | `qs_fractions` (`qs`)      | `(N_dep,)` | per-deposit share of its group's recombined charge (sums to ~1 per group) |
 | per-plane CSR (`group_ids`, `delta_wires`/`delta_times`, `peak_charges`, `charges_u16`) | `(N_entries,)` flat | each entry = one group's charge contribution at one pixel |
 
-`load_correspondence(inst_path, event_idx, v)` returns a decoded
+`load_correspondence(hits_path, event_idx, v)` returns a decoded
 per-volume dict:
 
 ```python
-from production.load import load_correspondence, segment_charge_per_plane
+from production.load import load_correspondence, deposit_charge_per_plane
 
-corr = load_correspondence(inst_p, event_idx=0, v=0)
-# corr['s2g'], corr['qs'], corr['g2t'],
+corr = load_correspondence(hits_p, event_idx=0, v=0)
+# corr['d2g'], corr['qs'], corr['g2t'],
 # corr['planes'] = {'U': {'wire','time','charge','gid'}, 'V': ..., 'Y': ...}
 #                  (pixel readouts replace 'wire' with 'pixel_y'+'pixel_z')
 ```
@@ -390,24 +405,24 @@ corr = load_correspondence(inst_p, event_idx=0, v=0)
 ```python
 i = deposit_idx
 plane = corr['planes']['U']                          # or V/Y/Pixel
-g = corr['s2g'][i]
+g = corr['d2g'][i]
 mask = plane['gid'] == g
 wires  = plane['wire'][mask]
 times  = plane['time'][mask]
 dep_ch = corr['qs'][i] * plane['charge'][mask]       # this deposit's share (e-)
 ```
 *Empty is legitimate.* Groups whose peak charge fell below
-`inst_threshold` (default 25 e⁻) have no plane entries, so deposits in
+`hits_threshold` (default 25 e⁻) have no plane entries, so deposits in
 those groups produce no pixels (~70% of deposits in typical events).
 
 **Backward (pixel → deposits)** — straight inversion of the forward
-filter (`plane.gid == s2g[i]`). `(gid, wire, time)` is unique on each
+filter (`plane.gid == d2g[i]`). `(gid, wire, time)` is unique on each
 plane — the CSR stores one row per (group, pixel) — so the gids at a
 hit are already distinct and no `unique` is needed:
 ```python
 plane = corr['planes']['U']
 hit = (plane['wire'] == w_q) & (plane['time'] == t_q)
-deposits = np.where(np.isin(corr['s2g'], plane['gid'][hit]))[0]
+deposits = np.where(np.isin(corr['d2g'], plane['gid'][hit]))[0]
 ```
 A single pixel is typically shared by several groups (≥3 groups at more
 than half of active pixels in dense events). Per-group charge
@@ -415,24 +430,24 @@ contributions at this pixel are `plane['charge'][hit]` (one row per
 contributing group) — multiply by `corr['qs'][member_idx]` to split a
 group's pixel charge across its deposits.
 
-**Per-segment total charge landing on a plane** (fast, vectorized):
+**Per-deposit total charge landing on a plane** (fast, vectorized):
 ```python
-totals_U = segment_charge_per_plane(corr, 'U')   # (N_dep,) float32
-# totals_U[i] = qs[i] * sum of group[s2g[i]]'s charge on plane U.
+totals_U = deposit_charge_per_plane(corr, 'U')   # (N_dep,) float32
+# totals_U[i] = qs[i] * sum of group[d2g[i]]'s charge on plane U.
 # Zero for deposits in sub-threshold groups.
 ```
-For a typical event: `totals_U.sum()` is ~25–30% of `seg['charge'].sum()`
+For a typical event: `totals_U.sum()` is ~25–30% of `edep['charge'].sum()`
 (the rest is lifetime attenuation + sub-threshold charge not written).
 
-**Indexing note.** Group ids are **1-based** in `s2g` (`min=1`); entry
+**Indexing note.** Group ids are **1-based** in `d2g` (`min=1`); entry
 `group_to_track[0]` is an unused slot.
 
 **Optional — track label for a group** (not correspondence):
 ```python
 track_id = corr['g2t'][group_id]
 ```
-For per-deposit track labels, prefer `labl/`'s `segment_to_track`
-(direct deposit → track_id, no group indirection).
+For per-deposit track labels, prefer `labl/`'s `deposit_to_track`
+(direct deposit -> track_id, no group indirection).
 
 **Deriving labeled hits from correspondence:**
 ```python

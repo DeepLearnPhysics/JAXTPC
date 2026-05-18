@@ -17,7 +17,7 @@ Interactive 3D/2D visualization and GIF export for JAXTPC production data.
 
 ## Interactive Viewer
 
-Serves production HDF5 files (seg/inst/sensor, plus the optional labl) and
+Serves production HDF5 files (edep/hits/sensor, plus the optional labl) and
 opens a browser-based viewer with 3D segment display, 2D wire/pixel sensor
 panels, correspondence highlighting, drift animation, and (when labl is
 present) track/PDG/ancestor/interaction color modes. If labl is missing the
@@ -34,7 +34,7 @@ python3 viewer/serve_viewer.py production_run/ --dataset myrun --port 9000
 ```
 
 Supports both flat directories (`production_run/*.h5`) and subdirectory layouts
-(`production_run/{seg,inst,sensor}/`, plus optional `production_run/labl/`).
+(`production_run/{edep,hits,sensor}/`, plus optional `production_run/labl/`).
 
 ### Controls
 
@@ -55,17 +55,17 @@ Generates a rotating 3D point cloud GIF cycling through color modes:
 Energy Deposit, Track ID, PDG, Ancestor ID, Interaction ID.
 
 The categorical color modes pull labels from the matching `labl/` file
-(auto-detected next to the seg path). If no labl file is found, only the
+(auto-detected next to the edep path). If no labl file is found, only the
 Energy Deposit mode is rendered.
 
 ### Usage
 
 ```bash
 # Default: 12s rotation, 30fps, 1440x1440, 100k points
-python3 viewer/export_gif.py path/to/sim_seg_0000.h5 --event 0
+python3 viewer/export_gif.py path/to/sim_edep_0000.h5 --event 0
 
 # Custom settings
-python3 viewer/export_gif.py path/to/sim_seg_0000.h5 \
+python3 viewer/export_gif.py path/to/sim_edep_0000.h5 \
     --event 0 \
     --duration 6 \
     --fps 30 \
@@ -75,10 +75,10 @@ python3 viewer/export_gif.py path/to/sim_seg_0000.h5 \
     --output my_event.gif
 
 # Single volume, light background
-python3 viewer/export_gif.py path/to/sim_seg_0000.h5 -e 0 -v 0 --light
+python3 viewer/export_gif.py path/to/sim_edep_0000.h5 -e 0 -v 0 --light
 
 # MP4 output (requires ffmpeg)
-python3 viewer/export_gif.py path/to/sim_seg_0000.h5 -e 0 -o event.mp4
+python3 viewer/export_gif.py path/to/sim_edep_0000.h5 -e 0 -o event.mp4
 ```
 
 ### Options
