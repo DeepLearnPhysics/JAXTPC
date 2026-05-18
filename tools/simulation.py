@@ -339,19 +339,25 @@ class DetectorSimulator:
             # (Different per-volume SCE requires stacking maps — future work.)
             efield_fn, corr_fn = sce_per_volume[0]
             def sce_factory(ef=efield_fn, cf=corr_fn, nf=_nominal_field):
-                def _sce(positions_cm):
+                def _sce(positions_cm, velocity_cm_us):
                     E_local = ef(positions_cm)
                     E_normalized = E_local / nf
                     corr = cf(positions_cm)
+                    # Channel 0 = t_drift (absolute, from path integration).
+                    # Compute delta_t relative to the runtime velocity so
+                    # corrected_time = t_nominal + delta_t = t_drift exactly,
+                    # regardless of what velocity is used.
+                    t_drift = corr[:, 0]
+                    delta_t = t_drift - positions_cm[:, 0] / velocity_cm_us
                     return SCEOutputs(
                         efield_correction=E_normalized,
-                        drift_time_corr_us=corr[:, 0],
+                        drift_time_corr_us=delta_t,
                         drift_yz_corr_cm=corr[:, 1:3])
                 return _sce
         else:
-            # Nominal SCE — identical for all volumes in local frame
+            # Nominal SCE — no distortions, delta_t = 0
             def sce_factory():
-                def _sce(pos):
+                def _sce(pos, velocity_cm_us):
                     N = pos.shape[0]
                     corr = jnp.broadcast_to(
                         jnp.array([1.0, 0.0, 0.0]), (N, 3))

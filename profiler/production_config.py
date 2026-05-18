@@ -34,7 +34,7 @@ CONFIG_FIELDS = {
     'max_keys':       'max_keys',
     'inter_thresh':   'inter_thresh',
     'threshold_adc':  'threshold_adc',
-    'corr_threshold': 'corr_threshold',
+    'corr_threshold': 'hits_threshold',
     'max_buckets':    'max_buckets',
 }
 

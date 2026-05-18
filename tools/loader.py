@@ -12,7 +12,7 @@ import numpy as np
 from tools.config import DepositData, VolumeDeposits
 
 
-def compute_interaction_ids(file, event_idx, ancestor_track_ids=None,
+def compute_interaction_ids(file, event_idx, root_track_ids=None,
                             particle_track_ids=None, particle_parent_ids=None):
     """Map each step to its interaction_id via ancestor → primary lookup.
 
@@ -25,8 +25,8 @@ def compute_interaction_ids(file, event_idx, ancestor_track_ids=None,
         Open HDF5 file.
     event_idx : int
         Event index.
-    ancestor_track_ids : np.ndarray, optional
-        Pre-extracted ancestor_track_id array from pstep. If provided,
+    root_track_ids : np.ndarray, optional
+        Pre-extracted root_track_id array from pstep. If provided,
         avoids re-reading pstep from HDF5.
     particle_track_ids : np.ndarray, optional
         Pre-extracted particle track_id array. If provided along with
@@ -44,11 +44,16 @@ def compute_interaction_ids(file, event_idx, ancestor_track_ids=None,
     prim_tids = primaries['track_id'].astype(np.int32)
     prim_iids = primaries['interaction_id'].astype(np.int32)
 
-    if ancestor_track_ids is not None:
-        s_anc = np.asarray(ancestor_track_ids, dtype=np.int32)
+    if root_track_ids is not None:
+        s_anc = np.asarray(root_track_ids, dtype=np.int32)
     else:
         steps = file['pstep/lar_vol'][event_idx]
-        s_anc = steps['ancestor_track_id'].astype(np.int32)
+        if 'root_track_id' in steps.dtype.names:
+            s_anc = steps['root_track_id'].astype(np.int32)
+        elif 'ancestor_track_id' in steps.dtype.names:
+            s_anc = steps['ancestor_track_id'].astype(np.int32)
+        else:
+            s_anc = steps['track_id'].astype(np.int32)
 
     # Phase 1: resolve unique ancestors via primary lookup
     unique_anc = np.unique(s_anc)
@@ -423,7 +428,7 @@ def load_particle_step_data(file_path, event_idx=0, verbose=False):
         pdata = getattr(extractor, '_last_particle_data', None) or {}
         interaction_ids = compute_interaction_ids(
             extractor.file, event_idx,
-            ancestor_track_ids=step_data.get('ancestor_track_id'),
+            root_track_ids=step_data.get('root_track_id'),
             particle_track_ids=pdata.get('track_id'),
             particle_parent_ids=pdata.get('parent_track_id'))
 
@@ -448,7 +453,7 @@ def load_particle_step_data(file_path, event_idx=0, verbose=False):
         'track_ids': track_ids,
         't0_us': t0_us,
         'interaction_ids': interaction_ids,
-        'ancestor_track_ids': np.asarray(step_data.get('ancestor_track_id', np.zeros((n,))), dtype=np.int32),
+        'root_track_ids': np.asarray(step_data.get('root_track_id', np.zeros((n,))), dtype=np.int32),
         'pdg': np.asarray(step_data.get('pdg', np.zeros((n,))), dtype=np.int32),
     }
 
@@ -485,7 +490,7 @@ def load_event(file_path, sim_config, event_idx=0, verbose=False,
         theta=raw['theta'], phi=raw['phi'], track_ids=raw['track_ids'],
         t0_us=raw['t0_us'],
         interaction_ids=raw['interaction_ids'],
-        ancestor_track_ids=raw['ancestor_track_ids'],
+        root_track_ids=raw['root_track_ids'],
         pdg=raw['pdg'],
         group_size=group_size, gap_threshold_mm=gap_threshold_mm)
 
@@ -612,7 +617,7 @@ def compute_group_ids(positions_mm, track_ids, valid_mask,
 def build_deposit_data(positions_mm, de, dx, sim_config,
                        theta=None, phi=None, track_ids=None,
                        group_ids=None, t0_us=None,
-                       interaction_ids=None, ancestor_track_ids=None,
+                       interaction_ids=None, root_track_ids=None,
                        pdg=None,
                        group_size=5, gap_threshold_mm=5.0):
     """Build simulation-ready DepositData from flat deposit arrays.
@@ -644,7 +649,7 @@ def build_deposit_data(positions_mm, de, dx, sim_config,
         Deposit times in microseconds. Default zeros.
     interaction_ids : np.ndarray, shape (N,), optional
         Interaction/vertex IDs. Default -1 (unset).
-    ancestor_track_ids : np.ndarray, shape (N,), optional
+    root_track_ids : np.ndarray, shape (N,), optional
         Primary shower ancestor track IDs. Default zeros.
     pdg : np.ndarray, shape (N,), optional
         PDG particle species codes. Default zeros.
@@ -672,7 +677,7 @@ def build_deposit_data(positions_mm, de, dx, sim_config,
     track_ids = np.asarray(track_ids, dtype=np.int32) if track_ids is not None else np.full(N, -1, dtype=np.int32)
     t0_us = np.asarray(t0_us, dtype=np.float32) if t0_us is not None else np.zeros(N, dtype=np.float32)
     interaction_ids = np.asarray(interaction_ids, dtype=np.int16) if interaction_ids is not None else np.full(N, -1, dtype=np.int16)
-    ancestor_track_ids = np.asarray(ancestor_track_ids, dtype=np.int32) if ancestor_track_ids is not None else np.full(N, -1, dtype=np.int32)
+    root_track_ids = np.asarray(root_track_ids, dtype=np.int32) if root_track_ids is not None else np.full(N, -1, dtype=np.int32)
     pdg = np.asarray(pdg, dtype=np.int32) if pdg is not None else np.zeros(N, dtype=np.int32)
 
     has_precomputed_groups = group_ids is not None
@@ -695,7 +700,7 @@ def build_deposit_data(positions_mm, de, dx, sim_config,
         'track_ids': track_ids,
         't0_us': t0_us,
         'interaction_ids': interaction_ids,
-        'ancestor_track_ids': ancestor_track_ids,
+        'root_track_ids': root_track_ids,
         'pdg': pdg,
     }
 
@@ -799,7 +804,7 @@ def _build_padded_deposit_data(vol_arrays, vol_n_actuals, vol_group_to_track,
             group_ids=_pad(vol_arrays['group_ids'][v], vol_n_actuals[v]),
             t0_us=_pad(vol_arrays['t0_us'][v], vol_n_actuals[v]),
             interaction_ids=_pad(vol_arrays['interaction_ids'][v], vol_n_actuals[v], pad_val=-1),
-            ancestor_track_ids=_pad(vol_arrays['ancestor_track_ids'][v], vol_n_actuals[v], pad_val=-1),
+            root_track_ids=_pad(vol_arrays['root_track_ids'][v], vol_n_actuals[v], pad_val=-1),
             pdg=_pad(vol_arrays['pdg'][v], vol_n_actuals[v]),
             charge=jnp.zeros(total_pad, dtype=jnp.float32),
             photons=jnp.zeros(total_pad, dtype=jnp.float32),

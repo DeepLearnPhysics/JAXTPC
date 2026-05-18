@@ -55,21 +55,23 @@ def compute_drift_to_plane(positions_cm, x_anode_cm, drift_direction,
 
 
 @jax.jit
-def correct_drift_for_plane(drift_distance_cm, drift_time_us, drift_velocity_cm_us, plane_dist_difference_cm):
+def correct_drift_for_plane(drift_distance_cm, drift_time_us, drift_velocity_cm_us, plane_dist_from_anode_cm):
     """
-    Correct drift time/distance for planes relative to the furthest plane.
-    The correction is subtracted because planes closer to the anode have less drift distance.
+    Correct drift time/distance from anode-referenced values to a specific plane.
+
+    Subtracts the plane's distance from the anode, since electrons reach planes
+    further from the anode (deeper into the volume) before reaching the anode.
 
     Parameters
     ----------
     drift_distance_cm : jnp.ndarray
-        Array of shape (N,) containing the drift distances to the furthest plane in cm.
+        Array of shape (N,) containing the drift distances to the anode in cm.
     drift_time_us : jnp.ndarray
-        Array of shape (N,) containing the drift times to the furthest plane in us.
+        Array of shape (N,) containing the drift times to the anode in us.
     drift_velocity_cm_us : float
         Drift velocity in cm/us.
-    plane_dist_difference_cm : float
-        Distance difference between the furthest plane and this plane in cm.
+    plane_dist_from_anode_cm : float
+        This plane's distance from the anode in cm.
 
     Returns
     -------
@@ -77,10 +79,10 @@ def correct_drift_for_plane(drift_distance_cm, drift_time_us, drift_velocity_cm_
     corrected_drift_time_us : jnp.ndarray
     """
     drift_time_correction = jnp.where(drift_velocity_cm_us > 1e-9,
-                                      plane_dist_difference_cm / drift_velocity_cm_us,
+                                      plane_dist_from_anode_cm / drift_velocity_cm_us,
                                       jnp.inf)
 
-    corrected_drift_distance_cm = drift_distance_cm - plane_dist_difference_cm
+    corrected_drift_distance_cm = drift_distance_cm - plane_dist_from_anode_cm
     corrected_drift_time_us = drift_time_us - drift_time_correction
 
     corrected_drift_distance_cm = jnp.maximum(corrected_drift_distance_cm, 0.0)
@@ -90,20 +92,23 @@ def correct_drift_for_plane(drift_distance_cm, drift_time_us, drift_velocity_cm_
 
 
 @jax.jit
-def apply_drift_corrections(drift_distance_cm, drift_time_us, positions_yz_cm,
-                             delta_x_cm, delta_y_cm, delta_z_cm,
+def apply_drift_corrections(drift_time_us, positions_yz_cm,
+                             delta_t_us, delta_yz_cm,
                              velocity_cm_us):
     """
     Apply space charge drift corrections to nominal drift quantities.
 
+    Time is the primary correction (from path-integrated drift through
+    the non-uniform E-field). Distance is derived as time × velocity.
+
     Parameters
     ----------
-    drift_distance_cm : jnp.ndarray, shape (N,)
     drift_time_us : jnp.ndarray, shape (N,)
     positions_yz_cm : jnp.ndarray, shape (N, 2)
-    delta_x_cm : jnp.ndarray, shape (N,)
-    delta_y_cm : jnp.ndarray, shape (N,)
-    delta_z_cm : jnp.ndarray, shape (N,)
+    delta_t_us : jnp.ndarray, shape (N,)
+        Time correction from SCE path integration (scalar, not a vector).
+    delta_yz_cm : jnp.ndarray, shape (N, 2)
+        Transverse spatial displacement [dy, dz] in cm.
     velocity_cm_us : float
 
     Returns
@@ -112,10 +117,7 @@ def apply_drift_corrections(drift_distance_cm, drift_time_us, positions_yz_cm,
     corrected_time_us : jnp.ndarray, shape (N,)
     corrected_yz_cm : jnp.ndarray, shape (N, 2)
     """
-    corrected_distance = jnp.maximum(drift_distance_cm + delta_x_cm, 0.0)
-    corrected_time = jnp.maximum(
-        drift_time_us + delta_x_cm / jnp.maximum(velocity_cm_us, 1e-9),
-        0.0,
-    )
-    corrected_yz = positions_yz_cm + jnp.stack([delta_y_cm, delta_z_cm], axis=-1)
+    corrected_time = jnp.maximum(drift_time_us + delta_t_us, 0.0)
+    corrected_distance = corrected_time * velocity_cm_us
+    corrected_yz = positions_yz_cm + delta_yz_cm
     return corrected_distance, corrected_time, corrected_yz

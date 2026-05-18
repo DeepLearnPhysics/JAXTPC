@@ -18,7 +18,7 @@ from tools.wires import (
     compute_angular_scaling_vmap,
     compute_deposit_wire_angles_vmap,
     prepare_deposit_with_diffusion,
-    prepare_pixel_deposit_with_diffusion,
+    prepare_pixel_deposit_for_response,
 )
 
 
@@ -307,7 +307,7 @@ def merge_chunk_sensor_hits(state_sk, state_tk, state_gk, state_ch,
 
     # Filter: segment ends, exclude sentinels, apply intermediate threshold
     seg_ends = jnp.roll(boundaries, -1).at[-1].set(True)
-    valid_entry = seg_ends & (sorted_sk < SENTINEL) & (agg > inter_thresh)
+    valid_entry = seg_ends & (sorted_sk < SENTINEL) & (jnp.abs(agg) > inter_thresh)
 
     # Compact into max_keys
     compact_idx = jnp.where(valid_entry, size=max_keys, fill_value=0)[0]
@@ -697,53 +697,66 @@ def _make_noop_track_hits(max_keys, total_pad):
         jnp.int32(0),
         jnp.zeros(total_pad, dtype=jnp.float32),
     )
-    def noop(intermediates, deposits, vol_geom, plane_idx, n_actual):
+    def noop(intermediates, deposits, vol_geom, plane_idx, n_actual,
+             response_fn=None):
         return zero_hits
     return noop, zero_hits
 
 
-def create_pixel_track_hits_fn(cfg, vol_geom):
+def create_pixel_track_hits_fn(cfg, vol_geom, pixel_kernel):
     """Create pixel track hits labeling closure for one volume.
 
-    Uses 3D CDF-integrated diffusion kernel (py, pz, time) and
-    the unified 3-pass merge.
+    Uses the full response kernel (same as the signal path) to attribute
+    charge to readout pixels per group.  Diffusion is already baked into
+    the DKernel table, so no separate diffusion path is needed.
 
     Parameters
     ----------
     cfg : SimConfig
     vol_geom : VolumeGeometry (readout_type='pixel')
+    pixel_kernel : PixelResponseKernel
+        Pre-computed pixel response kernel with kernel dimensions and
+        zero-bin offsets.
 
     Returns
     -------
     track_hits_fn : callable
-        (pixel_int, deposits, vol_geom, plane_idx, n_actual) -> 6-tuple
+        (pixel_int, deposits, vol_geom, plane_idx, n_actual, response_fn)
+        -> 6-tuple
     """
-    diffusion = vol_geom.diffusion
-    K_py = diffusion.K_wire
-    K_pz = diffusion.K_wire
-    K_time = diffusion.K_time
-    K_total = (2 * K_py + 1) * (2 * K_pz + 1) * (2 * K_time + 1)
+    kernel_py = pixel_kernel.kernel_py
+    kernel_pz = pixel_kernel.kernel_pz
+    kernel_time = pixel_kernel.kernel_time
+    py_zero_bin = pixel_kernel.py_zero_bin
+    pz_zero_bin = pixel_kernel.pz_zero_bin
+    time_zero_bin = pixel_kernel.time_zero_bin
+    K_total = kernel_py * kernel_pz * kernel_time
     exp_size = cfg.track_hits.hits_chunk_size * K_total
     SENTINEL_PK = jnp.int32(2**30)
 
     num_py, num_pz = vol_geom.pixel_shape
-    pixel_pitch = vol_geom.pixel_pitch_cm
 
     prepare_pixel_vmap = jax.vmap(
-        prepare_pixel_deposit_with_diffusion,
-        in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0,
-                 None, None, None, None, None, None, None, None, None, None, None),
+        prepare_pixel_deposit_for_response,
+        in_axes=(0, 0, 0, 0, 0, 0, 0, None, None, None, None),
     )
 
-    def track_hits_fn(pixel_int, deposits, vol_geom, plane_idx, n_actual):
+    # Pre-compute kernel grid offsets (static, captured in closure)
+    kpy = jnp.arange(kernel_py)
+    kpz = jnp.arange(kernel_pz)
+    kt = jnp.arange(kernel_time)
+
+    def track_hits_fn(pixel_int, deposits, vol_geom, plane_idx, n_actual,
+                      response_fn):
         charges = pixel_int.charges
-        drift_time_us = pixel_int.drift_time_us
         tick_us = pixel_int.tick_us
         attenuation_factors = pixel_int.attenuation
         py_idx = pixel_int.pixel_y_idx
         pz_idx = pixel_int.pixel_z_idx
         py_offset = pixel_int.pixel_y_offset
         pz_offset = pixel_int.pixel_z_offset
+        positions_cm = pixel_int.positions_cm
+        drift_distance_cm = pixel_int.drift_distance_cm
         valid_mask = jnp.arange(charges.shape[0]) < deposits.n_actual
         group_ids = deposits.group_ids
 
@@ -759,39 +772,79 @@ def create_pixel_track_hits_fn(cfg, vol_geom):
             cs = cfg.track_hits.hits_chunk_size
 
             c_charges = jax.lax.dynamic_slice(charges, (start,), (cs,))
-            c_drift_time = jax.lax.dynamic_slice(drift_time_us, (start,), (cs,))
             c_tick = jax.lax.dynamic_slice(tick_us, (start,), (cs,))
             c_py = jax.lax.dynamic_slice(py_idx, (start,), (cs,))
             c_pz = jax.lax.dynamic_slice(pz_idx, (start,), (cs,))
             c_py_off = jax.lax.dynamic_slice(py_offset, (start,), (cs,))
             c_pz_off = jax.lax.dynamic_slice(pz_offset, (start,), (cs,))
             c_atten = jax.lax.dynamic_slice(attenuation_factors, (start,), (cs,))
+            c_pos_cm = jax.lax.dynamic_slice(positions_cm, (start, 0), (cs, 3))
+            c_drift_dist = jax.lax.dynamic_slice(drift_distance_cm, (start,), (cs,))
             c_valid = jax.lax.dynamic_slice(valid_mask, (start,), (cs,))
             c_gids = jax.lax.dynamic_slice(group_ids, (start,), (cs,))
 
-            spatial_keys, time_idx, sig_val = prepare_pixel_vmap(
-                c_charges, c_drift_time, c_tick, c_py, c_pz,
-                c_py_off, c_pz_off, c_atten, c_valid,
-                K_py, K_pz, K_time, pixel_pitch, cfg.time_step_us,
-                diffusion.trans_cm2_us, diffusion.long_cm2_us,
-                diffusion.velocity_cm_us, num_py, num_pz,
-                cfg.num_time_steps
+            # Prepare deposits: get center pixel, time index, sub-offsets, intensity
+            deposit_data = prepare_pixel_vmap(
+                c_charges, c_tick, c_py, c_pz,
+                c_py_off, c_pz_off, c_atten, True,
+                cfg.time_step_us, num_py, num_pz,
             )
+            pixel_y_idx_c, pixel_z_idx_c, py_offsets_c, pz_offsets_c, \
+                time_idx_c, time_offsets_c, intensity_c = deposit_data
 
+            # Apply response kernel: (cs, kernel_py, kernel_pz, kernel_time)
+            contributions = response_fn(
+                c_pos_cm, c_drift_dist,
+                py_offsets_c, pz_offsets_c, time_offsets_c)
+
+            # Scale by intensity (charge * attenuation)
+            sig_val = intensity_c[:, None, None, None] * contributions
+
+            # Global coordinates for each kernel element
+            global_py = (pixel_y_idx_c[:, None, None, None]
+                         - py_zero_bin
+                         + kpy[None, :, None, None])
+            global_pz = (pixel_z_idx_c[:, None, None, None]
+                         - pz_zero_bin
+                         + kpz[None, None, :, None])
+            global_t = (time_idx_c[:, None, None, None]
+                        - time_zero_bin
+                        + kt[None, None, None, :])
+
+            # Bounds check — zero out contributions outside detector
+            valid = ((global_py >= 0) & (global_py < num_py)
+                     & (global_pz >= 0) & (global_pz < num_pz)
+                     & (global_t >= 0) & (global_t < cfg.num_time_steps))
+            sig_val = jnp.where(valid, sig_val, 0.0)
+
+            # Clip for safe indexing (values already zeroed above)
+            global_py = jnp.clip(global_py, 0, num_py - 1)
+            global_pz = jnp.clip(global_pz, 0, num_pz - 1)
+            global_t = jnp.clip(global_t, 0, cfg.num_time_steps - 1)
+
+            # Broadcast to full (cs, Kpy, Kpz, Kt) before flattening
+            full_shape = (cs, kernel_py, kernel_pz, kernel_time)
+            spatial_keys = jnp.broadcast_to(
+                global_py * num_pz + global_pz, full_shape)
+            time_indices = jnp.broadcast_to(global_t, full_shape)
+
+            # Row sums for diagnostics
             chunk_rowsums = jnp.sum(
-                jnp.where(sig_val > cfg.track_hits.inter_thresh, sig_val, 0.0),
-                axis=1)
+                jnp.where(jnp.abs(sig_val) > cfg.track_hits.inter_thresh, sig_val, 0.0),
+                axis=(1, 2, 3))
             s_rowsums = jax.lax.dynamic_update_slice(
                 s_rowsums, chunk_rowsums, (start,))
 
-            gid_exp = jnp.repeat(c_gids[:, jnp.newaxis], K_total, axis=1)
+            # Flatten to (cs * K_total,) and expand group_ids to match
+            gid_exp = jnp.broadcast_to(
+                c_gids[:, None, None, None], full_shape)
 
             sk_flat = spatial_keys.reshape(exp_size).astype(jnp.int32)
-            t_flat = time_idx.reshape(exp_size).astype(jnp.int32)
+            t_flat = time_indices.reshape(exp_size).astype(jnp.int32)
             gid_flat = gid_exp.reshape(exp_size).astype(jnp.int32)
             ch_flat = sig_val.reshape(exp_size)
 
-            chunk_valid = ch_flat > 0.0
+            chunk_valid = ch_flat != 0.0
             chunk_sk = jnp.where(chunk_valid, sk_flat, SENTINEL_PK)
             chunk_tk = jnp.where(chunk_valid, t_flat, jnp.int32(0))
             chunk_gk = jnp.where(chunk_valid, gid_flat, jnp.int32(0))
@@ -816,20 +869,52 @@ def create_pixel_track_hits_fn(cfg, vol_geom):
         final_sk, final_tk, final_gk, final_ch, final_count, final_rowsums = \
             jax.lax.fori_loop(0, num_chunks, body, init_state)
 
-        return (final_sk, final_tk, final_gk, final_ch, final_count, final_rowsums)
+        # Collapse groups: sum charges at each (sk, tk) regardless of group.
+        # The merge state is sorted by (sk, tk, gk), so (sk, tk) segments
+        # are contiguous.  segment_sum over these gives the total signal.
+        max_keys = cfg.track_hits.max_keys
+        new_st = jnp.ones(max_keys, dtype=bool).at[1:].set(
+            (final_sk[1:] != final_sk[:-1]) | (final_tk[1:] != final_tk[:-1]))
+        st_seg_ids = jnp.cumsum(new_st) - 1
+        sig_summed = jax.ops.segment_sum(final_ch, st_seg_ids,
+                                         num_segments=max_keys)
+
+        valid_entry = jnp.arange(max_keys) < final_count
+        sig_starts = new_st & valid_entry & (final_sk < SENTINEL_PK)
+        sig_idx = jnp.where(sig_starts, size=max_keys, fill_value=0)[0]
+        sig_count = jnp.sum(sig_starts).astype(jnp.int32)
+        sig_mask = jnp.arange(max_keys) < sig_count
+
+        sig_sk = jnp.where(sig_mask, final_sk[sig_idx], SENTINEL_PK)
+        sig_tk = jnp.where(sig_mask, final_tk[sig_idx], jnp.int32(0))
+        sig_ch = jnp.where(sig_mask,
+                           sig_summed[st_seg_ids[sig_idx]], 0.0).astype(jnp.float32)
+
+        hits = (final_sk, final_tk, final_gk, final_ch, final_count, final_rowsums)
+        signal = (sig_sk, sig_tk, sig_ch, sig_count)
+        return hits, signal
 
     return track_hits_fn
 
 
-def create_track_hits_fn_for_volume(cfg, vol_geom):
+def create_track_hits_fn_for_volume(cfg, vol_geom, pixel_kernel=None):
     """Create track hits labeling closure for one volume.
 
     Dispatches to wire or pixel factory based on readout_type.
 
+    Parameters
+    ----------
+    cfg : SimConfig
+    vol_geom : VolumeGeometry
+    pixel_kernel : PixelResponseKernel, optional
+        Required for pixel readout.  Carries kernel dimensions and
+        zero-bin offsets used by the response-based truth path.
+
     Returns
     -------
     track_hits_fn : callable
-        (intermediates, deposits, vol_geom, plane_idx, n_actual) -> 6-tuple
+        Wire:  (intermediates, deposits, vol_geom, plane_idx, n_actual) -> 6-tuple
+        Pixel: (pixel_int, deposits, vol_geom, plane_idx, n_actual, response_fn) -> 6-tuple
     zero_hits : tuple
         Pre-allocated zero 6-tuple matching output shape.
     decode_fn : callable or None
@@ -856,7 +941,7 @@ def create_track_hits_fn_for_volume(cfg, vol_geom):
     if vol_geom.readout_type == 'pixel':
         num_pz = vol_geom.pixel_shape[1]
         decode_fn = lambda sk, _npz=num_pz: np_host.column_stack([sk // _npz, sk % _npz])
-        return create_pixel_track_hits_fn(cfg, vol_geom), zero_hits, decode_fn
+        return create_pixel_track_hits_fn(cfg, vol_geom, pixel_kernel), zero_hits, decode_fn
 
     # Wire factory below
     diffusion = vol_geom.diffusion

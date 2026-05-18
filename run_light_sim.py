@@ -65,7 +65,7 @@ for event_idx in range(min(n_events, 50)):
         photons = np.asarray(vol.photons[:n])
         positions = np.asarray(vol.positions_mm[:n])
         t0_us = np.asarray(vol.t0_us[:n])
-        ancestor_ids = np.asarray(vol.ancestor_track_ids[:n])
+        ancestor_ids = np.asarray(vol.root_track_ids[:n])
 
         total_q += float(charge.sum())
         total_l += float(photons.sum())
@@ -76,7 +76,7 @@ for event_idx in range(min(n_events, 50)):
             'photons': photons,
             'positions_mm': positions,
             't0_us': t0_us,
-            'ancestor_track_ids': ancestor_ids,
+            'root_track_ids': ancestor_ids,
         }
 
     all_events[event_idx] = event_volumes

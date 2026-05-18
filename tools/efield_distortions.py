@@ -328,9 +328,9 @@ def compute_drift_corrections(
 
             active[done_abs] = False
 
-    # Build corrections
+    # Build corrections: time (scalar) + transverse displacement (vector)
     corrections = np.zeros((N, 3), dtype=np.float32)
-    corrections[:, 0] = (v_nom * (total_time - nominal_time)).astype(np.float32)
+    corrections[:, 0] = (total_time - nominal_time).astype(np.float32)
     corrections[:, 1] = (pos[:, 1] - starts[:, 1]).astype(np.float32)
     corrections[:, 2] = (pos[:, 2] - starts[:, 2]).astype(np.float32)
 
@@ -390,9 +390,11 @@ def load_sce_per_volume(h5_path=_DEFAULT_SCE_PATH, volumes=None):
                 efield = efield[::-1, :, :, :].copy()
                 corr = corr[::-1, :, :, :].copy()
 
-            # Transform vector x-components to local frame
+            # E-field is a true vector — flip x-component when axis reverses
             efield[:, :, :, 0] *= -dd
-            corr[:, :, :, 0] *= -dd
+            # corr[:, :, :, 0] is delta_t (scalar time correction) — no sign flip.
+            # corr[:, :, :, 1:3] are spatial displacements (dy, dz) — y,z axes
+            # are not flipped in local frame, so no sign change needed.
 
             # Origin in local frame: x starts at 0, yz centered
             origin = np.array([

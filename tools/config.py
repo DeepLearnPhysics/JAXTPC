@@ -523,7 +523,7 @@ class SimParams(NamedTuple):
 class SCEOutputs(NamedTuple):
     """Raw outputs from SCE correction map query."""
     efield_correction: jnp.ndarray  # (N, 3) dimensionless, E_local / |E_nominal|
-    drift_time_corr_us: jnp.ndarray  # (N,) drift time correction in μs (scalar, no frame transform)
+    drift_time_corr_us: jnp.ndarray  # (N,) drift time correction in μs (delta_t = t_drift - t_nominal)
     drift_yz_corr_cm: jnp.ndarray    # (N, 2) transverse displacement [dy, dz] in cm
 
 

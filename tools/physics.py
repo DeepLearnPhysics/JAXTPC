@@ -78,7 +78,7 @@ def compute_volume_physics(
     vol_geom : VolumeGeometry
         Static geometry for this volume.
     sce_fn : callable
-        (positions_cm) -> SCEOutputs(efield_correction, drift_corr_cm).
+        (positions_cm, velocity_cm_us) -> SCEOutputs.
     recomb_fn : callable
         (de, dx_cm, phi_drift, e_field_Vcm, recomb_params) -> (charges, photons).
 
@@ -90,8 +90,10 @@ def compute_volume_physics(
     positions_cm = deposits.positions_mm / 10.0
     dx_cm = deposits.dx / 10.0
 
-    # Query SCE map once — returns both E-field correction and drift corrections
-    sce = sce_fn(positions_cm)
+    # Query SCE map once — returns E-field correction and drift corrections.
+    # Velocity is passed so the SCE factory can compute delta_t relative to
+    # the runtime velocity (avoiding mismatch with the map's generation velocity).
+    sce = sce_fn(positions_cm, sim_params.velocity_cm_us)
 
     # Process normalized E-field correction for recombination
     phi_drift, E_mag = compute_phi_drift(
@@ -109,16 +111,19 @@ def compute_volume_physics(
     charges = charges * padding_mask
     photons = photons * padding_mask
 
-    # Drift to furthest plane (local frame: anode at x=0, drift toward -x)
+    # Drift to anode (local frame: anode at x=0, drift toward -x).
+    # SCE corrections are pre-computed relative to the anode, so the base
+    # drift must also reference the anode for the correction to be applied
+    # consistently. Per-plane offsets are subtracted in compute_plane_physics.
     drift_dist, drift_time, yz = compute_drift_to_plane(
         positions_cm, 0.0, -1,
-        sim_params.velocity_cm_us, vol_geom.furthest_plane_dist_cm
+        sim_params.velocity_cm_us, 0.0
     )
 
-    # Apply SCE drift corrections (velocity explicit for gradient flow)
+    # Apply SCE drift corrections: time is primary, distance derived from it
     drift_dist, drift_time, yz = apply_drift_corrections(
-        drift_dist, drift_time, yz,
-        sce.drift_corr_cm[:, 0], sce.drift_corr_cm[:, 1], sce.drift_corr_cm[:, 2],
+        drift_time, yz,
+        sce.drift_time_corr_us, sce.drift_yz_corr_cm,
         sim_params.velocity_cm_us,
     )
 
@@ -131,7 +136,7 @@ def compute_volume_physics(
         positions_yz_cm=yz,
         t0_us=deposits.t0_us,
         interaction_ids=deposits.interaction_ids,
-        ancestor_track_ids=deposits.ancestor_track_ids,
+        root_track_ids=deposits.root_track_ids,
     )
 
 
@@ -163,10 +168,9 @@ def compute_plane_physics(vol_int, sim_params, vol_geom, plane_idx,
     PlaneIntermediates
         Per-plane physics results for downstream response computation.
     """
-    plane_dist_diff = vol_geom.furthest_plane_dist_cm - vol_geom.plane_distances_cm[plane_idx]
     drift_dist, drift_time = correct_drift_for_plane(
         vol_int.drift_distance_cm, vol_int.drift_time_us,
-        sim_params.velocity_cm_us, plane_dist_diff
+        sim_params.velocity_cm_us, vol_geom.plane_distances_cm[plane_idx]
     )
 
     drift_time_safe = jnp.where(jnp.isnan(drift_time), 0.0, drift_time)

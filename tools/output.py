@@ -20,6 +20,10 @@ from tools.wires import sparse_buckets_to_dense, sparse_pixel_buckets_to_dense
 
 def _detect_format(signal):
     """Detect the output format of a signal."""
+    if isinstance(signal, dict):
+        if 'pixel_y' in signal:
+            return 'pixel_sparse'
+        return 'wire_sparse_dict'
     if isinstance(signal, tuple):
         if len(signal) == 6:
             return 'pixel_bucketed'
@@ -78,6 +82,22 @@ def to_dense(response_signals, config):
                 num_py, num_pz, num_time,
                 buckets.shape[0])
             output[(vol_idx, plane_idx)] = np.asarray(dense)
+
+        elif fmt == 'pixel_sparse':
+            num_py, num_pz = vol.pixel_shape
+            if num_py * num_pz * num_time > 100_000_000:
+                warnings.warn(
+                    f"Pixel to_dense for volume {vol_idx}: "
+                    f"({num_py}x{num_pz}x{num_time}) = "
+                    f"{num_py*num_pz*num_time*4/1e9:.1f} GB. "
+                    f"Consider using to_sparse instead.")
+            dense = np.zeros((num_py, num_pz, num_time), dtype=np.float32)
+            py = np.asarray(signal['pixel_y'])
+            pz = np.asarray(signal['pixel_z'])
+            t = np.asarray(signal['time'])
+            v_arr = np.asarray(signal['values'])
+            np.add.at(dense, (py, pz, t), v_arr)
+            output[(vol_idx, plane_idx)] = dense
 
         elif fmt == 'wire_sparse':
             active_signals, wire_indices, n_active = signal
@@ -224,6 +244,16 @@ def to_sparse(response_signals, config, threshold_adc=0.0):
         elif fmt == 'pixel_bucketed':
             output[(vol_idx, plane_idx)] = _sparse_from_pixel_bucketed(
                 signal, vol, num_time, thresh)
+
+        elif fmt == 'pixel_sparse':
+            vals = np.asarray(signal['values'])
+            mask = np.abs(vals) >= thresh
+            output[(vol_idx, plane_idx)] = {
+                'pixel_y': np.asarray(signal['pixel_y'])[mask],
+                'pixel_z': np.asarray(signal['pixel_z'])[mask],
+                'time': np.asarray(signal['time'])[mask],
+                'values': vals[mask],
+            }
 
         elif fmt == 'wire_sparse':
             active_signals, wire_indices, n_active = signal
