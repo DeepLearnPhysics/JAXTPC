@@ -27,7 +27,8 @@ def mock_sim_config():
                            'readout_type'])
     Cfg = namedtuple('Cfg', ['volumes', 'n_volumes', 'num_time_steps', 'time_step_us',
                               'pre_window_us', 'post_window_us',
-                              'electrons_per_adc', 'include_noise',
+                              'electrons_per_adc', 'include_intrinsic_noise',
+                              'include_coherent_noise',
                               'include_electronics', 'include_digitize',
                               'plane_names'])
     Params = namedtuple('Params', ['velocity_cm_us', 'lifetime_us'])
@@ -45,7 +46,8 @@ def mock_sim_config():
             pre_window_us=0.0,
             post_window_us=0.0,
             electrons_per_adc=182.0,
-            include_noise=False,
+            include_intrinsic_noise=False,
+            include_coherent_noise=False,
             include_electronics=False,
             include_digitize=False,
             plane_names=(('U', 'V', 'Y'), ('U', 'V', 'Y')),

@@ -43,7 +43,7 @@ class VolumeDeposits(NamedTuple):
     group_ids: jnp.ndarray       # (total_pad,)
     t0_us: jnp.ndarray           # (total_pad,) initial deposit time in μs
     interaction_ids: jnp.ndarray # (total_pad,) vertex/interaction label (int16)
-    ancestor_track_ids: jnp.ndarray  # (total_pad,) primary shower ancestor (int32)
+    root_track_ids: jnp.ndarray  # (total_pad,) primary shower ancestor (int32)
     pdg: jnp.ndarray             # (total_pad,) particle species at step (int32)
     charge: jnp.ndarray          # (total_pad,) recombined electrons (zeros on input, filled after sim)
     photons: jnp.ndarray         # (total_pad,) scintillation photons (zeros on input, filled after sim)
@@ -100,7 +100,8 @@ class SimConfig(NamedTuple):
     # Mode flags
     use_bucketed: bool
     include_track_hits: bool
-    include_noise: bool
+    include_intrinsic_noise: bool
+    include_coherent_noise: bool
     include_electronics: bool
     include_digitize: bool
 
@@ -219,7 +220,8 @@ def create_track_hits_config(
 
 def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50_000,
                       use_bucketed=False, max_active_buckets=1000,
-                      include_noise=False, include_electronics=False,
+                      include_intrinsic_noise=False, include_coherent_noise=False,
+                      include_electronics=False,
                       include_track_hits=False, include_digitize=False,
                       track_config=None, include_diffusion=True, num_s=16):
     """Create SimConfig from raw parsed YAML detector configuration.
@@ -239,8 +241,10 @@ def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50
         Use sparse bucketed accumulation. Default False.
     max_active_buckets : int
         Max active buckets for sparse mode. Default 1000.
-    include_noise : bool
-        Add intrinsic noise inside JIT. Default False.
+    include_intrinsic_noise : bool
+        Add intrinsic (electronics) noise inside JIT. Default False.
+    include_coherent_noise : bool
+        Add coherent noise (per-group, anti-correlated). Default False.
     include_electronics : bool
         Apply RC-RC electronics convolution. Default False.
     include_track_hits : bool
@@ -468,7 +472,8 @@ def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50
         max_wires=max_wires,
         use_bucketed=use_bucketed,
         include_track_hits=include_track_hits,
-        include_noise=include_noise,
+        include_intrinsic_noise=include_intrinsic_noise,
+        include_coherent_noise=include_coherent_noise,
         include_electronics=include_electronics,
         include_digitize=include_digitize,
         max_active_buckets=max_active_buckets,
@@ -518,7 +523,8 @@ class SimParams(NamedTuple):
 class SCEOutputs(NamedTuple):
     """Raw outputs from SCE correction map query."""
     efield_correction: jnp.ndarray  # (N, 3) dimensionless, E_local / |E_nominal|
-    drift_corr_cm: jnp.ndarray     # (N, 3) drift corrections [dx, dy, dz] in cm
+    drift_time_corr_us: jnp.ndarray  # (N,) drift time correction in μs (scalar, no frame transform)
+    drift_yz_corr_cm: jnp.ndarray    # (N, 2) transverse displacement [dy, dz] in cm
 
 
 class VolumeGeometry(NamedTuple):
@@ -564,7 +570,7 @@ class VolumeIntermediates(NamedTuple):
     positions_yz_cm: jnp.ndarray   # (N, 2) projected (for wire distances)
     t0_us: jnp.ndarray             # (N,) initial deposit time in μs
     interaction_ids: jnp.ndarray    # (N,) interaction label (int16)
-    ancestor_track_ids: jnp.ndarray  # (N,) primary shower ancestor (int32)
+    root_track_ids: jnp.ndarray  # (N,) primary shower ancestor (int32)
 
 
 class PlaneIntermediates(NamedTuple):
@@ -673,7 +679,7 @@ def create_sim_params(detector_config, recombination_model='modified_box',
 
 def create_deposit_data(positions_mm, de, dx, theta=None, phi=None,
                         track_ids=None, group_ids=None, t0_us=None,
-                        interaction_ids=None, ancestor_track_ids=None,
+                        interaction_ids=None, root_track_ids=None,
                         pdg=None, n_volumes=1):
     """Convenience constructor for single-volume DepositData.
 
@@ -691,13 +697,13 @@ def create_deposit_data(positions_mm, de, dx, theta=None, phi=None,
     gids = group_ids if group_ids is not None else jnp.zeros(N, jnp.int32)
     t0 = t0_us if t0_us is not None else jnp.zeros(N)
     iids = interaction_ids if interaction_ids is not None else jnp.full(N, -1, jnp.int16)
-    atids = ancestor_track_ids if ancestor_track_ids is not None else jnp.full(N, -1, jnp.int32)
+    atids = root_track_ids if root_track_ids is not None else jnp.full(N, -1, jnp.int32)
     pdg_arr = pdg if pdg is not None else jnp.zeros(N, jnp.int32)
 
     vol = VolumeDeposits(
         positions_mm=positions_mm, de=de, dx=dx_arr,
         theta=th, phi=ph, track_ids=tids, group_ids=gids, t0_us=t0,
-        interaction_ids=iids, ancestor_track_ids=atids, pdg=pdg_arr,
+        interaction_ids=iids, root_track_ids=atids, pdg=pdg_arr,
         charge=jnp.zeros(N), photons=jnp.zeros(N), qs_fractions=jnp.zeros(N),
         n_actual=N,
     )
@@ -737,7 +743,7 @@ def pad_deposit_data(deposits, target_size):
             group_ids=_pad(vol.group_ids),
             t0_us=_pad(vol.t0_us),
             interaction_ids=_pad(vol.interaction_ids, pad_val=-1),
-            ancestor_track_ids=_pad(vol.ancestor_track_ids, pad_val=-1),
+            root_track_ids=_pad(vol.root_track_ids, pad_val=-1),
             pdg=_pad(vol.pdg),
             charge=_pad(vol.charge),
             photons=_pad(vol.photons),

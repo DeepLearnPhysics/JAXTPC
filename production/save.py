@@ -68,7 +68,8 @@ def write_config_sensor(f, cfg, params, recomb_model, dataset_name, file_index,
     g.attrs['velocity_cm_us'] = float(params.velocity_cm_us)
     g.attrs['lifetime_us'] = float(params.lifetime_us)
     g.attrs['recombination_model'] = recomb_model
-    g.attrs['include_noise'] = cfg.include_noise
+    g.attrs['include_intrinsic_noise'] = cfg.include_intrinsic_noise
+    g.attrs['include_coherent_noise'] = cfg.include_coherent_noise
     g.attrs['include_electronics'] = cfg.include_electronics
     g.attrs['include_digitize'] = cfg.include_digitize
     g.attrs['threshold_adc'] = threshold_adc

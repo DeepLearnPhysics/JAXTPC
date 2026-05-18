@@ -55,8 +55,8 @@ volumes:
 readout:
   sampling_rate: 2.0  # MHz
   electrons_per_adc: 182  # electrons per ADC count (from MicroBooNE electronics)
-  pre_window_fraction: 0.0   # fraction of max drift time before t=0
-  post_window_fraction: 0.0  # fraction of max drift time after max drift
+  pre_window_fraction: 0.3   # fraction of max drift time before t=0
+  post_window_fraction: 0.3  # fraction of max drift time after max drift
   digitization:
     n_bits: 12                  # ADC resolution
     pedestal_collection: 410    # Baseline ADC for Y (collection) planes
@@ -69,6 +69,13 @@ simulation:
     longitudinal_diffusion: 7.2  # cm²/s
     transverse_diffusion: 12.0  # cm²/s
     electron_lifetime: 10.0  # ms
+  coherent_noise:
+    group_size: 64              # wires per coherent group
+    beta: 0.15                  # inter-group anti-correlation
+    rms_adc: 2.5                # target RMS per group (ADC)
+    corner_freq_hz: 20000.0     # spectral corner frequency
+    spectral_slope: 1.5         # power-law rolloff
+    sampling_rate_hz: 2000000.0 # sampling rate
   charge_recombination:
     model: emb  # Options: 'modified_box' (ArgoNeuT), 'emb' (ICARUS)
     recomb_parameters:

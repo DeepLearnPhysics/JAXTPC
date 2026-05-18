@@ -87,8 +87,10 @@ class DetectorSimulator:
         response_chunk_size=50_000,
         use_bucketed=False,
         max_active_buckets=1000,
-        include_noise=False,
+        include_intrinsic_noise=False,
+        include_coherent_noise=False,
         include_electronics=False,
+        include_noise=None,  # deprecated alias for include_intrinsic_noise
         include_track_hits=True,
         electronics_chunk_size=None,
         electronics_threshold=0.0,
@@ -103,11 +105,20 @@ class DetectorSimulator:
     ):
         print("--- Creating DetectorSimulator ---")
 
+        if include_noise is not None:
+            include_intrinsic_noise = include_noise
+
+        # Detect readout type early (needed for pixel-specific defaults)
+        _readout = detector_config['volumes'][0].get('readout', {}).get('type', 'wire')
+
         # Differentiable mode: force compatible flags
         if n_segments is not None and not differentiable:
             print("   WARNING: n_segments ignored without differentiable=True")
         self.n_segments = n_segments if differentiable else None
         if differentiable:
+            if _readout == 'pixel':
+                raise ValueError(
+                    "differentiable=True is not supported for pixel readout")
             if n_segments is None:
                 raise ValueError("differentiable=True requires n_segments to be set")
             if total_pad != 200_000:
@@ -115,10 +126,18 @@ class DetectorSimulator:
             total_pad = n_segments
             response_chunk_size = n_segments
             use_bucketed = False
-            include_noise = False
+            include_intrinsic_noise = False
             include_electronics = False
             include_track_hits = False
             include_digitize = False
+
+        # Pixel readout: single response pass produces both signal and
+        # per-group truth.  Force required settings.
+        if _readout == 'pixel':
+            include_track_hits = True
+            if track_config is None:
+                from tools.config import create_track_hits_config as _create_thc
+                track_config = _create_thc(hits_chunk_size=5000)
 
         # Validate chunk alignment
         if total_pad % response_chunk_size != 0:
@@ -137,13 +156,18 @@ class DetectorSimulator:
         print("   Extracting parameters...")
 
         # Build SimConfig
+        self._include_coherent_noise = include_coherent_noise
+        self._coherent_noise_config = detector_config.get('simulation', {}).get(
+            'coherent_noise', {})
+
         self._sim_config = create_sim_config(
             detector_config,
             total_pad=total_pad,
             response_chunk_size=response_chunk_size,
             use_bucketed=use_bucketed,
             max_active_buckets=max_active_buckets,
-            include_noise=include_noise,
+            include_intrinsic_noise=include_intrinsic_noise,
+            include_coherent_noise=include_coherent_noise,
             include_electronics=include_electronics,
             include_track_hits=include_track_hits,
             include_digitize=include_digitize,
@@ -180,14 +204,6 @@ class DetectorSimulator:
                 raise ValueError(
                     f"Mixed readout types not supported: volume 0 is "
                     f"'{self._readout_type}', volume {v.volume_id} is '{v.readout_type}'")
-
-        # Pixel readout requires bucketed accumulation (dense is too large)
-        if self._readout_type == 'pixel' and not cfg.use_bucketed:
-            print("   NOTE: pixel readout forces bucketed accumulation")
-            buckets = cfg.max_active_buckets if cfg.max_active_buckets else 1000
-            self._sim_config = cfg._replace(use_bucketed=True,
-                                            max_active_buckets=buckets)
-            cfg = self._sim_config
 
         # Load response kernels (once, shared across all volumes)
         print("   Loading response kernels...")
@@ -251,7 +267,9 @@ class DetectorSimulator:
         if dig_cfg:
             self.digitization_config = dig_cfg
 
-        th_fn, th_zero, th_decode = create_track_hits_fn_for_volume(cfg, vol_geom)
+        th_fn, th_zero, th_decode = create_track_hits_fn_for_volume(
+            cfg, vol_geom,
+            pixel_kernel=self.response_kernels if self._readout_type == 'pixel' else None)
 
         # Populate spatial decode fns for finalize_track_hits
         self._spatial_decode_fns = {}
@@ -294,7 +312,7 @@ class DetectorSimulator:
               f"K_time={d0.K_time if d0 else 'N/A'}")
         if cfg.use_bucketed:
             print(f"   Using BUCKETED accumulation (max_buckets={cfg.max_active_buckets})")
-        if cfg.include_noise:
+        if cfg.include_intrinsic_noise:
             print("   Noise integration: ENABLED")
         if cfg.include_electronics:
             print(f"   Electronics response: ENABLED (FFT={self._electronics_fft_size}, "
@@ -324,8 +342,11 @@ class DetectorSimulator:
                 def _sce(positions_cm):
                     E_local = ef(positions_cm)
                     E_normalized = E_local / nf
-                    drift_corr = cf(positions_cm)
-                    return SCEOutputs(efield_correction=E_normalized, drift_corr_cm=drift_corr)
+                    corr = cf(positions_cm)
+                    return SCEOutputs(
+                        efield_correction=E_normalized,
+                        drift_time_corr_us=corr[:, 0],
+                        drift_yz_corr_cm=corr[:, 1:3])
                 return _sce
         else:
             # Nominal SCE — identical for all volumes in local frame
@@ -336,7 +357,8 @@ class DetectorSimulator:
                         jnp.array([1.0, 0.0, 0.0]), (N, 3))
                     return SCEOutputs(
                         efield_correction=corr,
-                        drift_corr_cm=jnp.zeros((N, 3)))
+                        drift_time_corr_us=jnp.zeros(N),
+                        drift_yz_corr_cm=jnp.zeros((N, 2)))
                 return _sce
 
         # ── Response factories ──
@@ -402,8 +424,7 @@ class DetectorSimulator:
             compute_volume_physics, compute_plane_physics,
             compute_plane_signal, compute_plane_signal_bucketed,
             compute_bucket_maps,
-            compute_pixel_physics, compute_pixel_bucket_maps,
-            compute_pixel_signal_bucketed,
+            compute_pixel_physics,
         )
 
         cfg = self._sim_config
@@ -433,35 +454,15 @@ class DetectorSimulator:
                     jnp.array(vol_geom.pixel_origins_cm),
                     vol_geom.pixel_shape[0], vol_geom.pixel_shape[1])
 
-                ptc, num_active, ctk, B1, B2, B3 = compute_pixel_bucket_maps(
-                    pixel_int, vol_geom.pixel_shape[0], vol_geom.pixel_shape[1],
-                    cfg.num_time_steps, cfg.time_step_us,
-                    cfg.max_active_buckets,
-                    pk.kernel_py, pk.kernel_pz, pk.kernel_time,
-                    pk.py_zero_bin, pk.pz_zero_bin, pk.time_zero_bin)
-
-                response_buckets = compute_pixel_signal_bucketed(
-                    pixel_int, pixel_response_fn, vol_deps.n_actual,
-                    cfg.response_chunk_size,
-                    ptc, cfg.max_active_buckets, B1, B2, B3,
-                    cfg.time_step_us,
-                    vol_geom.pixel_shape[0], vol_geom.pixel_shape[1],
-                    cfg.num_time_steps,
-                    pk.kernel_py, pk.kernel_pz, pk.kernel_time,
-                    pk.py_zero_bin, pk.pz_zero_bin, pk.time_zero_bin)
-
-                # Single readout plane
-                stacked_signal = (response_buckets[None], num_active[None], ctk[None])
-
-                if include_track_hits:
-                    vol_qs = compute_qs_fractions(
-                        vol_int.charges, vol_deps.group_ids, total_pad)
-                    hits = track_hits_fn(
-                        pixel_int, vol_deps, vol_geom, 0, vol_deps.n_actual)
-                    stacked_hits = tuple(h[None] for h in hits)
-                else:
-                    vol_qs = jnp.zeros(total_pad, dtype=jnp.float32)
-                    stacked_hits = ()
+                # Single response pass: the track hits merge produces per-group
+                # charges and a group-collapsed signal in one computation.
+                vol_qs = compute_qs_fractions(
+                    vol_int.charges, vol_deps.group_ids, total_pad)
+                hits, signal = track_hits_fn(
+                    pixel_int, vol_deps, vol_geom, 0, vol_deps.n_actual,
+                    pixel_response_fn)
+                stacked_hits = tuple(h[None] for h in hits)
+                stacked_signal = tuple(s[None] for s in signal)
 
                 return stacked_signal, stacked_hits, vol_qs, vol_int.charges, vol_int.photons
 
@@ -563,7 +564,7 @@ class DetectorSimulator:
             vol_int = compute_volume_physics(
                 vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
             return (vol_int.charges, vol_int.photons, vol_int.positions_cm,
-                    vol_int.interaction_ids, vol_int.ancestor_track_ids)
+                    vol_int.interaction_ids, vol_int.root_track_ids)
 
         @jax.jit
         def _light_calculator_jit(sim_params, stacked_deps):
@@ -649,26 +650,40 @@ class DetectorSimulator:
 
         # Unstack signals
         response_signals = {}
-        if cfg.use_bucketed:
+        if self._readout_type == 'pixel':
+            import numpy as np_host
+            out_sig_sk, out_sig_tk, out_sig_ch, out_sig_count = stacked_signal
+            num_pz = cfg.volumes[0].pixel_shape[1]
+            for v in range(n_volumes):
+                count = int(out_sig_count[v, 0])
+                if count == 0:
+                    response_signals[(v, 0)] = {
+                        'pixel_y': np_host.array([], dtype=np_host.int32),
+                        'pixel_z': np_host.array([], dtype=np_host.int32),
+                        'time': np_host.array([], dtype=np_host.int32),
+                        'values': np_host.array([], dtype=np_host.float32),
+                    }
+                    continue
+                sks = np_host.asarray(out_sig_sk[v, 0, :count])
+                tks = np_host.asarray(out_sig_tk[v, 0, :count])
+                chs = np_host.asarray(out_sig_ch[v, 0, :count])
+                mask = chs != 0
+                response_signals[(v, 0)] = {
+                    'pixel_y': (sks[mask] // num_pz).astype(np_host.int32),
+                    'pixel_z': (sks[mask] % num_pz).astype(np_host.int32),
+                    'time': tks[mask].astype(np_host.int32),
+                    'values': chs[mask].astype(np_host.float32),
+                }
+        elif cfg.use_bucketed:
             out_buckets, out_num_active, out_ctk = stacked_signal
-            if self._readout_type == 'wire':
-                pk = self.response_kernels[cfg.plane_names[0][0]]
-                B1 = 2 * pk.num_wires
-                B2 = 2 * pk.kernel_height
-                for v in range(n_volumes):
-                    for p in range(n_readouts):
-                        response_signals[(v, p)] = (
-                            out_buckets[v, p], out_num_active[v, p],
-                            out_ctk[v, p], B1, B2)
-            else:
-                pk = self.response_kernels
-                B1 = 2 * pk.kernel_py
-                B2 = 2 * pk.kernel_pz
-                B3 = 2 * pk.kernel_time
-                for v in range(n_volumes):
-                    response_signals[(v, 0)] = (
-                        out_buckets[v, 0], out_num_active[v, 0],
-                        out_ctk[v, 0], B1, B2, B3)
+            pk = self.response_kernels[cfg.plane_names[0][0]]
+            B1 = 2 * pk.num_wires
+            B2 = 2 * pk.kernel_height
+            for v in range(n_volumes):
+                for p in range(n_readouts):
+                    response_signals[(v, p)] = (
+                        out_buckets[v, p], out_num_active[v, p],
+                        out_ctk[v, p], B1, B2)
 
             # Check for max_active_buckets overflow
             for (v, p), sig in response_signals.items():
@@ -683,12 +698,12 @@ class DetectorSimulator:
             vol_geom = cfg.volumes[0]
             for v in range(n_volumes):
                 for p in range(n_readouts):
-                    n_wires = vol_geom.num_wires[p] if self._readout_type == 'wire' else vol_geom.pixel_shape[0]
+                    n_wires = vol_geom.num_wires[p]
                     response_signals[(v, p)] = out_dense[v, p, :n_wires]
 
         # Unstack track hits
         track_hits = {}
-        if cfg.include_track_hits and len(stacked_hits) > 0:
+        if len(stacked_hits) > 0:
             for v in range(n_volumes):
                 for p in range(n_readouts):
                     track_hits[(v, p)] = tuple(
@@ -708,6 +723,32 @@ class DetectorSimulator:
                             f"track_hits overflow vol {v} plane {p}: "
                             f"count={count:,} >= max_keys={max_keys:,}. "
                             f"Increase --max-keys or run profiler.setup_production.")
+
+        # Add coherent noise (NumPy, outside JIT — per-group, not per-deposit)
+        if self._include_coherent_noise and self._readout_type == 'wire':
+            if cfg.use_bucketed:
+                raise ValueError(
+                    "include_coherent_noise is not supported with use_bucketed=True. "
+                    "Use dense output format for coherent noise simulation.")
+            from tools.coherent_noise import generate_coherent_noise
+            import numpy as np_host
+            coh_cfg = self._coherent_noise_config
+            coh_rng = np_host.random.default_rng(
+                int(jax.random.randint(noise_key, (), 0, 2**31)))
+            for (v, p), sig in response_signals.items():
+                n_wires = cfg.volumes[v].num_wires[p]
+                coh_noise = generate_coherent_noise(
+                    n_wires=n_wires,
+                    n_ticks=cfg.num_time_steps,
+                    group_size=int(coh_cfg.get('group_size', 64)),
+                    beta=float(coh_cfg.get('beta', 0.15)),
+                    rms_adc=float(coh_cfg.get('rms_adc', 2.5)),
+                    corner_freq_hz=float(coh_cfg.get('corner_freq_hz', 20000.0)),
+                    spectral_slope=float(coh_cfg.get('spectral_slope', 1.5)),
+                    sampling_rate_hz=float(coh_cfg.get('sampling_rate_hz', 2e6)),
+                    rng=coh_rng,
+                )
+                response_signals[(v, p)] = jnp.asarray(sig) + jnp.asarray(coh_noise)
 
         # Rebuild filled deposits
         filled_volumes = tuple(
@@ -731,7 +772,7 @@ class DetectorSimulator:
             sim_params = self._default_sim_params
 
         stacked_deps = jax.tree.map(lambda *xs: jnp.stack(xs), *deposits.volumes)
-        all_charges, all_photons, all_positions, all_interaction_ids, all_ancestor_track_ids = \
+        all_charges, all_photons, all_positions, all_interaction_ids, all_root_track_ids = \
             self._light_calculator_jit(sim_params, stacked_deps)
 
         filled_volumes = tuple(
@@ -739,7 +780,7 @@ class DetectorSimulator:
                 charge=all_charges[v],
                 photons=all_photons[v],
                 interaction_ids=all_interaction_ids[v],
-                ancestor_track_ids=all_ancestor_track_ids[v],
+                root_track_ids=all_root_track_ids[v],
             )
             for v, vol in enumerate(deposits.volumes)
         )
@@ -795,7 +836,7 @@ class DetectorSimulator:
             group_ids=jnp.zeros(pad, dtype=jnp.int32),
             t0_us=jnp.zeros(pad, dtype=jnp.float32),
             interaction_ids=jnp.full(pad, -1, dtype=jnp.int16),
-            ancestor_track_ids=jnp.full(pad, -1, dtype=jnp.int32),
+            root_track_ids=jnp.full(pad, -1, dtype=jnp.int32),
             pdg=jnp.zeros(pad, dtype=jnp.int32),
             charge=jnp.zeros(pad, dtype=jnp.float32),
             photons=jnp.zeros(pad, dtype=jnp.float32),
@@ -881,7 +922,7 @@ class DetectorSimulator:
                 group_ids=jnp.zeros(total_pad, dtype=jnp.int32),
                 t0_us=jnp.zeros(total_pad),
                 interaction_ids=jnp.full(total_pad, -1, dtype=jnp.int16),
-                ancestor_track_ids=jnp.full(total_pad, -1, dtype=jnp.int32),
+                root_track_ids=jnp.full(total_pad, -1, dtype=jnp.int32),
                 pdg=jnp.zeros(total_pad, dtype=jnp.int32),
                 charge=jnp.zeros(total_pad),
                 photons=jnp.zeros(total_pad),

@@ -152,7 +152,8 @@ def main():
     parser.add_argument('--threshold-adc', type=float, default=2.0,
                         help='Threshold in ADC for sparse signal output (default: 2.0)')
     # Physics toggles (default: noise OFF, electronics OFF, digitization ON)
-    parser.add_argument('--noise', action='store_true', help='Enable intrinsic noise')
+    parser.add_argument('--intrinsic', action='store_true', help='Enable intrinsic (electronics) noise')
+    parser.add_argument('--coherent', action='store_true', help='Enable coherent noise (per-group)')
     parser.add_argument('--electronics', action='store_true', help='Enable electronics response')
     parser.add_argument('--no-digitize', action='store_true', help='Disable ADC digitization')
     parser.add_argument('--no-track-hits', action='store_true', help='Disable track correspondence')
@@ -206,7 +207,8 @@ def main():
         apply_to_args(args, prod_cfg)
         print(f'  Loaded production config: {args.production_config}')
 
-    include_noise = args.noise
+    include_intrinsic_noise = args.intrinsic
+    include_coherent_noise = args.coherent
     include_electronics = args.electronics
     include_digitize = not args.no_digitize
     include_track_hits = not args.no_track_hits
@@ -245,7 +247,8 @@ def main():
     print(f'  Events/file:   {events_per_file}')
     print(f'  Num files:     {num_files}')
     print(f'  Threshold:     {threshold_adc} ADC')
-    print(f'  Noise:         {"ON" if include_noise else "OFF"}')
+    print(f'  Intrinsic:     {"ON" if include_intrinsic_noise else "OFF"}')
+    print(f'  Coherent:      {"ON" if include_coherent_noise else "OFF"}')
     print(f'  Electronics:   {"ON" if include_electronics else "OFF"}')
     print(f'  Digitization:  {"ON" if include_digitize else "OFF"}')
     print(f'  SCE:           {args.sce if include_sce else "OFF"}')
@@ -278,7 +281,8 @@ def main():
         response_chunk_size=args.response_chunk,
         use_bucketed=args.bucketed if readout_type == 'wire' else False,
         max_active_buckets=args.max_buckets,
-        include_noise=include_noise,
+        include_intrinsic_noise=include_intrinsic_noise,
+        include_coherent_noise=include_coherent_noise,
         include_electronics=include_electronics,
         include_track_hits=include_track_hits,
         include_digitize=include_digitize,
