@@ -112,12 +112,10 @@ def _default_labl_path(edep_path):
 
     Looks first for sibling layout (..../edep/{ds}_edep_NNNN.h5 ->
     ..../labl/{ds}_labl_NNNN.h5), then for a flat layout where files
-    share a directory.  Falls back to the legacy _seg_ pattern for
-    backward compatibility.
+    share a directory.
     """
     base = os.path.basename(edep_path)
-    # Try new naming first, then legacy
-    for old_pat, new_pat in [('_edep_', '_labl_'), ('_seg_', '_labl_')]:
+    for old_pat, new_pat in [('_edep_', '_labl_')]:
         if old_pat not in base:
             continue
         labl_base = base.replace(old_pat, new_pat)
@@ -139,10 +137,9 @@ def _per_deposit_labels(labl_vol_group, n):
 
     Returns a dict of (n,) int32 arrays, zero-filled for unmapped tracks.
     """
-    d2t_key = 'deposit_to_track' if 'deposit_to_track' in labl_vol_group else 'segment_to_track'
-    if d2t_key not in labl_vol_group:
+    if 'deposit_to_track' not in labl_vol_group:
         return None
-    seg_to_trk = labl_vol_group[d2t_key][:].astype(np.int32)
+    seg_to_trk = labl_vol_group['deposit_to_track'][:].astype(np.int32)
     track_ids = labl_vol_group['track_ids'][:].astype(np.int32) \
         if 'track_ids' in labl_vol_group else np.array([], dtype=np.int32)
     if track_ids.size == 0:
@@ -456,7 +453,7 @@ def make_gif(data, output, fps=30, duration=12.0, rotations=1, dpi=200,
 def main():
     parser = argparse.ArgumentParser(
         description='Generate rotating 3D GIF of JAXTPC energy deposits')
-    parser.add_argument('edep_file', help='Path to *_edep_*.h5 (or legacy *_seg_*.h5) file')
+    parser.add_argument('edep_file', help='Path to *_edep_*.h5 file')
     parser.add_argument('--event', '-e', type=int, default=0,
                         help='Event index (default: 0)')
     parser.add_argument('--volume', '-v', type=int, default=None,

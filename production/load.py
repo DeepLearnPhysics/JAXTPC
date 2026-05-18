@@ -397,9 +397,8 @@ def load_event_hits(hits_path, event_idx, num_time_steps=None,
                 g2t_per_vol.append(vol_grp['group_to_track'][:]
                                    if 'group_to_track' in vol_grp
                                    else np.array([0], dtype=np.int32))
-                d2g_key = 'deposit_to_group' if 'deposit_to_group' in vol_grp else 'segment_to_group'
-                s2g_per_vol.append(vol_grp[d2g_key][:]
-                                   if d2g_key in vol_grp else None)
+                s2g_per_vol.append(vol_grp['deposit_to_group'][:]
+                                   if 'deposit_to_group' in vol_grp else None)
                 qs_per_vol.append(vol_grp['qs_fractions'][:].astype(np.float32)
                                   if 'qs_fractions' in vol_grp else None)
             else:
@@ -499,8 +498,7 @@ def load_correspondence(hits_path, event_idx, v, num_time_steps=None):
         if vg_key not in evt:
             return None
         vg = evt[vg_key]
-        d2g_key = 'deposit_to_group' if 'deposit_to_group' in vg else 'segment_to_group'
-        s2g = vg[d2g_key][:]
+        s2g = vg['deposit_to_group'][:]
         qs  = vg['qs_fractions'][:].astype(np.float32)
         g2t = vg['group_to_track'][:]
 

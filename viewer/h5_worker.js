@@ -117,8 +117,8 @@ function decodeEvent(idx) {
     const volPlanes = {};
     const iVol = cEvt.get(vKey);
     let gids;
-    if (iVol && (iVol.get('deposit_to_group') || iVol.get('segment_to_group'))) {
-      const d2gDs = iVol.get('deposit_to_group') || iVol.get('segment_to_group');
+    if (iVol && iVol.get('deposit_to_group')) {
+      const d2gDs = iVol.get('deposit_to_group');
       gids = new Int32Array(d2gDs.value);
     } else {
       gids = new Int32Array(n);  // no hits data: zeros (highlighting will no-op)
@@ -130,7 +130,7 @@ function decodeEvent(idx) {
     let tids = null, pdg = null, ancTids = null, intIds = null;
     if (lEvt) {
       const lVol = lEvt.get(vKey);
-      const d2tDs = lVol && (lVol.get('deposit_to_track') || lVol.get('segment_to_track'));
+      const d2tDs = lVol && lVol.get('deposit_to_track');
       if (d2tDs) {
         tids = new Int32Array(d2tDs.value);
         const trackIds = lVol.get('track_ids') ? new Int32Array(lVol.get('track_ids').value) : null;

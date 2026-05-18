@@ -111,15 +111,14 @@ def _volume_labels(hits_vol_group, track_lookup):
         Output of :func:`_build_track_lookup` for the matching edepsim
         event.
     """
-    d2g_key = 'deposit_to_group' if 'deposit_to_group' in hits_vol_group else 'segment_to_group'
-    if (d2g_key not in hits_vol_group
+    if ('deposit_to_group' not in hits_vol_group
             or 'group_to_track' not in hits_vol_group):
         empty = np.array([], dtype=np.int32)
         return dict(deposit_to_track=empty, track_ids=empty,
                     track_pdg=empty, track_interaction=empty,
                     track_cluster=empty, track_ancestor=empty)
 
-    dep_to_grp = hits_vol_group[d2g_key][:].astype(np.int32)
+    dep_to_grp = hits_vol_group['deposit_to_group'][:].astype(np.int32)
     g2t = hits_vol_group['group_to_track'][:].astype(np.int32)
 
     valid = (dep_to_grp >= 0) & (dep_to_grp < len(g2t))
