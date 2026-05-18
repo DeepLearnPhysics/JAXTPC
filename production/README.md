@@ -464,9 +464,9 @@ Typical event with ~170K deposits, group_size=5, threshold=2.0 ADC:
 
 | File | Per event | Per 1000 events |
 |---|---|---|
-| Response | ~2.4 MB | ~2.4 GB |
-| Segments | ~1.3 MB | ~1.3 GB |
-| Correspondence | ~8.0 MB | ~8.0 GB |
+| Sensor | ~2.4 MB | ~2.4 GB |
+| Edep | ~1.3 MB | ~1.3 GB |
+| Hits | ~8.0 MB | ~8.0 GB |
 | **Total** | **~11.7 MB** | **~11.7 GB** |
 
 Without correspondence (`--no-track-hits`): ~3.7 MB/event, ~3.7 GB per 1000 events.

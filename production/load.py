@@ -388,7 +388,7 @@ def load_event_hits(hits_path, event_idx, num_time_steps=None,
         nw_arr = f['config']['num_wires'][:]
 
         g2t_per_vol = []
-        s2g_per_vol = []
+        d2g_per_vol = []
         qs_per_vol = []
         for v in range(n_volumes):
             vol_key = f'volume_{v}'
@@ -397,13 +397,13 @@ def load_event_hits(hits_path, event_idx, num_time_steps=None,
                 g2t_per_vol.append(vol_grp['group_to_track'][:]
                                    if 'group_to_track' in vol_grp
                                    else np.array([0], dtype=np.int32))
-                s2g_per_vol.append(vol_grp['deposit_to_group'][:]
+                d2g_per_vol.append(vol_grp['deposit_to_group'][:]
                                    if 'deposit_to_group' in vol_grp else None)
                 qs_per_vol.append(vol_grp['qs_fractions'][:].astype(np.float32)
                                   if 'qs_fractions' in vol_grp else None)
             else:
                 g2t_per_vol.append(np.array([0], dtype=np.int32))
-                s2g_per_vol.append(None)
+                d2g_per_vol.append(None)
                 qs_per_vol.append(None)
 
         for v in range(n_volumes):
@@ -458,7 +458,7 @@ def load_event_hits(hits_path, event_idx, num_time_steps=None,
                         g2t_per_vol[v])
                     track_hits[(v, p)] = result
 
-    return track_hits, truth_dense, g2t_per_vol, s2g_per_vol, qs_per_vol
+    return track_hits, truth_dense, g2t_per_vol, d2g_per_vol, qs_per_vol
 
 
 # =============================================================================
@@ -484,7 +484,7 @@ def load_correspondence(hits_path, event_idx, v, num_time_steps=None):
     Returns
     -------
     dict with keys:
-        's2g'    (N_dep,) int32    — deposit_to_group (row-aligned with edep[v])
+        'd2g'    (N_dep,) int32    — deposit_to_group (row-aligned with edep[v])
         'qs'     (N_dep,) float32  — qs_fractions
         'g2t'    (n_groups,) int32 — group_to_track (optional label)
         'planes' {label: {'wire', 'time', 'charge', 'gid'}} — per-plane flat
@@ -498,7 +498,7 @@ def load_correspondence(hits_path, event_idx, v, num_time_steps=None):
         if vg_key not in evt:
             return None
         vg = evt[vg_key]
-        s2g = vg['deposit_to_group'][:]
+        d2g = vg['deposit_to_group'][:]
         qs  = vg['qs_fractions'][:].astype(np.float32)
         g2t = vg['group_to_track'][:]
 
@@ -517,7 +517,7 @@ def load_correspondence(hits_path, event_idx, v, num_time_steps=None):
                                       time=pk % num_time_steps,
                                       charge=ch, gid=gid)
 
-    return {'s2g': s2g, 'qs': qs, 'g2t': g2t, 'planes': planes}
+    return {'d2g': d2g, 'qs': qs, 'g2t': g2t, 'planes': planes}
 
 
 def deposit_charge_per_plane(corr, plane_label):
@@ -538,4 +538,4 @@ def deposit_charge_per_plane(corr, plane_label):
     d = corr['planes'][plane_label]
     grp_tot = np.bincount(d['gid'], weights=d['charge'],
                           minlength=corr['g2t'].size).astype(np.float32)
-    return corr['qs'] * grp_tot[corr['s2g']]
+    return corr['qs'] * grp_tot[corr['d2g']]
