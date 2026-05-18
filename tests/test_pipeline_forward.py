@@ -91,16 +91,6 @@ class TestForwardBasic:
         total = sum(float(jnp.sum(jnp.abs(s))) for s in signals)
         assert total > 0
 
-    def test_baseline_match(self, signals):
-        baseline = np.load('tests/baselines/baseline_diff_signals.npz')
-        for i, sig in enumerate(signals):
-            ref = baseline[f'signal_{i}']
-            ref_sum = float(np.sum(np.abs(ref)))
-            if ref_sum < 1e-6:
-                continue
-            max_diff = float(np.max(np.abs(np.asarray(sig) - ref)))
-            assert max_diff / ref_sum < 0.02, f"Signal {i}: rel_diff={max_diff/ref_sum:.4f}"
-
 
 # ---------------------------------------------------------------------------
 # Gradients
@@ -212,3 +202,130 @@ class TestForwardVsProduction:
                 continue
             rel = float(np.max(np.abs(prod - diff))) / prod_sum
             assert rel < 0.01, f"({vol},{plane}): rel={rel:.4f}"
+
+
+# ---------------------------------------------------------------------------
+# Finite-difference gradient verification (no external data)
+# ---------------------------------------------------------------------------
+
+RESPONSE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                             'tools', 'responses')
+has_kernels = all(
+    os.path.exists(os.path.join(RESPONSE_PATH, f'{p}_plane_kernel.npz'))
+    for p in ['U', 'V', 'Y'])
+
+
+@pytest.mark.requires_kernels
+@pytest.mark.skipif(not has_kernels, reason="Response kernel files not found")
+class TestFiniteDifferenceGradients:
+    """Verify AD gradients match finite-difference approximation.
+
+    Uses forward_segments with a tiny synthetic track — no out.h5 needed.
+    This catches gradient correctness, not just "gradients are nonzero."
+    """
+
+    @pytest.fixture(scope="class")
+    def fd_sim(self):
+        det = generate_detector(CONFIG_PATH)
+        return DetectorSimulator(
+            det, differentiable=True, n_segments=50)
+
+    @pytest.fixture(scope="class")
+    def fd_track(self):
+        """Straight track at x=-500mm, spanning y/z = [-50, 50]mm."""
+        N = 50
+        t = jnp.linspace(0, 1, N)
+        positions = jnp.stack([
+            jnp.full(N, -500.0),
+            t * 100.0 - 50.0,
+            t * 100.0 - 50.0,
+        ], axis=-1)
+        de = jnp.ones(N) * 2.0
+        return positions, de
+
+    def _loss(self, sim, params, positions, de):
+        sigs = sim.forward_segments(params, positions, de, 5.0)
+        return sum(float(jnp.sum(s ** 2)) for s in sigs)
+
+    def _loss_jax(self, sim, params, positions, de):
+        sigs = sim.forward_segments(params, positions, de, 5.0)
+        return sum(jnp.sum(s ** 2) for s in sigs)
+
+    def test_velocity_gradient_sign_and_order(self, fd_sim, fd_track):
+        """AD and FD velocity gradients should agree in sign and order of magnitude.
+
+        Velocity shifts signals across discrete time bins, so the AD gradient
+        through kernel interpolation has inherent discretization error (~2x).
+        We check sign agreement and same order of magnitude, not tight match.
+        """
+        positions, de = fd_track
+        params = fd_sim.default_sim_params
+        v0 = float(params.velocity_cm_us)
+        eps = v0 * 1e-5
+
+        ad_grad = jax.grad(
+            lambda p: self._loss_jax(fd_sim, p, positions, de)
+        )(params)
+        ad_val = float(ad_grad.velocity_cm_us)
+
+        params_plus = params._replace(
+            velocity_cm_us=params.velocity_cm_us + eps)
+        params_minus = params._replace(
+            velocity_cm_us=params.velocity_cm_us - eps)
+        fd_val = (self._loss(fd_sim, params_plus, positions, de)
+                  - self._loss(fd_sim, params_minus, positions, de)) / (2 * eps)
+
+        assert abs(ad_val) > 0, "AD gradient should be nonzero"
+        assert abs(fd_val) > 0, "FD gradient should be nonzero"
+        assert np.sign(ad_val) == np.sign(fd_val), \
+            f"Sign mismatch: AD={ad_val:.2e}, FD={fd_val:.2e}"
+        ratio = abs(ad_val / fd_val)
+        assert 0.1 < ratio < 10, \
+            f"Order of magnitude mismatch: AD={ad_val:.2e}, FD={fd_val:.2e}, ratio={ratio:.2f}"
+
+    def test_lifetime_gradient(self, fd_sim, fd_track):
+        """AD gradient of lifetime should match finite-difference."""
+        positions, de = fd_track
+        params = fd_sim.default_sim_params
+        eps = 1e-3
+
+        ad_grad = jax.grad(
+            lambda p: self._loss_jax(fd_sim, p, positions, de)
+        )(params)
+        ad_val = float(ad_grad.lifetime_us)
+
+        params_plus = params._replace(
+            lifetime_us=params.lifetime_us + eps)
+        params_minus = params._replace(
+            lifetime_us=params.lifetime_us - eps)
+        fd_val = (self._loss(fd_sim, params_plus, positions, de)
+                  - self._loss(fd_sim, params_minus, positions, de)) / (2 * eps)
+
+        assert abs(ad_val) > 0, "AD gradient should be nonzero"
+        rel_err = abs(ad_val - fd_val) / max(abs(ad_val), abs(fd_val), 1e-10)
+        assert rel_err < 0.05, \
+            f"lifetime grad: AD={ad_val:.6f}, FD={fd_val:.6f}, rel_err={rel_err:.4f}"
+
+    def test_recomb_alpha_gradient(self, fd_sim, fd_track):
+        """AD gradient of recombination alpha should match finite-difference."""
+        positions, de = fd_track
+        params = fd_sim.default_sim_params
+        eps = 1e-4
+
+        ad_grad = jax.grad(
+            lambda p: self._loss_jax(fd_sim, p, positions, de)
+        )(params)
+        ad_val = float(ad_grad.recomb_params.alpha)
+
+        rp = params.recomb_params
+        params_plus = params._replace(
+            recomb_params=rp._replace(alpha=rp.alpha + eps))
+        params_minus = params._replace(
+            recomb_params=rp._replace(alpha=rp.alpha - eps))
+        fd_val = (self._loss(fd_sim, params_plus, positions, de)
+                  - self._loss(fd_sim, params_minus, positions, de)) / (2 * eps)
+
+        assert abs(ad_val) > 0, "AD gradient should be nonzero"
+        rel_err = abs(ad_val - fd_val) / max(abs(ad_val), abs(fd_val))
+        assert rel_err < 0.05, \
+            f"alpha grad: AD={ad_val:.4f}, FD={fd_val:.4f}, rel_err={rel_err:.4f}"

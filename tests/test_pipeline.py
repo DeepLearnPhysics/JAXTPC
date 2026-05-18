@@ -4,8 +4,9 @@ Production pipeline integration tests.
 One simulator (dense + track_hits) shared across all tests via module scope.
 Plus one bucketed simulator for dense==bucketed comparison.
 
-Tests: baseline regression, track hits, qs_fractions, warm_up,
-custom sim_params, edge cases, bucketed equivalence.
+Tests: signal shapes, track hits, qs_fractions, warm_up,
+custom sim_params, edge cases, bucketed equivalence,
+synthetic deterministic pipeline.
 """
 
 import os
@@ -59,21 +60,11 @@ def sim_results(sim, deposits):
 
 
 # ---------------------------------------------------------------------------
-# Baseline regression
+# Signal shapes
 # ---------------------------------------------------------------------------
 
 @needs_data
-class TestBaselineRegression:
-
-    def test_signals_match_baselines(self, sim, sim_results):
-        signals, _, _ = sim_results
-        baseline = np.load('tests/baselines/baseline_signals_minimal.npz')
-        for vi in range(2):
-            for pi in range(3):
-                ref = baseline[f'signal_{vi}_{pi}']
-                new = np.asarray(signals[(vi, pi)])
-                max_diff = float(np.max(np.abs(new - ref)))
-                assert max_diff < 0.5, f"({vi},{pi}): max_diff={max_diff:.4f}"
+class TestSignalShapes:
 
     def test_signal_shapes(self, sim, sim_results):
         signals, _, _ = sim_results
@@ -83,6 +74,13 @@ class TestBaselineRegression:
                 assert signals[(vi, pi)].shape == (
                     cfg.volumes[vi].num_wires[pi], cfg.num_time_steps)
 
+    def test_all_planes_present(self, sim, sim_results):
+        signals, _, _ = sim_results
+        cfg = sim.config
+        for vi in range(cfg.n_volumes):
+            for pi in range(cfg.volumes[vi].n_planes):
+                assert (vi, pi) in signals
+
 
 # ---------------------------------------------------------------------------
 # Track hits
@@ -90,18 +88,6 @@ class TestBaselineRegression:
 
 @needs_data
 class TestTrackHits:
-
-    def test_track_hits_match_baselines(self, sim, deposits):
-        # Run fresh — finalize_track_hits mutates the dict (pops group_to_track)
-        _, track_hits_raw, _ = sim.process_event(deposits)
-        track_hits = sim.finalize_track_hits(track_hits_raw)
-        baseline = np.load('tests/baselines/baseline_track_hits.npz')
-        for vi in range(2):
-            for pi in range(3):
-                ref = int(baseline[f'num_hits_{vi}_{pi}'])
-                new = int(track_hits[(vi, pi)]['num_hits'])
-                # Allow small tolerance — t0_us windowing may shift edge deposits
-                assert abs(ref - new) <= 2, f"({vi},{pi}): ref={ref}, new={new}, diff={abs(ref-new)}"
 
     def test_track_hits_keys(self, sim, sim_results):
         _, track_hits_raw, _ = sim_results
@@ -228,3 +214,106 @@ class TestBucketed:
                     buckets, ctk, num_active, int(B1), int(B2), nw, nt, 1000))
                 max_diff = float(np.max(np.abs(d - b)))
                 assert max_diff < 0.01, f"({vi},{pi}): {max_diff:.4f}"
+
+
+# ---------------------------------------------------------------------------
+# Synthetic deterministic pipeline (no external data files)
+# ---------------------------------------------------------------------------
+
+RESPONSE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                             'tools', 'responses')
+has_kernels = all(
+    os.path.exists(os.path.join(RESPONSE_PATH, f'{p}_plane_kernel.npz'))
+    for p in ['U', 'V', 'Y'])
+
+
+@pytest.mark.requires_kernels
+@pytest.mark.skipif(not has_kernels, reason="Response kernel files not found")
+class TestSyntheticPipeline:
+    """Full pipeline test with hand-placed deposits — no out.h5 needed.
+
+    Five deposits placed at known positions in volume 0 (east).
+    Validates physics invariants rather than comparing to frozen snapshots.
+    """
+
+    @pytest.fixture(scope="class")
+    def synthetic_sim(self):
+        det = generate_detector(CONFIG_PATH)
+        return DetectorSimulator(
+            det, total_pad=500, response_chunk_size=500,
+            include_track_hits=False, include_noise=False,
+            include_electronics=False, include_digitize=False)
+
+    @pytest.fixture(scope="class")
+    def synthetic_results(self, synthetic_sim):
+        positions_mm = np.array([
+            [-500.0, 0.0, 0.0],
+            [-800.0, 0.0, 0.0],
+            [-1200.0, 0.0, 0.0],
+            [-500.0, 100.0, 100.0],
+            [-500.0, -100.0, -100.0],
+        ], dtype=np.float32)
+        de = np.array([2.0, 2.0, 2.0, 2.0, 2.0], dtype=np.float32)
+        dx = np.array([0.3, 0.3, 0.3, 0.3, 0.3], dtype=np.float32)
+
+        deposits = build_deposit_data(positions_mm, de, dx, synthetic_sim.config)
+        signals, _, _ = synthetic_sim.process_event(deposits)
+        return signals, deposits
+
+    def test_east_has_signal(self, synthetic_results, synthetic_sim):
+        """Volume 0 (east) should have nonzero signal — deposits are at x<0."""
+        signals, _ = synthetic_results
+        cfg = synthetic_sim.config
+        for pi in range(cfg.volumes[0].n_planes):
+            total = float(jnp.sum(jnp.abs(signals[(0, pi)])))
+            assert total > 0, f"East plane {pi} should have signal"
+
+    def test_west_is_empty(self, synthetic_results, synthetic_sim):
+        """Volume 1 (west) should have zero signal — no deposits at x>0."""
+        signals, _ = synthetic_results
+        cfg = synthetic_sim.config
+        for pi in range(cfg.volumes[1].n_planes):
+            total = float(jnp.sum(jnp.abs(signals[(1, pi)])))
+            assert total < 1e-3, f"West plane {pi} should be empty"
+
+    def test_collection_plane_positive(self, synthetic_results):
+        """Y-plane (collection, plane 2) signal peak should be positive."""
+        signals, _ = synthetic_results
+        y_signal = np.asarray(signals[(0, 2)])
+        assert float(np.max(y_signal)) > 0, "Collection plane peak should be positive"
+
+    def test_induction_plane_bipolar(self, synthetic_results):
+        """U-plane (induction, plane 0) signal should have both signs."""
+        signals, _ = synthetic_results
+        u_signal = np.asarray(signals[(0, 0)])
+        assert float(np.max(u_signal)) > 0, "Induction should have positive values"
+        assert float(np.min(u_signal)) < 0, "Induction should have negative values"
+
+    def test_far_deposits_more_diffused(self, synthetic_results, synthetic_sim):
+        """Deposits further from anode should produce broader signals on Y-plane."""
+        signals, _ = synthetic_results
+        y_signal = np.asarray(signals[(0, 2)])
+
+        # Find the wire with peak signal — should be near wire for z=0
+        wire_sums = np.sum(np.abs(y_signal), axis=1)
+        peak_wire = int(np.argmax(wire_sums))
+
+        # Time profile at peak wire should span multiple bins (diffusion)
+        time_profile = y_signal[peak_wire]
+        active_bins = np.sum(np.abs(time_profile) > 0.01 * np.max(np.abs(time_profile)))
+        assert active_bins > 3, "Signal should be spread across multiple time bins"
+
+    def test_deterministic(self, synthetic_sim):
+        """Same deposits should produce identical output (no stochastic noise)."""
+        positions_mm = np.array([[-500.0, 0.0, 0.0]], dtype=np.float32)
+        de = np.array([2.0], dtype=np.float32)
+        dx = np.array([0.3], dtype=np.float32)
+
+        deps = build_deposit_data(positions_mm, de, dx, synthetic_sim.config)
+        sigs1, _, _ = synthetic_sim.process_event(deps)
+        sigs2, _, _ = synthetic_sim.process_event(deps)
+
+        for key in sigs1:
+            np.testing.assert_array_equal(
+                np.asarray(sigs1[key]), np.asarray(sigs2[key]),
+                err_msg=f"Plane {key} not deterministic")

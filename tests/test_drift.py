@@ -117,7 +117,7 @@ class TestCorrectDriftForPlane:
         time = dist / 1.6
 
         corrected_dist, corrected_time = correct_drift_for_plane(
-            dist, time, 1.6, plane_dist_difference_cm=0.3)
+            dist, time, 1.6, 0.3)
 
         assert jnp.all(corrected_dist <= dist)
         assert jnp.all(corrected_time <= time)
@@ -139,7 +139,7 @@ class TestCorrectDriftForPlane:
         time = jnp.array([0.125], dtype=jnp.float32)
 
         corrected_dist, corrected_time = correct_drift_for_plane(
-            dist, time, 1.6, plane_dist_difference_cm=0.6)
+            dist, time, 1.6, 0.6)
 
         assert float(corrected_dist[0]) == 0.0
         assert float(corrected_time[0]) == 0.0
