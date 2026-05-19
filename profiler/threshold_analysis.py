@@ -295,6 +295,17 @@ def main():
                           detector_config_path=args.config)
             print(f'  Saved to {args.save_config}')
 
+    # Figures
+    from profiler.plots import plot_corr_threshold, plot_adc_threshold
+    if all_corr:
+        threshs = [r['threshold'] for r in all_corr]
+        kept = [1.0 - r['charge_lost_frac'] for r in all_corr]
+        plot_corr_threshold(threshs, kept)
+    if all_adc:
+        threshs = [r['threshold'] for r in all_adc]
+        kept = [1.0 - r['signal_lost_frac'] for r in all_adc]
+        plot_adc_threshold(threshs, kept)
+
     print()
 
 

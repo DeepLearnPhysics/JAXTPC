@@ -222,19 +222,32 @@ def main():
 
     detector_config = generate_detector(args.config)
 
+    from profiler.plots import plot_feature_timing, plot_param_sweep
+
     if args.sweep and not args.features_only:
         param_name = args.sweep[0]
         values = [int(v) for v in args.sweep[1:]]
-        run_param_sweep(
+        results = run_param_sweep(
             detector_config, args.data, args.event,
             param_name, values,
             args.total_pad, args.response_chunk, args.bucketed, args.max_buckets,
             args.hits_chunk, args.max_keys, args.runs, args.warmup)
+        if results:
+            vals = sorted(results.keys())
+            means = [results[v].mean_ms for v in vals]
+            stds = [results[v].std_ms for v in vals]
+            plot_param_sweep(vals, means, stds, param_name)
     else:
-        run_feature_sweep(
+        results = run_feature_sweep(
             detector_config, args.data, args.event,
             args.total_pad, args.response_chunk, args.bucketed, args.max_buckets,
             args.hits_chunk, args.max_keys, args.runs, args.warmup)
+        if results:
+            labels = [label for label, *_ in FEATURE_MODES if label in results]
+            means = [results[label].mean_ms for label in labels]
+            baseline = results.get('Baseline')
+            plot_feature_timing(labels, means,
+                                baseline_ms=baseline.mean_ms if baseline else None)
 
 
 if __name__ == '__main__':

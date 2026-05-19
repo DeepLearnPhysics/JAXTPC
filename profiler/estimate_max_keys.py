@@ -511,6 +511,13 @@ def main():
                       detector_config_path=args.config)
         print(f'\n  Saved to {args.save_config}')
 
+    # Figures
+    from profiler.plots import plot_keys_vs_deposits, plot_keys_ratio
+    tag = os.path.splitext(os.path.basename(args.data))[0]
+    print()
+    plot_keys_vs_deposits(deps, keys, info['total_pad'], suggestion,
+                          info['upper_max_ratio'], tag=tag)
+    plot_keys_ratio(deps, keys, tag=tag)
     print()
 
 

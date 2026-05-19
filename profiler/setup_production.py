@@ -226,7 +226,7 @@ def main():
 
     # Phase 1: response_chunk (track_hits OFF — max_keys irrelevant)
     print('\n  Phase 1: response_chunk_size (track_hits OFF)')
-    best_response = auto_search(
+    best_response, _, _ = auto_search(
         detector_config, args.data, args.event_bench, total_pad,
         'response_chunk', args.lo, args.hi,
         include_track_hits=False, fixed_response_chunk=50_000,
@@ -250,7 +250,7 @@ def main():
     best_hits = hits_divs[-1] if hits_divs else best_response
     if not args.skip_hits:
         print('\n  Phase 2: hits_chunk_size (track_hits ON)')
-        found = auto_search(
+        found, _, _ = auto_search(
             detector_config, args.data, args.event_bench, total_pad,
             'hits_chunk', args.lo, args.hi,
             include_track_hits=True, fixed_response_chunk=best_response,

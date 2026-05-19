@@ -97,7 +97,7 @@ def auto_search(detector_config, data_path, event_idx, total_pad,
     candidates = divisors_in_range(total_pad, lo, hi)
     if not candidates:
         print(f'  No divisors of {total_pad:,} in [{lo:,}, {hi:,}]!')
-        return None
+        return None, {}, {}
 
     print(f'  Candidates ({len(candidates)}): {candidates}')
 
@@ -152,7 +152,7 @@ def auto_search(detector_config, data_path, event_idx, total_pad,
             print(f'  {val:>15,}   {c:>12.1f} {"--":>12}')
     print(f'  {"─" * 60}')
 
-    return best
+    return best, coarse, fine
 
 
 def main():
@@ -190,7 +190,7 @@ def main():
     print('\n  Phase 1: response_chunk_size (track_hits OFF)')
     print('  ' + '─' * 56)
 
-    best_response = auto_search(
+    best_response, resp_coarse, resp_fine = auto_search(
         detector_config, args.data, args.event, args.total_pad,
         'response_chunk', args.lo, args.hi,
         include_track_hits=False, fixed_response_chunk=50_000,
@@ -202,11 +202,12 @@ def main():
 
     # Phase 2: hits_chunk_size (track_hits ON)
     best_hits = None
+    hits_coarse = {}
     if not args.skip_hits and best_response:
         print('\n  Phase 2: hits_chunk_size (track_hits ON)')
         print('  ' + '─' * 56)
 
-        best_hits = auto_search(
+        best_hits, hits_coarse, _ = auto_search(
             detector_config, args.data, args.event, args.total_pad,
             'hits_chunk', args.lo, args.hi,
             include_track_hits=True, fixed_response_chunk=best_response,
@@ -224,6 +225,17 @@ def main():
         print(f'  --response-chunk {best_response}')
     if best_hits:
         print(f'  --hits-chunk {best_hits}')
+
+    # Figures
+    from profiler.plots import plot_chunk_timing
+    if resp_coarse:
+        vals = sorted(resp_coarse.keys())
+        plot_chunk_timing(vals, [(resp_coarse[v], 0) for v in vals],
+                          'response_chunk_size', best_response)
+    if hits_coarse:
+        vals = sorted(hits_coarse.keys())
+        plot_chunk_timing(vals, [(hits_coarse[v], 0) for v in vals],
+                          'hits_chunk_size', best_hits)
 
     if args.save_config:
         from profiler.production_config import update_config

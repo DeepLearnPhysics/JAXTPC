@@ -185,6 +185,11 @@ def main():
                       detector_config_path=args.config)
         print(f'  Saved total_pad={chosen:,} to {args.save_config}')
 
+    # Figures
+    from profiler.plots import plot_deposit_distribution
+    tag = os.path.splitext(os.path.basename(args.data if not os.path.isdir(args.data) else 'scan'))[0]
+    print()
+    plot_deposit_distribution(counts_array, max_aligned, tag=tag)
     print()
 
 
