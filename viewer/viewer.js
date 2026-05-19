@@ -184,6 +184,20 @@ function deTex(){return lightMode?infernoTex:warmTex;}
 // ============================================================
 // DATA LOADING (via Worker)
 // ============================================================
+// Map each optical region to the earliest true deposit t0 of its interactions.
+// Uses tpc_t_step from the optical file itself (no edep/labl dependency).
+let optRegionRevealUs=null;
+function buildOptRegionReveal(){
+  optRegionRevealUs=null;
+  if(!lightData||!lightData.regionInteractions||!lightData.labelT0Us) return;
+  const lt=lightData.labelT0Us;
+  optRegionRevealUs=lightData.regionInteractions.map(ri=>{
+    let mn=Infinity;
+    for(const id of ri.ids){const t=lt[id];if(t!==undefined&&t<mn) mn=t;}
+    return mn===Infinity?0:mn;
+  });
+}
+
 function updateDriftUI(){
   const btn=document.getElementById('driftPlayPause');
   btn.innerHTML=driftPlaying?'&#x23F8;':'&#x25B6;';
@@ -247,6 +261,7 @@ async function loadEvent(idx){
   lightLoadedFor=-1; // invalidate cached light, load on demand
   if(curViewMode==='optical'){
     await loadLight(idx);
+    buildOptRegionReveal();
     if(lightData){ renderOptical(); renderOpticalFrame(null); }
   } else {
     precomputeAllPanelColors();
@@ -1302,23 +1317,22 @@ function highlightFromOptical(intId){
 }
 
 function renderOpticalDrift(){
-  // During drift: show base optical, mask regions not yet reached by simTime
+  // During drift: reveal optical regions when simTime reaches the earliest
+  // deposit t0 of their interactions. Light arrives at PMTs almost instantly,
+  // so regions flash on at ~t0 while the 3D charge drifts in over hundreds of µs.
   if(!lightData||!lightData._layout) return;
   const el=document.getElementById('panel2d');
   const cw=el.clientWidth, ch=el.clientHeight;
   ctx.clearRect(0,0,cw,ch);
   ctx.drawImage(offC,0,0,cw,ch);
 
-  // Mask unreached regions with dark overlay (left to right reveal)
   const L=lightData._layout;
   const rb=lightData.regionBounds;
   const ri=lightData.regionInteractions;
   ctx.fillStyle=sweepCol();
   for(let i=0;i<ri.length;i++){
-    // Region turns on when simTime >= region's activity start time (in µs)
-    const regionStartUs=ri[i].tStartUs;
-    if(simTime<regionStartUs){
-      // This region hasn't been reached yet — mask it
+    const revealUs=optRegionRevealUs?optRegionRevealUs[i]:ri[i].tStartUs;
+    if(simTime<revealUs){
       const x0=L.m.l+(rb[i]/lightData.totalBins)*L.pw;
       const x1=L.m.l+(rb[i+1]/lightData.totalBins)*L.pw;
       ctx.fillRect(x0,L.m.t,x1-x0,L.ph);
@@ -1973,6 +1987,7 @@ async function switchVolume(){
   precomputeAllPanelColors();
   resetPanelViews();
   if(curViewMode==='optical'&&lightData){
+    buildOptRegionReveal();
     renderOptical();
     renderOpticalFrame(null);
   } else {
@@ -2040,6 +2055,7 @@ async function switchViewMode(){
   updateCorrBtnState();
   if(curViewMode==='sensor') await loadSensor(curEvent);
   if(curViewMode==='optical') await loadLight(curEvent);
+  if(curViewMode==='optical'){buildOptRegionReveal();}
   if(curViewMode==='optical'&&lightData){
     renderOptical();
     renderOpticalFrame(null);

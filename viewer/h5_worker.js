@@ -429,9 +429,10 @@ function decodeLight(idx, activityThresh, gapNs) {
   const labelKeys = evt.keys().filter(k => k.startsWith('label_'));
   const labels = labelKeys.map(k => parseInt(k.split('_')[1])).sort((a, b) => a - b);
 
-  // Load all label chunks
+  // Load all label chunks + per-label true deposit t0 (from tpc_t_step)
   const allChunks = {}; // labelId -> [{chId, t0, wf}]
   const pePerLabel = {}; // labelId -> {total, perChannel}
+  const labelT0Us = {}; // labelId -> min(tpc_t_step) in µs (true deposit time)
   for (const lid of labels) {
     const g = evt.get('label_' + lid);
     if (!g) continue;
@@ -451,6 +452,15 @@ function decodeLight(idx, activityThresh, gapNs) {
     allChunks[lid] = chunks;
     pePerLabel[lid] = { total: 0, perChannel: Array.from(pe) };
     for (let i = 0; i < pe.length; i++) pePerLabel[lid].total += pe[i];
+
+    // True deposit time from TPC data embedded in the optical file
+    const tpcT = g.get('tpc_t_step');
+    if (tpcT) {
+      const arr = new Float32Array(tpcT.value);
+      let mn = Infinity;
+      for (let i = 0; i < arr.length; i++) if (arr[i] < mn) mn = arr[i];
+      labelT0Us[lid] = mn / 1000; // ns -> µs
+    }
   }
 
   // Find activity regions (skip label -1)
@@ -554,6 +564,7 @@ function decodeLight(idx, activityThresh, gapNs) {
     regionInteractions,
     pePerLabel,
     activeLabels,
+    labelT0Us,
   };
 }
 
