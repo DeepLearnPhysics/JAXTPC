@@ -442,12 +442,14 @@ def main():
         print(f'\n  Saved to {args.save_config}')
 
     # Figures
-    from profiler.plots import plot_keys_vs_deposits, plot_keys_ratio
+    from profiler.plots import (plot_keys_vs_deposits, plot_keys_ratio,
+                                plot_keys_distribution)
     tag = args.tag or os.path.splitext(os.path.basename(args.config))[0]
     print()
     plot_keys_vs_deposits(deps, keys, info['total_pad'], suggestion,
                           info['upper_max_ratio'], tag=tag)
     plot_keys_ratio(deps, keys, tag=tag)
+    plot_keys_distribution(maxes, suggestion, tag=tag)
     print()
 
 

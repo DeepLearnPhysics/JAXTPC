@@ -38,10 +38,52 @@ CORR_THRESHOLDS = [0, 1, 5, 10, 25, 50, 100, 200, 500]
 ADC_THRESHOLDS = [0, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 20.0]
 
 
+def auto_thresholds(values, n=10):
+    """Generate threshold sweep from data range.
+
+    Uses logarithmic spacing from P1 to P99 of |values|.
+    """
+    abs_vals = np.abs(values[values != 0]) if len(values) > 0 else np.array([1.0])
+    if len(abs_vals) == 0:
+        return np.array([0.0])
+    lo = max(np.percentile(abs_vals, 1), 1e-6)
+    hi = np.percentile(abs_vals, 99)
+    if hi <= lo:
+        return np.array([0.0, lo])
+    threshs = np.concatenate([[0.0], np.geomspace(lo, hi, n)])
+    return threshs
+
+
+def collect_corr_values(track_hits_raw):
+    """Collect all charge values from track hits for range detection."""
+    all_ch = []
+    for pk, raw in track_hits_raw.items():
+        if not isinstance(pk, tuple):
+            continue
+        count = int(raw[4])
+        if count > 0:
+            all_ch.append(np.asarray(raw[3][:count], dtype=np.float32))
+    return np.concatenate(all_ch) if all_ch else np.array([])
+
+
+def collect_signal_values(response_signals, cfg):
+    """Collect all signal values from response for range detection."""
+    from tools.output import to_dense
+    dense = to_dense(response_signals, cfg)
+    all_sig = []
+    for arr in dense.values():
+        a = np.asarray(arr).ravel()
+        nz = a[a != 0]
+        if len(nz) > 0:
+            all_sig.append(nz)
+    return np.concatenate(all_sig) if all_sig else np.array([])
+
+
 def analyze_corr_threshold(track_hits_raw, cfg, thresholds):
     """Sweep corr_threshold values on raw track_hits output.
 
-    For each threshold, measure how much charge is dropped from correspondence.
+    Uses abs(charge) for thresholding to handle both wire (positive)
+    and pixel (signed bipolar) track hits.
     """
     results = []
     for thresh in thresholds:
@@ -50,24 +92,25 @@ def analyze_corr_threshold(track_hits_raw, cfg, thresholds):
         total_entries = 0
         kept_entries = 0
 
-        for (vol_idx, plane_idx), raw in track_hits_raw.items():
-            if not isinstance((vol_idx, plane_idx), tuple):
+        for pk, raw in track_hits_raw.items():
+            if not isinstance(pk, tuple):
                 continue
             sk, tk, gk, ch, count, _ = raw
             P = int(count)
             if P == 0:
                 continue
             chs = np.asarray(ch[:P], dtype=np.float32)
+            abs_chs = np.abs(chs)
 
-            total_charge += float(np.sum(chs))
+            total_charge += float(np.sum(abs_chs))
             total_entries += P
 
             if thresh > 0:
-                keep = chs > thresh
-                kept_charge += float(np.sum(chs[keep]))
+                keep = abs_chs > thresh
+                kept_charge += float(np.sum(abs_chs[keep]))
                 kept_entries += int(np.sum(keep))
             else:
-                kept_charge += float(np.sum(chs))
+                kept_charge += float(np.sum(abs_chs))
                 kept_entries += P
 
         lost_charge = total_charge - kept_charge
@@ -136,21 +179,21 @@ def analyze_adc_threshold(response_signals, cfg, thresholds):
 
 
 def print_corr_results(results):
-    print(f'\n  {"Thresh (e-)":>12} {"Kept Charge":>14} {"Lost %":>8} '
+    print(f'\n  {"Threshold":>12} {"Kept |Charge|":>14} {"Lost %":>8} '
           f'{"Kept Entries":>14} {"Dropped %":>10}')
     print(f'  {"─" * 62}')
     for r in results:
-        print(f'  {r["threshold"]:>12.0f} {r["kept_charge"]:>14,.0f} '
+        print(f'  {r["threshold"]:>12.3g} {r["kept_charge"]:>14,.0f} '
               f'{r["charge_lost_frac"]*100:>7.3f}% '
               f'{r["kept_entries"]:>14,} {r["entries_dropped_frac"]*100:>9.1f}%')
 
 
 def print_adc_results(results):
-    print(f'\n  {"Thresh (ADC)":>12} {"Kept Signal":>14} {"Lost %":>8} '
+    print(f'\n  {"Threshold":>12} {"Kept |Signal|":>14} {"Lost %":>8} '
           f'{"Kept Bins":>14} {"Dropped %":>10}')
     print(f'  {"─" * 62}')
     for r in results:
-        print(f'  {r["threshold"]:>12.1f} {r["kept_signal"]:>14,.0f} '
+        print(f'  {r["threshold"]:>12.3g} {r["kept_signal"]:>14,.0f} '
               f'{r["signal_lost_frac"]*100:>7.3f}% '
               f'{r["kept_bins"]:>14,} {r["bins_dropped_frac"]*100:>9.1f}%')
 
@@ -183,9 +226,6 @@ def main():
 
     args = parser.parse_args()
 
-    corr_thresholds = args.corr_values if args.corr_values else CORR_THRESHOLDS
-    adc_thresholds = args.adc_values if args.adc_values else ADC_THRESHOLDS
-
     detector_config = generate_detector(args.config)
 
     do_corr = args.mode in ('both', 'corr')
@@ -213,6 +253,33 @@ def main():
     print(f'  Device:   {jax.devices()[0]}')
 
     sim.warm_up()
+
+    # Run first event to detect value ranges for auto thresholds
+    key = jax.random.PRNGKey(args.seed)
+    key, subkey = jax.random.split(key)
+    probe_deposits = load_event(args.data, sim.config, event_idx=args.event)
+    probe_resp, probe_hits, _ = sim.process_event(probe_deposits, key=subkey)
+    sync_result(probe_resp)
+
+    if args.corr_values:
+        corr_thresholds = args.corr_values
+    elif do_corr:
+        ch_vals = collect_corr_values(probe_hits)
+        corr_thresholds = auto_thresholds(ch_vals)
+        print(f'  Auto corr thresholds: {[f"{v:.2f}" for v in corr_thresholds]}')
+    else:
+        corr_thresholds = CORR_THRESHOLDS
+
+    if args.adc_values:
+        adc_thresholds = args.adc_values
+    elif do_adc:
+        sig_vals = collect_signal_values(probe_resp, sim.config)
+        adc_thresholds = auto_thresholds(sig_vals)
+        print(f'  Auto ADC thresholds:  {[f"{v:.2f}" for v in adc_thresholds]}')
+    else:
+        adc_thresholds = ADC_THRESHOLDS
+
+    del probe_resp, probe_hits, probe_deposits
 
     # Accumulate results across events
     all_corr = None
@@ -274,12 +341,12 @@ def main():
 
     # Print results
     if all_corr:
-        print(f'\n  Correspondence Threshold (corr_threshold, electrons)')
+        print(f'\n  Correspondence Threshold (corr_threshold)')
         print(f'  Accumulated over {args.events} event(s)')
         print_corr_results(all_corr)
 
     if all_adc:
-        print(f'\n  ADC Threshold (threshold_adc)')
+        print(f'\n  Signal Threshold (threshold_adc)')
         print(f'  Accumulated over {args.events} event(s)')
         print_adc_results(all_adc)
 

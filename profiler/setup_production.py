@@ -182,10 +182,12 @@ def main():
     print(f'  Extrapolated to {total_pad:,}: {keys_info["extrapolated"]:,}')
     print(f'  Rounded:               {max_keys:,}')
 
-    from profiler.plots import plot_keys_vs_deposits, plot_keys_ratio
+    from profiler.plots import (plot_keys_vs_deposits, plot_keys_ratio,
+                                plot_keys_distribution)
     plot_keys_vs_deposits(keys_info['all_deps'], keys_info['all_keys'],
                           total_pad, max_keys, keys_info['upper_max_ratio'], tag=tag)
     plot_keys_ratio(keys_info['all_deps'], keys_info['all_keys'], tag=tag)
+    plot_keys_distribution(keys_info['all_event_maxes'], max_keys, tag=tag)
 
     # ── Step 3: Probe max_buckets (if bucketed) ─────────────────────────
 

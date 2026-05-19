@@ -48,6 +48,29 @@ def plot_deposit_distribution(all_counts, total_pad, tag=''):
     return _savefig(fig, name)
 
 
+def plot_keys_distribution(event_maxes, max_keys, tag=''):
+    """Histogram of per-event max keys.
+
+    Parameters
+    ----------
+    event_maxes : np.ndarray, shape (n_events,)
+    max_keys : int
+    """
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.hist(event_maxes, bins=50, color='steelblue', edgecolor='white', linewidth=0.5)
+    ax.axvline(max_keys, color='red', linestyle='--', linewidth=1.5,
+               label=f'max_keys = {max_keys:,}')
+    pcts = np.percentile(event_maxes, [50, 99])
+    ax.axvline(pcts[0], color='gray', linestyle=':', linewidth=1, label=f'P50 = {int(pcts[0]):,}')
+    ax.axvline(pcts[1], color='orange', linestyle=':', linewidth=1, label=f'P99 = {int(pcts[1]):,}')
+    ax.set_xlabel('Max keys per event')
+    ax.set_ylabel('Events')
+    ax.set_title('Max Keys Distribution')
+    ax.legend(fontsize=8)
+    name = f'keys_distribution{"_" + tag if tag else ""}.png'
+    return _savefig(fig, name)
+
+
 def plot_keys_vs_deposits(deps, keys, total_pad, max_keys, upper_max_ratio, tag=''):
     """Scatter of estimated keys vs deposit count per volume.
 
@@ -139,11 +162,13 @@ def plot_corr_threshold(thresholds, charge_kept_frac, tag=''):
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(thresholds, np.array(charge_kept_frac) * 100, 'o-',
             color='steelblue', markersize=5, linewidth=1.2)
-    ax.set_xlabel('corr_threshold (electrons)')
-    ax.set_ylabel('Charge kept (%)')
-    ax.set_title('Track Hits Charge Retention vs Threshold')
+    ax.set_xlabel('corr_threshold')
+    ax.set_ylabel('|Charge| kept (%)')
+    ax.set_title('Track Hits Retention vs Threshold')
     ax.set_ylim(bottom=0)
     ax.grid(True, alpha=0.3)
+    if max(thresholds) > 10 * min(t for t in thresholds if t > 0):
+        ax.set_xscale('symlog', linthresh=min(t for t in thresholds if t > 0))
     name = f'corr_threshold{"_" + tag if tag else ""}.png'
     return _savefig(fig, name)
 
@@ -159,11 +184,13 @@ def plot_adc_threshold(thresholds, signal_kept_frac, tag=''):
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(thresholds, np.array(signal_kept_frac) * 100, 'o-',
             color='steelblue', markersize=5, linewidth=1.2)
-    ax.set_xlabel('threshold_adc (ADC)')
-    ax.set_ylabel('Signal kept (%)')
-    ax.set_title('Sensor Signal Retention vs ADC Threshold')
+    ax.set_xlabel('threshold_adc')
+    ax.set_ylabel('|Signal| kept (%)')
+    ax.set_title('Sensor Signal Retention vs Threshold')
     ax.set_ylim(bottom=0)
     ax.grid(True, alpha=0.3)
+    if max(thresholds) > 10 * min(t for t in thresholds if t > 0):
+        ax.set_xscale('symlog', linthresh=min(t for t in thresholds if t > 0))
     name = f'adc_threshold{"_" + tag if tag else ""}.png'
     return _savefig(fig, name)
 
