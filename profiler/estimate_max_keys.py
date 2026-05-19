@@ -351,21 +351,37 @@ def estimate_keys_for_event(pstep_data, sim_config, extent_tables,
     return results, vol_deps
 
 
-def estimate_max_keys(data_path, config_path, events=None,
+def _resolve_data_paths(data_arg):
+    """Resolve a single path, list of paths, or directory to a list of HDF5 files."""
+    import glob
+    if isinstance(data_arg, str):
+        data_arg = [data_arg]
+    paths = []
+    for p in data_arg:
+        if os.path.isdir(p):
+            paths.extend(sorted(glob.glob(os.path.join(p, '*.h5'))))
+        else:
+            paths.append(p)
+    return paths
+
+
+def estimate_max_keys(data_paths, config_path, events_per_file=None,
                       total_pad=None, group_size=5, gap_threshold=5.0,
                       round_to=100_000, pixel_kernel_path=None):
-    """Estimate max_keys from deposit data.
+    """Estimate max_keys from deposit data across one or more files.
 
-    Scans all events, computes per-volume keys and deposit counts, then
-    extrapolates to total_pad using the upper-envelope keys/deps ratio.
+    Parameters
+    ----------
+    data_paths : str or list of str
+        HDF5 file(s) or directory to scan.
 
     Returns (suggestion, details_dict).
     """
+    h5_files = _resolve_data_paths(data_paths)
+
     detector_config = generate_detector(config_path)
     sim_config = create_sim_config(detector_config)
 
-    from profiler.find_optimal_pad import get_volume_ranges, count_deposits_per_volume
-    volume_ranges = get_volume_ranges(detector_config)
     num_s = 16
 
     # Build extent tables per volume
@@ -385,35 +401,42 @@ def estimate_max_keys(data_path, config_path, events=None,
             extent_tables[v] = build_wire_extent_table(
                 vol_geom.diffusion, num_s=num_s)
 
-    with h5py.File(data_path, 'r') as f:
-        ds = f['pstep/lar_vol']
-        n_events = ds.shape[0]
-        if events is not None:
-            n_events = min(n_events, events)
+    all_deps = []
+    all_keys = []
+    all_event_maxes = []
+    total_scanned = 0
 
-        all_deps = []
-        all_keys = []
-        all_event_maxes = []
+    for fpath in h5_files:
+        fname = os.path.basename(fpath)
+        with h5py.File(fpath, 'r') as f:
+            ds = f['pstep/lar_vol']
+            n_events = ds.shape[0]
+            if events_per_file is not None:
+                n_events = min(n_events, events_per_file)
 
-        for i in range(n_events):
-            pstep = ds[i]
-            event_keys, event_vol_deps = estimate_keys_for_event(
-                pstep, sim_config, extent_tables,
-                group_size=group_size, gap_threshold_mm=gap_threshold)
+            for i in range(n_events):
+                pstep = ds[i]
+                event_keys, event_vol_deps = estimate_keys_for_event(
+                    pstep, sim_config, extent_tables,
+                    group_size=group_size, gap_threshold_mm=gap_threshold)
 
-            event_max = 0
-            for v_idx, n_dep in event_vol_deps.items():
-                if n_dep == 0:
-                    continue
-                vol = sim_config.volumes[v_idx]
-                n_planes = vol.n_planes if vol.readout_type == 'wire' else 1
-                vol_max = max(
-                    (event_keys.get((v_idx, p), 0) for p in range(n_planes)),
-                    default=0)
-                all_deps.append(n_dep)
-                all_keys.append(vol_max)
-                event_max = max(event_max, vol_max)
-            all_event_maxes.append(event_max)
+                event_max = 0
+                for v_idx, n_dep in event_vol_deps.items():
+                    if n_dep == 0:
+                        continue
+                    vol = sim_config.volumes[v_idx]
+                    n_planes = vol.n_planes if vol.readout_type == 'wire' else 1
+                    vol_max = max(
+                        (event_keys.get((v_idx, p), 0) for p in range(n_planes)),
+                        default=0)
+                    all_deps.append(n_dep)
+                    all_keys.append(vol_max)
+                    event_max = max(event_max, vol_max)
+                all_event_maxes.append(event_max)
+
+            total_scanned += n_events
+        if len(h5_files) > 1:
+            print(f'  {fname}: {n_events} events scanned')
 
     deps = np.array(all_deps)
     keys = np.array(all_keys)
@@ -430,7 +453,8 @@ def estimate_max_keys(data_path, config_path, events=None,
     suggestion = int(math.ceil(extrapolated / round_to) * round_to)
 
     return suggestion, {
-        'n_events': n_events,
+        'n_events': total_scanned,
+        'n_files': len(h5_files),
         'max_observed_keys': int(keys.max()),
         'max_observed_deps': int(deps.max()),
         'total_pad': total_pad,
@@ -445,10 +469,11 @@ def estimate_max_keys(data_path, config_path, events=None,
 def main():
     parser = argparse.ArgumentParser(
         description='Estimate max_keys from deposit geometry (no simulation)')
-    parser.add_argument('--data', required=True, help='Input HDF5 file')
+    parser.add_argument('--data', required=True, nargs='+',
+                        help='Input HDF5 file(s) or directory')
     parser.add_argument('--config', required=True, help='Detector geometry YAML')
     parser.add_argument('--events', type=int, default=None,
-                        help='Max events to scan (default: all)')
+                        help='Max events per file to scan (default: all)')
     parser.add_argument('--total-pad', type=int, default=None,
                         help='Total pad to extrapolate to (default: from data)')
     parser.add_argument('--group-size', type=int, default=5)
@@ -464,12 +489,15 @@ def main():
     print('=' * 70)
     print(' JAXTPC — Estimate max_keys (no simulation)')
     print('=' * 70)
-    print(f'  Data:      {args.data}')
+    h5_files = _resolve_data_paths(args.data)
+    print(f'  Files:     {len(h5_files)}')
+    for p in h5_files:
+        print(f'    {p}')
     print(f'  Config:    {args.config}')
 
     suggestion, info = estimate_max_keys(
-        args.data, args.config,
-        events=args.events,
+        args.data,  args.config,
+        events_per_file=args.events,
         total_pad=args.total_pad,
         group_size=args.group_size,
         gap_threshold=args.gap_threshold,
@@ -482,7 +510,7 @@ def main():
     keys = info['all_keys']
     ratio = keys / np.maximum(deps, 1)
 
-    print(f'  Events:    {info["n_events"]}')
+    print(f'  Events:    {info["n_events"]} across {info["n_files"]} file(s)')
     print(f'  Total pad: {info["total_pad"]:,}')
     print()
 
@@ -513,7 +541,7 @@ def main():
 
     # Figures
     from profiler.plots import plot_keys_vs_deposits, plot_keys_ratio
-    tag = os.path.splitext(os.path.basename(args.data))[0]
+    tag = os.path.splitext(os.path.basename(args.config))[0]
     print()
     plot_keys_vs_deposits(deps, keys, info['total_pad'], suggestion,
                           info['upper_max_ratio'], tag=tag)

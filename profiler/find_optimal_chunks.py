@@ -37,6 +37,19 @@ def divisors_in_range(total, lo, hi):
     return sorted(d for d in range(max(1, lo), hi + 1) if total % d == 0)
 
 
+def select_candidates(total, lo, hi, max_candidates=7):
+    """Pick geometrically-spaced divisors of total in [lo, hi].
+
+    Returns at most max_candidates divisors, spread across the range.
+    Falls back to all divisors if fewer than max_candidates exist.
+    """
+    all_divs = divisors_in_range(total, lo, hi)
+    if len(all_divs) <= max_candidates:
+        return all_divs
+    indices = np.linspace(0, len(all_divs) - 1, max_candidates).astype(int)
+    return [all_divs[i] for i in np.unique(indices)]
+
+
 def _time_sim(sim, deposits, n_iter):
     """Run n_iter process_event calls, return list of wall times in ms."""
     key = jax.random.PRNGKey(42)
@@ -94,7 +107,7 @@ def auto_search(detector_config, data_path, event_idx, total_pad,
                 fixed_response_chunk, max_keys, bucketed,
                 n_coarse=3, n_fine=10):
     """Two-pass search over divisors of total_pad in [lo, hi]."""
-    candidates = divisors_in_range(total_pad, lo, hi)
+    candidates = select_candidates(total_pad, lo, hi)
     if not candidates:
         print(f'  No divisors of {total_pad:,} in [{lo:,}, {hi:,}]!')
         return None, {}, {}
@@ -116,10 +129,11 @@ def auto_search(detector_config, data_path, event_idx, total_pad,
             n_coarse, label=f'{val:>8,}')
         coarse[val] = mean
 
-    # Top 3
+    # Top candidates for fine pass
     ranked = sorted(coarse, key=lambda k: coarse[k])
-    top3 = ranked[:3]
-    print(f'\n  Top 3: {[f"{v:,}" for v in top3]}')
+    n_fine_candidates = min(3, len(ranked))
+    top3 = ranked[:n_fine_candidates]
+    print(f'\n  Top {n_fine_candidates}: {[f"{v:,}" for v in top3]}')
 
     # Fine pass
     print(f'\n  Fine pass ({n_fine} iters each):')
