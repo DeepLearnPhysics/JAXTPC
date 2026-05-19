@@ -75,6 +75,8 @@ def main():
                         help='Skip hits_chunk optimization')
     parser.add_argument('--group-size', type=int, default=5)
     parser.add_argument('--gap-threshold', type=float, default=5.0)
+    parser.add_argument('--tag', default=None,
+                        help='Tag for figure filenames (default: config name)')
 
     args = parser.parse_args()
 
@@ -87,7 +89,7 @@ def main():
         base = os.path.splitext(os.path.basename(args.config))[0]
         args.output = f'config/production_{base}.yaml'
 
-    tag = os.path.splitext(os.path.basename(args.config))[0]
+    tag = args.tag or os.path.splitext(os.path.basename(args.config))[0]
 
     print('=' * 70)
     print(' JAXTPC — Production Setup')

@@ -483,6 +483,8 @@ def main():
                         help='Path to pixel response NPZ (pixel readout only)')
     parser.add_argument('--save-config', default=None,
                         help='Save max_keys to production config YAML')
+    parser.add_argument('--tag', default=None,
+                        help='Tag for figure filenames (default: config name)')
 
     args = parser.parse_args()
 
@@ -541,7 +543,7 @@ def main():
 
     # Figures
     from profiler.plots import plot_keys_vs_deposits, plot_keys_ratio
-    tag = os.path.splitext(os.path.basename(args.config))[0]
+    tag = args.tag or os.path.splitext(os.path.basename(args.config))[0]
     print()
     plot_keys_vs_deposits(deps, keys, info['total_pad'], suggestion,
                           info['upper_max_ratio'], tag=tag)
