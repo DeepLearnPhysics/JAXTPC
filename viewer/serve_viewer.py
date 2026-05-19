@@ -23,7 +23,11 @@ from socketserver import ThreadingMixIn
 from glob import glob
 
 KINDS = ('edep', 'hits', 'sensor')
-OPTIONAL_KINDS = ('labl', 'optical')
+OPTIONAL_KINDS = ('labl', 'sensor_optical', 'optical')
+
+# sensor_optical → optical in the manifest (GOOP PMT readout stored separately
+# from JAXTPC TPC wire readout but served under the same 'optical' key).
+KIND_ALIASES = {'sensor_optical': 'optical'}
 
 
 # ── File discovery ──────────────────────────────────────────────
@@ -43,7 +47,8 @@ def find_h5_files(prod_dir):
         files = sorted(set(os.path.abspath(f) for f in files))
         files = [f for f in files if '_lzf' not in f]
         if files:
-            found[kind] = files
+            canonical = KIND_ALIASES.get(kind, kind)
+            found[canonical] = files
     return found
 
 
