@@ -67,7 +67,10 @@ def save_config(path, values, detector_config_path=None):
 
     for key in CONFIG_FIELDS:
         if key in values:
-            data[key] = values[key]
+            v = values[key]
+            if hasattr(v, 'item'):
+                v = v.item()
+            data[key] = v
 
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, 'w') as f:
