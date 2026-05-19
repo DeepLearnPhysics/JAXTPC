@@ -29,8 +29,6 @@ from tools.geometry import generate_detector
 from tools.config import create_track_hits_config
 from tools.simulation import DetectorSimulator
 from tools.loader import load_event
-from tools.output import to_dense
-
 from profiler.timing import sync_result
 
 
@@ -68,12 +66,15 @@ def collect_corr_values(track_hits_raw):
 
 def collect_signal_values(response_signals, cfg):
     """Collect all signal values from response for range detection."""
-    from tools.output import to_dense
-    dense = to_dense(response_signals, cfg)
+    from tools.output import to_sparse
+    sparse = to_sparse(response_signals, cfg, threshold_adc=0.0)
     all_sig = []
-    for arr in dense.values():
-        a = np.asarray(arr).ravel()
-        nz = a[a != 0]
+    for sp in sparse.values():
+        if isinstance(sp, dict):
+            vals = np.asarray(sp['values'], dtype=np.float32)
+        else:
+            vals = np.asarray(sp, dtype=np.float32).ravel()
+        nz = vals[vals != 0]
         if len(nz) > 0:
             all_sig.append(nz)
     return np.concatenate(all_sig) if all_sig else np.array([])
@@ -131,12 +132,14 @@ def analyze_corr_threshold(track_hits_raw, cfg, thresholds):
 
 
 def analyze_adc_threshold(response_signals, cfg, thresholds):
-    """Sweep threshold_adc values on dense signals.
+    """Sweep threshold_adc values on signal output.
 
-    For each threshold, measure how much signal is lost.
+    Works on sparse output directly when available (pixel), falls back
+    to dense for wire.  For each threshold, measure how much signal is lost.
     """
-    # Convert to dense once
-    dense = to_dense(response_signals, cfg)
+    from tools.output import to_sparse
+
+    sparse = to_sparse(response_signals, cfg, threshold_adc=0.0)
 
     results = []
     for thresh in thresholds:
@@ -145,20 +148,23 @@ def analyze_adc_threshold(response_signals, cfg, thresholds):
         total_nonzero = 0
         kept_nonzero = 0
 
-        for (vol_idx, plane_idx), arr in dense.items():
-            arr_np = np.asarray(arr)
-            abs_arr = np.abs(arr_np)
+        for (vol_idx, plane_idx), sp in sparse.items():
+            if isinstance(sp, dict):
+                vals = np.asarray(sp['values'], dtype=np.float32)
+            else:
+                vals = np.asarray(sp, dtype=np.float32).ravel()
+            abs_vals = np.abs(vals)
+            nz = abs_vals > 0
 
-            total_signal += float(np.sum(abs_arr))
-            nz = abs_arr > 0
+            total_signal += float(np.sum(abs_vals[nz]))
             total_nonzero += int(np.sum(nz))
 
             if thresh > 0:
-                keep = abs_arr >= thresh
-                kept_signal += float(np.sum(abs_arr[keep]))
+                keep = abs_vals >= thresh
+                kept_signal += float(np.sum(abs_vals[keep]))
                 kept_nonzero += int(np.sum(keep))
             else:
-                kept_signal += float(np.sum(abs_arr[nz]))
+                kept_signal += float(np.sum(abs_vals[nz]))
                 kept_nonzero += int(np.sum(nz))
 
         lost_signal = total_signal - kept_signal

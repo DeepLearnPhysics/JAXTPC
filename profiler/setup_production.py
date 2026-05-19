@@ -77,6 +77,14 @@ def main():
     parser.add_argument('--gap-threshold', type=float, default=5.0)
     parser.add_argument('--tag', default=None,
                         help='Tag for figure filenames (default: config name)')
+    parser.add_argument('--skip-chunks', action='store_true',
+                        help='Skip chunk optimization, use --default-chunk value')
+    parser.add_argument('--default-chunk', type=int, default=5_000,
+                        help='Default chunk size when skipping optimization (default: 5000)')
+    parser.add_argument('--run-thresholds', action='store_true',
+                        help='Run threshold analysis to calibrate corr_threshold and threshold_adc')
+    parser.add_argument('--threshold-events', type=int, default=3,
+                        help='Events to use for threshold analysis (default: 3)')
 
     args = parser.parse_args()
 
@@ -256,64 +264,210 @@ def main():
 
     # ── Step 4: Find optimal chunks ─────────────────────────────────────
 
-    print('\n' + '─' * 70)
-    print(' Step 4: Finding optimal chunk sizes')
-    print('─' * 70)
-    print(f'  total_pad: {total_pad:,}, max_keys: {max_keys:,}')
-
-    from profiler.find_optimal_chunks import auto_search
-    from profiler.plots import plot_chunk_timing
-    import h5py
-
-    bench_file = h5_files[0]
-    with h5py.File(bench_file, 'r') as f:
-        n_bench_events = f['pstep/lar_vol'].shape[0]
-    bench_event = np.random.RandomState(42).randint(0, n_bench_events)
-    print(f'  Benchmark: {os.path.basename(bench_file)} event {bench_event}')
-
-    # Phase 1: response_chunk (track_hits OFF)
-    print('\n  Phase 1: response_chunk_size (track_hits OFF)')
-    best_response, resp_coarse, _ = auto_search(
-        detector_config, bench_file, bench_event, total_pad,
-        'response_chunk', args.lo, args.hi,
-        include_track_hits=False, fixed_response_chunk=50_000,
-        max_keys=max_keys, bucketed=args.bucketed,
-        n_coarse=args.n_coarse, n_fine=args.n_fine)
-
-    if not best_response:
-        best_response = 50_000
-        print(f'  No optimal found, using default: {best_response:,}')
+    if args.skip_chunks:
+        best_response = args.default_chunk
+        best_hits = args.default_chunk
+        if total_pad % best_response != 0:
+            total_pad = round_up_to_multiple(total_pad, best_response)
+        if total_pad % best_hits != 0:
+            from profiler.find_optimal_chunks import divisors_in_range as _div
+            hits_divs = _div(total_pad, 1000, best_hits)
+            best_hits = hits_divs[-1] if hits_divs else best_response
+        print(f'\n  Skipping chunk optimization — using defaults:')
+        print(f'    response_chunk = {best_response:,}')
+        print(f'    hits_chunk     = {best_hits:,}')
     else:
-        print(f'  Best response_chunk: {best_response:,}')
 
-    if resp_coarse:
-        vals = sorted(resp_coarse.keys())
-        plot_chunk_timing(vals, [(resp_coarse[v], 0) for v in vals],
-                          'response_chunk_size', best_response, tag=tag)
+        print('\n' + '─' * 70)
+        print(' Step 4: Finding optimal chunk sizes')
+        print('─' * 70)
+        print(f'  total_pad: {total_pad:,}, max_keys: {max_keys:,}')
 
-    # Re-align total_pad to response_chunk if needed
-    if total_pad % best_response != 0:
-        total_pad = round_up_to_multiple(total_pad, best_response)
-        print(f'  Re-aligned total_pad to {total_pad:,}')
+        from profiler.find_optimal_chunks import auto_search
+        from profiler.plots import plot_chunk_timing
+        import h5py
 
-    # Phase 2: hits_chunk (track_hits ON, uses real max_keys)
-    hits_divs = divisors_in_range(total_pad, 1000, 25_000)
-    best_hits = hits_divs[-1] if hits_divs else best_response
-    if not args.skip_hits:
-        print('\n  Phase 2: hits_chunk_size (track_hits ON)')
-        found, hits_coarse, _ = auto_search(
+        bench_file = h5_files[0]
+        with h5py.File(bench_file, 'r') as f:
+            n_bench_events = f['pstep/lar_vol'].shape[0]
+        bench_event = np.random.RandomState(42).randint(0, n_bench_events)
+        print(f'  Benchmark: {os.path.basename(bench_file)} event {bench_event}')
+
+        # Phase 1: response_chunk (track_hits OFF)
+        print('\n  Phase 1: response_chunk_size (track_hits OFF)')
+        best_response, resp_coarse, _ = auto_search(
             detector_config, bench_file, bench_event, total_pad,
-            'hits_chunk', args.lo, args.hi,
-            include_track_hits=True, fixed_response_chunk=best_response,
+            'response_chunk', args.lo, args.hi,
+            include_track_hits=False, fixed_response_chunk=50_000,
             max_keys=max_keys, bucketed=args.bucketed,
             n_coarse=args.n_coarse, n_fine=args.n_fine)
-        if found:
-            best_hits = found
-            print(f'  Best hits_chunk: {best_hits:,}')
-        if hits_coarse:
-            vals = sorted(hits_coarse.keys())
-            plot_chunk_timing(vals, [(hits_coarse[v], 0) for v in vals],
-                              'hits_chunk_size', best_hits, tag=tag)
+
+        if not best_response:
+            best_response = 50_000
+            print(f'  No optimal found, using default: {best_response:,}')
+        else:
+            print(f'  Best response_chunk: {best_response:,}')
+
+        if resp_coarse:
+            vals = sorted(resp_coarse.keys())
+            plot_chunk_timing(vals, [(resp_coarse[v], 0) for v in vals],
+                              'response_chunk_size', best_response, tag=tag)
+
+        # Re-align total_pad to response_chunk if needed
+        if total_pad % best_response != 0:
+            total_pad = round_up_to_multiple(total_pad, best_response)
+            print(f'  Re-aligned total_pad to {total_pad:,}')
+
+        # Phase 2: hits_chunk (track_hits ON, uses real max_keys)
+        hits_divs = divisors_in_range(total_pad, 1000, 25_000)
+        best_hits = hits_divs[-1] if hits_divs else best_response
+        if not args.skip_hits:
+            print('\n  Phase 2: hits_chunk_size (track_hits ON)')
+            found, hits_coarse, _ = auto_search(
+                detector_config, bench_file, bench_event, total_pad,
+                'hits_chunk', args.lo, args.hi,
+                include_track_hits=True, fixed_response_chunk=best_response,
+                max_keys=max_keys, bucketed=args.bucketed,
+                n_coarse=args.n_coarse, n_fine=args.n_fine)
+            if found:
+                best_hits = found
+                print(f'  Best hits_chunk: {best_hits:,}')
+            if hits_coarse:
+                vals = sorted(hits_coarse.keys())
+                plot_chunk_timing(vals, [(hits_coarse[v], 0) for v in vals],
+                                  'hits_chunk_size', best_hits, tag=tag)
+
+    # ── Step 5: Threshold analysis (optional) ─────────────────────────
+
+    chosen_corr = 25.0
+    chosen_adc = 2.0
+
+    if args.run_thresholds:
+        print('\n' + '─' * 70)
+        print(' Step 5: Threshold analysis')
+        print('─' * 70)
+
+        import gc
+        from tools.simulation import DetectorSimulator
+        from tools.config import create_track_hits_config
+        from tools.loader import load_event
+        from profiler.timing import sync_result
+        from profiler.threshold_analysis import (
+            collect_corr_values, collect_signal_values, auto_thresholds,
+            analyze_corr_threshold, analyze_adc_threshold,
+            print_corr_results, print_adc_results,
+        )
+        from profiler.plots import plot_corr_threshold, plot_adc_threshold
+
+        jax.clear_caches()
+        gc.collect()
+
+        track_config = create_track_hits_config(
+            max_keys=max_keys, hits_chunk_size=best_hits)
+        thresh_sim = DetectorSimulator(
+            detector_config,
+            total_pad=total_pad,
+            response_chunk_size=best_response,
+            include_track_hits=True,
+            track_config=track_config,
+        )
+        thresh_sim.warm_up()
+
+        bench_file = h5_files[0]
+        key = jax.random.PRNGKey(42)
+        n_thresh = min(args.threshold_events, total_scanned)
+
+        # Probe first event for auto thresholds
+        key, subkey = jax.random.split(key)
+        probe_dep = load_event(bench_file, thresh_sim.config, event_idx=0)
+        probe_resp, probe_hits, _ = thresh_sim.process_event(probe_dep, key=subkey)
+        sync_result(probe_resp)
+
+        corr_vals = collect_corr_values(probe_hits)
+        corr_thresholds = auto_thresholds(corr_vals)
+        sig_vals = collect_signal_values(probe_resp, thresh_sim.config)
+        adc_thresholds = auto_thresholds(sig_vals)
+
+        print(f'  Auto corr thresholds: {[f"{v:.2f}" for v in corr_thresholds]}')
+        print(f'  Auto ADC thresholds:  {[f"{v:.2f}" for v in adc_thresholds]}')
+        del probe_resp, probe_hits, probe_dep
+
+        # Accumulate across events
+        all_corr = None
+        all_adc = None
+        key = jax.random.PRNGKey(42)
+
+        for i in range(n_thresh):
+            key, subkey = jax.random.split(key)
+            deposits = load_event(bench_file, thresh_sim.config, event_idx=i)
+            n_deps = sum(v.n_actual for v in deposits.volumes)
+            print(f'  Event {i}: {n_deps:,} deposits')
+
+            response_signals, track_hits_raw, _ = thresh_sim.process_event(
+                deposits, key=subkey)
+            sync_result(response_signals)
+
+            corr_results = analyze_corr_threshold(
+                track_hits_raw, thresh_sim.config, corr_thresholds)
+            if all_corr is None:
+                all_corr = [{k: 0.0 for k in r} for r in corr_results]
+                for j, r in enumerate(corr_results):
+                    all_corr[j]['threshold'] = r['threshold']
+            for j, r in enumerate(corr_results):
+                all_corr[j]['total_charge'] += r['total_charge']
+                all_corr[j]['kept_charge'] += r['kept_charge']
+                all_corr[j]['total_entries'] += r['total_entries']
+                all_corr[j]['kept_entries'] += r['kept_entries']
+
+            adc_results = analyze_adc_threshold(
+                response_signals, thresh_sim.config, adc_thresholds)
+            if all_adc is None:
+                all_adc = [{k: 0.0 for k in r} for r in adc_results]
+                for j, r in enumerate(adc_results):
+                    all_adc[j]['threshold'] = r['threshold']
+            for j, r in enumerate(adc_results):
+                all_adc[j]['total_signal'] += r['total_signal']
+                all_adc[j]['kept_signal'] += r['kept_signal']
+                all_adc[j]['total_bins'] += r['total_bins']
+                all_adc[j]['kept_bins'] += r['kept_bins']
+
+        del thresh_sim
+
+        # Recompute fractions and print
+        for r in all_corr:
+            tc = r['total_charge']
+            r['charge_lost_frac'] = (tc - r['kept_charge']) / tc if tc > 0 else 0
+            te = r['total_entries']
+            r['entries_dropped_frac'] = 1.0 - (r['kept_entries'] / te) if te > 0 else 0
+        for r in all_adc:
+            ts = r['total_signal']
+            r['signal_lost_frac'] = (ts - r['kept_signal']) / ts if ts > 0 else 0
+            tb = r['total_bins']
+            r['bins_dropped_frac'] = 1.0 - (r['kept_bins'] / tb) if tb > 0 else 0
+
+        print(f'\n  Correspondence Threshold')
+        print_corr_results(all_corr)
+        print(f'\n  Signal Threshold')
+        print_adc_results(all_adc)
+
+        # Pick thresholds: highest that keeps >= 99% charge/signal
+        for r in reversed(all_corr):
+            if r['charge_lost_frac'] <= 0.01:
+                chosen_corr = r['threshold']
+                break
+        for r in reversed(all_adc):
+            if r['signal_lost_frac'] <= 0.01:
+                chosen_adc = r['threshold']
+                break
+
+        print(f'\n  Chosen corr_threshold: {chosen_corr:.3g} (keeps >= 99% charge)')
+        print(f'  Chosen threshold_adc:  {chosen_adc:.3g} (keeps >= 99% signal)')
+
+        # Plots
+        corr_kept = [1.0 - r['charge_lost_frac'] for r in all_corr]
+        adc_kept = [1.0 - r['signal_lost_frac'] for r in all_adc]
+        plot_corr_threshold([r['threshold'] for r in all_corr], corr_kept, tag=tag)
+        plot_adc_threshold([r['threshold'] for r in all_adc], adc_kept, tag=tag)
 
     # ── Save ────────────────────────────────────────────────────────────
 
@@ -323,8 +477,8 @@ def main():
         'hits_chunk': best_hits,
         'max_keys': max_keys,
         'inter_thresh': 1.0,
-        'threshold_adc': 2.0,
-        'corr_threshold': 25.0,
+        'threshold_adc': chosen_adc,
+        'corr_threshold': chosen_corr,
         'max_buckets': max_buckets,
     }
 
