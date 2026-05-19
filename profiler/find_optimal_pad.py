@@ -61,8 +61,8 @@ def round_up_to_multiple(value, multiple):
 def main():
     parser = argparse.ArgumentParser(
         description='Find optimal total_pad from event data')
-    parser.add_argument('--data', required=True,
-                        help='HDF5 file or directory of HDF5 files')
+    parser.add_argument('--data', required=True, nargs='+',
+                        help='HDF5 file(s) or directory')
     parser.add_argument('--config', required=True,
                         help='Detector geometry YAML')
     parser.add_argument('--events', type=int, default=None,
@@ -81,13 +81,15 @@ def main():
     n_volumes = len(volume_ranges)
 
     # Collect H5 files
-    if os.path.isdir(args.data):
-        h5_files = sorted(glob.glob(os.path.join(args.data, '*.h5')))
-        if not h5_files:
-            print(f"No .h5 files found in {args.data}")
-            return
-    else:
-        h5_files = [args.data]
+    h5_files = []
+    for p in args.data:
+        if os.path.isdir(p):
+            h5_files.extend(sorted(glob.glob(os.path.join(p, '*.h5'))))
+        else:
+            h5_files.append(p)
+    if not h5_files:
+        print("No .h5 files found!")
+        return
 
     print('=' * 70)
     print(' JAXTPC — Find Optimal total_pad')
@@ -187,7 +189,7 @@ def main():
 
     # Figures
     from profiler.plots import plot_deposit_distribution
-    tag = os.path.splitext(os.path.basename(args.data if not os.path.isdir(args.data) else 'scan'))[0]
+    tag = os.path.splitext(os.path.basename(args.config))[0]
     print()
     plot_deposit_distribution(counts_array, max_aligned, tag=tag)
     print()
