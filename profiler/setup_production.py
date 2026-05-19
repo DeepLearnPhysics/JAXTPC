@@ -1,10 +1,11 @@
 """
-One-shot production setup: scan data for total_pad, probe max_keys,
+One-shot production setup: scan data for total_pad, estimate max_keys,
 find optimal chunks, save config.
 
 Steps:
   1. Scan events → total_pad (no sim)
-  2. Probe max_keys with large buffer → set safe value (one sim build)
+  2. Estimate max_keys from deposit geometry (no sim — uses per-deposit
+     2sigma diffusion kernel sizing; scans all events)
   3. Find optimal response_chunk and hits_chunk (multiple sim builds)
   4. Save everything to a production config YAML
 
@@ -44,23 +45,23 @@ def main():
                         help='Events to scan for total_pad (default: all)')
     parser.add_argument('--event-bench', type=int, default=0,
                         help='Event index for chunk benchmarks (default: 0)')
-    parser.add_argument('--use-max', action='store_true',
-                        help='Use max deposit count instead of p99.9 for total_pad')
+    parser.add_argument('--use-p999', action='store_true',
+                        help='Use p99.9 deposit count instead of max for total_pad')
     parser.add_argument('--bucketed', action='store_true')
-    parser.add_argument('--probe-max-keys', type=int, default=8_000_000,
-                        help='Large max_keys for probing actual counts (default: 8M)')
     parser.add_argument('--probe-max-buckets', type=int, default=100_000,
                         help='Large max_buckets for probing active tiles (default: 100k)')
-    parser.add_argument('--headroom', type=float, default=1.5,
-                        help='Multiply observed max entries by this (default: 1.5)')
+    parser.add_argument('--headroom', type=float, default=1.3,
+                        help='Multiply observed max entries by this (default: 1.3)')
     parser.add_argument('--probe-events', type=int, default=5,
-                        help='Events to probe for max_keys/max_buckets (default: 5)')
+                        help='Events to probe for max_buckets (default: 5)')
     parser.add_argument('--n-coarse', type=int, default=3)
     parser.add_argument('--n-fine', type=int, default=10)
     parser.add_argument('--lo', type=int, default=1_000)
     parser.add_argument('--hi', type=int, default=100_000)
     parser.add_argument('--skip-hits', action='store_true',
                         help='Skip hits_chunk optimization')
+    parser.add_argument('--group-size', type=int, default=5)
+    parser.add_argument('--gap-threshold', type=float, default=5.0)
 
     args = parser.parse_args()
 
@@ -113,9 +114,9 @@ def main():
     print(f'  Scanned {n_events} events')
     print(f'  Max-across-volumes: P50={int(pcts[0]):,}, P99.9={int(pcts[1]):,}, Max={int(pcts[2]):,}')
 
-    raw_pad = int(pcts[2]) if args.use_max else int(pcts[1])
+    raw_pad = int(pcts[1]) if args.use_p999 else int(pcts[2])
     total_pad_10k = round_up_to_multiple(raw_pad, 10_000)
-    label = 'max' if args.use_max else 'p99.9'
+    label = 'p99.9' if args.use_p999 else 'max'
     print(f'  Using {label}: {raw_pad:,} → rounded to 10k: {total_pad_10k:,}')
 
     # Ensure divisors exist in chunk search range, bump if needed
@@ -128,70 +129,25 @@ def main():
     else:
         total_pad = total_pad_10k
 
-    # ── Step 2: Probe max_keys ──────────────────────────────────────────
+    # ── Step 2: Estimate max_keys ────────────────────────────────────────
 
     print('\n' + '─' * 70)
-    print(' Step 2: Probing max_keys with representative events')
+    print(' Step 2: Estimating max_keys from deposit geometry (all events)')
     print('─' * 70)
 
-    from tools.config import create_track_hits_config
-    from tools.simulation import DetectorSimulator
-    from tools.loader import load_event
-    from profiler.timing import sync_result
+    from profiler.estimate_max_keys import estimate_max_keys
 
-    # Use a temporary response_chunk that divides total_pad
-    temp_response_chunk = candidates[len(candidates) // 2] if candidates else 50_000
-    # Also need hits_chunk to divide total_pad
-    hits_candidates = divisors_in_range(total_pad, args.lo, args.hi)
-    temp_hits_chunk = hits_candidates[len(hits_candidates) // 2] if hits_candidates else 25_000
-
-    probe_track_config = create_track_hits_config(
-        max_keys=args.probe_max_keys,
-        hits_chunk_size=temp_hits_chunk)
-
-    probe_sim = DetectorSimulator(
-        detector_config,
+    max_keys, keys_info = estimate_max_keys(
+        args.data, args.config,
+        events=n_events,
         total_pad=total_pad,
-        response_chunk_size=temp_response_chunk,
-        include_track_hits=True,
-        track_config=probe_track_config,
-    )
-    probe_sim.warm_up()
+        group_size=args.group_size,
+        gap_threshold=args.gap_threshold)
 
-    max_count = 0
-    key = jax.random.PRNGKey(42)
-    n_probe = min(args.probe_events, n_events)
-
-    for i in range(n_probe):
-        key, subkey = jax.random.split(key)
-        deposits = load_event(args.data, probe_sim.config, event_idx=i)
-        n_deps = sum(v.n_actual for v in deposits.volumes)
-
-        _, track_hits_raw, _ = probe_sim.process_event(deposits, key=subkey)
-        sync_result(track_hits_raw)
-
-        event_max = 0
-        for pk, raw in track_hits_raw.items():
-            if not isinstance(pk, tuple):
-                continue
-            c = int(raw[4])
-            event_max = max(event_max, c)
-
-        max_count = max(max_count, event_max)
-        overflow = event_max >= args.probe_max_keys
-        warn = ' *** OVERFLOW ***' if overflow else ''
-        print(f'  Event {i}: {n_deps:,} deps, max entries/plane = {event_max:,}{warn}')
-
-    del probe_sim
-
-    raw_max_keys = int(max_count * args.headroom)
-    max_keys = round_up_to_multiple(raw_max_keys, 100_000)
-
-    print(f'\n  Observed max: {max_count:,}')
-    print(f'  × {args.headroom} headroom, rounded: {max_keys:,}')
-
-    if max_count >= args.probe_max_keys:
-        print(f'  WARNING: Hit probe limit! Re-run with larger --probe-max-keys')
+    print(f'  Max observed keys:     {keys_info["max_observed_keys"]:,}')
+    print(f'  Upper-half max ratio:  {keys_info["upper_max_ratio"]:.3f}')
+    print(f'  Extrapolated to {total_pad:,}: {keys_info["extrapolated"]:,}')
+    print(f'  Rounded:               {max_keys:,}')
 
     # ── Step 3: Probe max_buckets (if bucketed) ─────────────────────────
 
@@ -206,8 +162,15 @@ def main():
         print('─' * 70)
 
         import gc
+        from tools.simulation import DetectorSimulator
+        from tools.loader import load_event
+        from profiler.timing import sync_result
+
         jax.clear_caches()
         gc.collect()
+
+        # Use a temporary response_chunk that divides total_pad
+        temp_response_chunk = candidates[len(candidates) // 2] if candidates else 50_000
 
         probe_bucket_sim = DetectorSimulator(
             detector_config,
@@ -221,6 +184,7 @@ def main():
 
         max_active = 0
         key = jax.random.PRNGKey(42)
+        n_probe = min(args.probe_events, n_events)
         for i in range(n_probe):
             key, subkey = jax.random.split(key)
             deposits = load_event(args.data, probe_bucket_sim.config, event_idx=i)
