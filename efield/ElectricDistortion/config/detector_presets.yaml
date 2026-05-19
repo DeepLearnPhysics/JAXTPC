@@ -1,0 +1,61 @@
+# Detector presets for Space Charge Effect simulation
+# ===================================================
+# Each preset defines the drift volume geometry and operating parameters.
+# For detectors with multiple drift volumes, Lx is the distance per volume;
+# run the simulation separately for each volume.
+
+microboone:
+  Lx: 256.0      # cm (drift distance, anode to cathode)
+  Ly: 233.0      # cm (height)
+  Lz: 1036.0     # cm (length)
+  E0: 273.0      # V/cm
+  # Effective Q calibrated to published MicroBooNE data (~3-8 cm transverse distortions)
+  Q_charge_production: 3.0e-11   # C/m^3/s
+  depth: "surface"
+  num_drift_volumes: 1
+
+sbnd:
+  Lx: 200.0      # cm per drift volume
+  Ly: 400.0      # cm
+  Lz: 500.0      # cm
+  E0: 500.0      # V/cm
+  Q_charge_production: 2.0e-10
+  depth: "surface"
+  num_drift_volumes: 2
+
+icarus:
+  Lx: 150.0      # cm per drift volume
+  Ly: 390.0      # cm
+  Lz: 1960.0     # cm
+  E0: 500.0      # V/cm
+  Q_charge_production: 2.0e-10
+  depth: "surface"
+  num_drift_volumes: 4
+
+dune_fd_hd:
+  Lx: 350.0      # cm per drift volume (3.5 m, horizontal drift)
+  Ly: 1200.0     # cm (~12 m)
+  Lz: 5800.0     # cm (~58 m)
+  E0: 500.0      # V/cm
+  Q_charge_production: 0.0    # deep underground, negligible cosmic rate
+  depth: "underground_4300mwe"
+  num_drift_volumes: 2
+
+dune_fd_vd:
+  Lx: 650.0      # cm per drift volume (6.5 m, vertical drift)
+  Ly: 1350.0     # cm (13.5 m)
+  Lz: 6000.0     # cm (60 m)
+  E0: 500.0      # V/cm
+  Q_charge_production: 0.0    # deep underground
+  depth: "underground_4300mwe"
+  num_drift_volumes: 2
+
+jaxtpc:
+  # Default JAXTPC cubic detector (one drift volume = half of full detector)
+  Lx: 216.0      # cm (half of 432 cm, single drift volume)
+  Ly: 432.0      # cm
+  Lz: 432.0      # cm
+  E0: 500.0      # V/cm (matches cubic_wireplane_config.yaml)
+  Q_charge_production: 3.0e-11
+  depth: "surface"
+  num_drift_volumes: 2
