@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-JAXTPC is a GPU-accelerated physics simulation framework for modeling liquid argon Time Projection Chambers (TPCs) used in neutrino physics experiments. It simulates the full detector response chain: charge recombination, electron drift with lifetime attenuation, diffusion-convolved wire response via DCT-based kernel interpolation, optional electronics shaping, noise injection, and ADC digitization. The framework supports both production batch processing and a differentiable path for gradient-based optimization.
+JAXTPC is a GPU-accelerated physics simulation framework for modeling liquid argon Time Projection Chambers (TPCs) used in neutrino physics experiments. It simulates the full detector response chain: charge recombination, electron drift with lifetime attenuation, diffusion-convolved wire/pixel response via DCT-based kernel interpolation, optional electronics shaping, noise injection, and ADC digitization. Supports arbitrary multi-volume detector geometries (SBND, MicroBooNE, ICARUS, DUNE FD1, DUNE ND-LAr) with both wire and pixel readout. The framework supports both production batch processing and a differentiable path for gradient-based optimization.
 
 ## Repository Structure
 
@@ -38,14 +38,29 @@ JAXTPC/
 │   ├── run_batch.py           # CLI batch simulator → structured HDF5 output
 │   ├── save.py                # HDF5 writers (sensor/edep/hits with delta + CSR encoding)
 │   ├── load.py                # HDF5 readers + minimal viz config builder
+│   ├── make_labl.py           # Separate writer: per-track labl/ files (stand-in)
 │   └── view_production.ipynb  # Visualize production output (no sim needed)
+├── profiler/                  # Production parameter auto-tuning
+│   ├── setup_production.py    # One-shot pad/chunks/max_keys/thresholds config
+│   ├── find_optimal_pad.py    # Scan data → total_pad
+│   ├── find_optimal_chunks.py # Two-pass timing → response_chunk, hits_chunk
+│   ├── find_optimal_max_keys.py / find_optimal_max_buckets.py
+│   ├── threshold_analysis.py  # Post-sim sweep → threshold_adc, corr_threshold
+│   └── benchmark_sim.py       # Feature/parameter timing sweeps
+├── tests/                     # Pytest suite (77 tests, CPU-only, synthetic data)
+│   └── conftest.py            # Fixtures: jax_key, minimal_detector_config, ...
+├── viewer/                    # Interactive 3D/2D HTML viewer + GIF export
+│   ├── serve_viewer.py        # Local HTTP server with byte-range HDF5 support
+│   └── export_gif.py          # Standalone rotating 3D GIF/MP4 generator
 ├── config/                    # Detector configurations
 │   ├── cubic_wireplane_config.yaml  # Default: dual-TPC, SBND-scale, U/V/Y planes
-│   ├── sbnd_config.yaml, microboone_config.yaml, icarus_config.yaml, ...
+│   ├── sbnd_config.yaml, microboone_config.yaml, icarus_config.yaml,
+│   │   dune_ndlar_config.yaml (70 volumes), dune_fd1_config.yaml,
+│   │   pixel_cube_config.yaml (pixel readout test)
 │   ├── noise_spectrum.npz     # Empirical noise spectral shape
 │   └── sce_jaxtpc.h5          # Space charge effect correction maps
 ├── run_simulation.ipynb       # Interactive single-event simulation notebook
-└── closure_analysis*/         # Physics closure test notebooks
+└── run_pixel_simulation.ipynb # Pixel-readout single-event notebook
 ```
 
 ## Core Architecture
@@ -65,11 +80,15 @@ Construction builds per-volume closures for SCE, response, electronics, noise, d
 
 The detector is defined as N independent volumes in YAML. Each volume has its own:
 - Spatial range, drift direction (+1 or -1), anode position
-- Wire planes (U/V/Y) with independent angles, spacings, wire counts
+- Readout planes: wire (U/V/Y with independent angles/spacings/counts) or pixel
 - Diffusion parameters derived from max drift distance
 - Response kernels, noise model, electronics, SCE maps
 
 Deposits are split by x-position into volumes during loading (`build_deposit_data`), padded to a fixed `total_pad` per volume for stable JIT shapes.
+
+**Local coordinates.** The loader transforms deposits to volume-local frame (`x_local = drift_direction * (x_anode - x_global)` ≥ 0; y/z centered). All volumes share reference geometry in local frame, so the JIT body uses fixed constants — no per-volume geometry indexing inside the scan. Sensor file save applies the inverse transform before writing.
+
+**Volume iteration.** Controlled by `iterate_mode` at simulator construction: `'scan'` (default, `lax.scan`) or `'vmap'`. One compiled body handles any N volumes.
 
 ### Configuration System
 
@@ -165,7 +184,15 @@ response_signals, track_hits_raw, deposits = simulator.process_event(deposits, k
 ```bash
 python3 production/run_batch.py --data events.h5 --events 100 --dataset myrun --outdir output/
 python3 production/run_batch.py --data events.h5 --noise --electronics --bucketed --workers 2
+
+# Recommended: generate optimized config with profiler, then use it
+python3 -m profiler.setup_production --data events.h5 --config config/cubic_wireplane_config.yaml
+python3 production/run_batch.py --data events.h5 \
+    --config config/cubic_wireplane_config.yaml \
+    --production-config config/production_cubic_wireplane_config.yaml
 ```
+
+The profiler scans data and probes the simulator to set `total_pad`, `response_chunk`, `hits_chunk`, `max_keys`, `max_buckets`, `threshold_adc`, `corr_threshold`, `inter_thresh`. Without it, mis-sized `total_pad`/`max_keys`/`max_buckets` raise `RuntimeError` at runtime. See `profiler/README.md`.
 
 Produces three HDF5 file types per batch:
 - `{dataset}_sensor_{NNNN}.h5` — sparse thresholded raw readout (delta-encoded, uint16 if digitized)
@@ -184,6 +211,26 @@ viz_config = build_viz_config('output/sensor/sim_sensor_0000.h5')
 dense_signals, attrs, pedestals = load_event_sensor(sensor_path, event_idx=0)
 volumes = load_event_edep(edep_path, event_idx=0)
 track_hits, truth_dense, g2t = load_event_hits(hits_path, event_idx=0, num_time_steps=2701)
+```
+
+### Tests
+```bash
+# Fast tests only (~7s)
+JAX_PLATFORM_NAME=cpu python3 -m pytest tests/ -v -m "not slow"
+
+# Full suite, includes integration (~90s) — requires response kernel NPZ files
+JAX_PLATFORM_NAME=cpu python3 -m pytest tests/ -v
+
+# Single test
+JAX_PLATFORM_NAME=cpu python3 -m pytest tests/test_recombination.py::test_mip_survival -v
+```
+
+All tests run CPU-only on synthetic data. Markers: `slow` (kernel-dependent integration), `requires_config`, `requires_kernels`. Fixtures live in `tests/conftest.py`. See `tests/TESTS.md` for the full module-by-module breakdown.
+
+### Interactive viewer / GIF export
+```bash
+python3 viewer/serve_viewer.py output/ --open               # browser viewer
+python3 viewer/export_gif.py output/edep/sim_edep_0000.h5 --event 0
 ```
 
 ## Key Technical Patterns
@@ -221,7 +268,9 @@ track_hits, truth_dense, g2t = load_event_hits(hits_path, event_idx=0, num_time_
 ## Development Notes
 
 - Use `python3` (not `python`) on this system
-- No formal test suite — validation via physics closure tests and analysis notebooks
+- Tests live in `tests/` (pytest, CPU-only); see the Tests section above for commands
 - JIT compilation causes initial warmup; `simulator.warm_up()` triggers it with dummy data
-- Memory management important for large events (500k+ deposits per volume)
+- Memory management important for large events (500k+ deposits per volume) — use `--bucketed` (required for pixel readout) and/or the profiler to size capacities
 - Response kernels stored as NPZ in `tools/responses/` (U/V/Y plane types)
+- Group ids in production `hits/` files are **1-based** (entry `group_to_track[0]` is unused); see `production/README.md` for the full correspondence schema
+- Do not add Claude as a `Co-Authored-By` trailer on commits
