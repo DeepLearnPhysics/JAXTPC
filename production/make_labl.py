@@ -50,6 +50,13 @@ import time
 import h5py
 import numpy as np
 
+# Register blosc/zstd/lz4 HDF5 filters so hits output written with the
+# default run_batch codec (blosc-zstd) is readable. No-op if absent.
+try:
+    import hdf5plugin  # noqa: F401
+except ImportError:
+    pass
+
 # Ensure tools/ is importable when run from project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

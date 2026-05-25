@@ -203,6 +203,8 @@ A fourth file, `{dataset}_labl_{NNNN}.h5`, carries per-track labels and the per-
 
 Threaded save architecture: main thread runs GPU sim, worker threads encode CSR + write HDF5 in parallel.
 
+**Output compression** (`--codec`, default `blosc-zstd`): all datasets are compressed with the codec set via `production/save.py:set_codec`. blosc-zstd is smaller than gzip *and* faster on both read and write (gzip is Pareto-dominated). Alternatives: `blosc-lz4hc` (gzip's size, ~4× faster reads), `blosc-lz4` (fastest read+write, +19% size), `gzip`, `lzf`. **Reading non-gzip output requires `import hdf5plugin`** — `production/load.py` and pimm-data's readers register it automatically; ad-hoc `h5py` consumers must import it themselves. Re-encode existing files between codecs with `pimm-data/scripts/transcode_codec.py`.
+
 ### Loading production output
 ```python
 from production.load import build_viz_config, load_event_sensor, load_event_edep, load_event_hits
@@ -263,6 +265,7 @@ python3 viewer/export_gif.py output/edep/sim_edep_0000.h5 --event 0
 - NumPy (host-side array operations)
 - Matplotlib (visualization)
 - H5py (HDF5 I/O)
+- hdf5plugin (blosc/zstd/lz4 HDF5 filters — required to read production output, whose default codec is blosc-zstd)
 - PyYAML (YAML config parsing)
 
 ## Development Notes

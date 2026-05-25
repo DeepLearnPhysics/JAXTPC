@@ -13,6 +13,13 @@ import numpy as np
 import h5py
 from collections import namedtuple
 
+# Register blosc/zstd/lz4 HDF5 filters so output written with run_batch
+# --codec (default blosc-zstd) is transparently readable. No-op if absent.
+try:
+    import hdf5plugin  # noqa: F401
+except ImportError:
+    pass
+
 
 _PLANE_LABELS = {0: 'U', 1: 'V', 2: 'Y'}
 

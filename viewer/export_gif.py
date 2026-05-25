@@ -15,6 +15,13 @@ import os
 import sys
 import numpy as np
 import h5py
+
+# Register blosc/zstd/lz4 HDF5 filters so edep output written with the
+# default run_batch codec (blosc-zstd) is readable. No-op if absent.
+try:
+    import hdf5plugin  # noqa: F401
+except ImportError:
+    pass
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.animation import FuncAnimation, PillowWriter

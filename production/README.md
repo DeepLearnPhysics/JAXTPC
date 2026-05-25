@@ -86,6 +86,7 @@ See `profiler/` for individual scripts to tune each parameter separately.
 | `--events` | all | Number of events to process |
 | `--events-per-file` | 1000 | Events per output HDF5 file |
 | `--threshold-adc` | 2.0 | Minimum signal amplitude to store (ADC) |
+| `--codec` | `blosc-zstd` | Output compression: `blosc-zstd` (smaller than gzip + faster read/write), `blosc-lz4hc` (gzip size, ~4× faster read), `blosc-lz4` (fastest, +19% size), `gzip`, `gzip-1`, `lzf`, `lz4`, `zstd`. Non-gzip codecs require `hdf5plugin` to read. |
 | `--workers` | 2 | Number of save worker threads (0 = serial) |
 | `--noise` | off | Enable intrinsic noise |
 | `--electronics` | off | Enable RC-RC electronics response |
@@ -470,6 +471,10 @@ Typical event with ~170K deposits, group_size=5, threshold=2.0 ADC:
 | **Total** | **~11.7 MB** | **~11.7 GB** |
 
 Without correspondence (`--no-track-hits`): ~3.7 MB/event, ~3.7 GB per 1000 events.
+
+These figures were measured under the old gzip default; the current default
+(`blosc-zstd`) produces somewhat smaller files (e.g. edep ~−20%, hits/sensor
+~−6 to −12%). `blosc-lz4` trades ~19% larger files for the fastest reads.
 
 ## Performance
 
