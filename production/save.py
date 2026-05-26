@@ -61,9 +61,20 @@ except Exception:
 
 
 def set_codec(name):
-    """Set the compression codec used by all save_event_* writers."""
+    """Set the compression codec used by all save_event_* writers.
+
+    Falls back to gzip (with a warning) if the requested codec's backend
+    (hdf5plugin) is unavailable, so a missing optional dependency degrades
+    gracefully instead of aborting the run. An unknown codec name still
+    raises ValueError.
+    """
     global _COMPRESSION
-    _COMPRESSION = codec_kwargs(name)
+    try:
+        _COMPRESSION = codec_kwargs(name)
+    except ImportError:
+        import warnings
+        warnings.warn(f"hdf5plugin unavailable; codec {name!r} -> gzip fallback")
+        _COMPRESSION = codec_kwargs('gzip')
 
 
 _PLANE_LABELS = {0: 'U', 1: 'V', 2: 'Y'}
