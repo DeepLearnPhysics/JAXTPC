@@ -12,6 +12,7 @@ import pytest
 
 from production.save import (
     save_event_sensor, write_config_sensor, encode_correspondence_csr,
+    encode_correspondence_csr_pixel,
     save_event_edep, write_config_edep,
 )
 from production.load import (
@@ -250,6 +251,28 @@ class TestCSREncoding:
         recovered = peak * csr['charges_u16'].astype(np.float32) / 65535.0
 
         np.testing.assert_allclose(recovered, ch, rtol=1e-3)
+
+    def test_pixel_i16_roundtrip_signed(self):
+        """Pixel charges are bipolar: charges_i16 carries the sign and is
+        normalized by |peak|, so |peak| * i16/32767 recovers the originals --
+        including a group whose peak entry is negative. Guards the reader
+        sign-flip bug (reader must use |peak|, not the signed peak)."""
+        num_pz = 100
+        sk = np.array([10 * num_pz + 20, 10 * num_pz + 21,
+                       10 * num_pz + 22], dtype=np.int64)   # spatial keys
+        tk = np.array([100, 100, 100], dtype=np.int32)
+        gid = np.array([0, 0, 0], dtype=np.int32)
+        ch = np.array([-100.0, 50.0, -80.0], dtype=np.float32)  # negative peak
+
+        csr = encode_correspondence_csr_pixel(sk, tk, gid, ch, 3, num_pz=num_pz)
+
+        assert 'charges_i16' in csr
+        peak = float(csr['peak_charges'][0])
+        assert peak < 0.0                       # signed peak is preserved
+        recovered = np.abs(peak) * csr['charges_i16'].astype(np.float32) / 32767.0
+        np.testing.assert_allclose(recovered, ch, rtol=2e-3, atol=1e-2)
+        # signs follow the data, not the (negative) peak
+        assert recovered[0] < 0 and recovered[1] > 0 and recovered[2] < 0
 
     def test_csr_encode_decode_roundtrip_via_hdf5(self):
         """Full CSR encode → HDF5 write → HDF5 read → decode roundtrip."""
