@@ -719,9 +719,11 @@ def run_full_closure(h5_path, event_idx=0, n_seg=40000, total_steps=3000,
     opt_state = optimizer.init(params)
     rng_key = jax.random.PRNGKey(123)
 
-    def compute_Q(de_arr):
-        return (dx_cm / B_eff) * np.log(np.maximum(alpha_r + B_eff * de_arr / dx_cm, 1.0))
-    truth_total_Q = float(compute_Q(np.asarray(raw['de'])).sum())
+    def compute_Q(de_arr, dx_cm_arr=None):
+        d = dx_cm if dx_cm_arr is None else dx_cm_arr
+        return (d / B_eff) * np.log(np.maximum(alpha_r + B_eff * de_arr / d, 1.0))
+    truth_dx_cm = np.maximum(np.asarray(raw['dx']) / 10.0, 1e-10)
+    truth_total_Q = float(compute_Q(np.asarray(raw['de']), truth_dx_cm).sum())
 
     losses = []
     total_energies = []
