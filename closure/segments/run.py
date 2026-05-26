@@ -322,16 +322,19 @@ def save_event_display(signals_by_idx, active_planes, sim_config,
 def plot_full_closure(result, truth_signals, recon_signals, active_planes,
                       truth_total_de, n_seg, total_steps, mode, cfg,
                       tag=''):
-    """3x2 diagnostic plot for full closure analysis.
+    """4x2 diagnostic plot for full closure analysis.
 
     Top-left:     Loss curve (with warmup/relocation markers)
     Top-right:    Signal comparison -- wire-summed profiles for best plane
     Mid-left:     Signal comparison -- west_Y
-    Mid-right:    Total energy trajectory
-    Bottom-left:  Final segment energy histogram
+    Mid-right:    Q ratio trajectory
+    Row3-left:    Final segment energy histogram
+    Row3-right:   dE waterfall
+    Bottom-left:  Per-plane signal ratio (recon/truth)
+    Bottom-right: Signal error distribution (truth - recon)
     Bottom-right: (empty or future use)
     """
-    fig, axes = plt.subplots(3, 2, figsize=(18, 20))
+    fig, axes = plt.subplots(4, 2, figsize=(18, 26))
 
     losses = result['losses']
     total_energies = result['total_energies']
@@ -475,6 +478,55 @@ def plot_full_closure(result, truth_signals, recon_signals, active_planes,
             ax.tick_params(labelsize=TICK_SIZE)
     else:
         ax.axis('off')
+
+    # --- Row 3, left: per-plane signal ratio ---
+    ax = axes[3, 0]
+    plane_ratios = []
+    plane_labels = []
+    for p in active_planes:
+        t_arr = np.array(truth_signals[p])
+        r_arr = np.array(recon_signals[p])
+        t_sum = np.sum(np.abs(t_arr))
+        r_sum = np.sum(np.abs(r_arr))
+        if t_sum > 1:
+            plane_ratios.append(r_sum / t_sum)
+            plane_labels.append(PLANE_NAMES[p])
+    if plane_ratios:
+        colors = ['#e74c3c' if abs(r - 1) > 0.02 else '#2ecc71' for r in plane_ratios]
+        bars = ax.bar(range(len(plane_ratios)), plane_ratios, color=colors, alpha=0.8)
+        ax.axhline(1.0, color='black', ls='--', lw=1.5)
+        ax.set_xticks(range(len(plane_labels)))
+        ax.set_xticklabels(plane_labels, fontsize=TICK_SIZE)
+        ax.set_ylabel('|Recon| / |Truth|', fontsize=LABEL_SIZE)
+        ax.set_title('Per-Plane Signal Ratio', fontsize=TITLE_SIZE)
+        ax.set_ylim(min(0.9, min(plane_ratios) - 0.02), max(1.1, max(plane_ratios) + 0.02))
+        for i, r in enumerate(plane_ratios):
+            ax.text(i, r + 0.002, f'{r:.4f}', ha='center', fontsize=TICK_SIZE)
+    ax.tick_params(labelsize=TICK_SIZE)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # --- Row 3, right: signal error distribution ---
+    ax = axes[3, 1]
+    all_errors = []
+    for p in active_planes:
+        t_arr = np.array(truth_signals[p])
+        r_arr = np.array(recon_signals[p])
+        diff = (t_arr - r_arr).ravel()
+        nonzero = diff[np.abs(diff) > 0.01]
+        if len(nonzero) > 0:
+            all_errors.append(nonzero)
+    if all_errors:
+        all_err = np.concatenate(all_errors)
+        p1, p99 = np.percentile(all_err, [1, 99])
+        clipped = all_err[(all_err >= p1) & (all_err <= p99)]
+        ax.hist(clipped, bins=100, alpha=0.7, color='steelblue', density=True)
+        ax.axvline(0, color='red', ls='--', lw=1.5)
+        rms = np.sqrt(np.mean(all_err**2))
+        ax.set_xlabel('Truth - Recon (ADC)', fontsize=LABEL_SIZE)
+        ax.set_ylabel('Density', fontsize=LABEL_SIZE)
+        ax.set_title(f'Signal Error Distribution (RMS={rms:.2f})', fontsize=TITLE_SIZE)
+    ax.tick_params(labelsize=TICK_SIZE)
+    ax.grid(True, alpha=0.3)
 
     # Suptitle
     mode_desc = {'baseline': 'Adam only', 'noise': 'Adam + noise',
