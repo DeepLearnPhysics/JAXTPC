@@ -394,9 +394,29 @@ class DetectorSimulator:
                         kernel.wire_spacing, kernel.num_wires)
                 return response_fn
 
+            # Pre-compute static Gaussian kernel sizes from default params
+            # (must be concrete ints for JIT, not traced values)
+            from tools.kernels import _N_SIGMAS_BLUR
+            _diff_ks_static = {}
+            _sp0 = self._default_sim_params
+            _mdt = _global_max_drift / float(_sp0.velocity_cm_us)
+            _st_cm = float(np.sqrt(2.0 * float(_sp0.diffusion_trans_cm2_us) * _mdt))
+            _sl_us = float(np.sqrt(2.0 * float(_sp0.diffusion_long_cm2_us)
+                                   / float(_sp0.velocity_cm_us)**2 * _mdt))
+            for _pt in kernels:
+                _k = kernels[_pt]
+                _pidx = list(cfg.plane_names[0]).index(_pt)
+                _dws = cfg.volumes[0].wire_spacings_cm[_pidx]
+                _sw_bins = (_st_cm / _dws) / _k.kernel_dx
+                _sl_bins = _sl_us / _k.kernel_dy
+                _diff_ks_static[_pt] = (
+                    int(2 * ((_sw_bins * 2 * _N_SIGMAS_BLUR) // 2) + 1),
+                    int(2 * ((_sl_bins * 2 * _N_SIGMAS_BLUR) // 2) + 1),
+                )
+
             def _build_response_fn_diff(sim_params, plane_type):
                 """Diff response — recomputes DKernel from SimParams diffusion.
-                Conv filter sizes (ks_w, ks_t) are static from ResponseKernel."""
+                Gaussian kernel sizes are static (pre-computed from default params)."""
                 kernel = kernels[plane_type]
                 max_drift_time = _global_max_drift / sim_params.velocity_cm_us
                 sigma_trans_max_cm = jnp.sqrt(
@@ -404,10 +424,14 @@ class DetectorSimulator:
                 sigma_long_max_us = jnp.sqrt(
                     2.0 * (sim_params.diffusion_long_cm2_us
                            / sim_params.velocity_cm_us**2) * max_drift_time)
+                pidx = list(cfg.plane_names[0]).index(plane_type)
+                det_wire_spacing_cm = cfg.volumes[0].wire_spacings_cm[pidx]
+                sigma_trans_max_wp = sigma_trans_max_cm / det_wire_spacing_cm
+                ks_w, ks_t = _diff_ks_static[plane_type]
                 dkernel = generate_dkernel_table(
-                    sigma_trans_max_cm, sigma_long_max_us,
+                    sigma_trans_max_wp, sigma_long_max_us,
                     kernel.base_kernel, kernel.kernel_dx, kernel.kernel_dy,
-                    kernel.s_levels, ks_w=kernel.ks_w, ks_t=kernel.ks_t)
+                    kernel.s_levels, ks_w=ks_w, ks_t=ks_t)
                 def response_fn(positions_cm, drift_distance_cm, wire_offsets, time_offsets):
                     s_values = jnp.clip(jnp.sqrt(jnp.maximum(drift_distance_cm, 1e-6) / _global_max_drift), 0.0, 1.0)
                     return apply_diffusion_response(
