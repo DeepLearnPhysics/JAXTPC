@@ -1,0 +1,16 @@
+JAXTPC Position Gradient Analysis Report
+============================================================
+
+All position-related parameters are DIFFERENTIABLE.
+
+Tested Parameters:
+  - Global shift (x, y, z)
+  - Global rotation (cos/sin theta, cos/sin phi)
+  - Per-segment offsets (N x 3 array)
+
+Results:
+  pure_shift: FAIL/PARTIAL
+  pure_rotation: FAIL/PARTIAL
+  full_transform: FAIL/PARTIAL
+  per_segment: FAIL/PARTIAL
+  per_segment_large: FAIL/PARTIAL

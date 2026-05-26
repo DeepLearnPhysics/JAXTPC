@@ -1,0 +1,9 @@
+Position Gradient Analysis - All Wire Planes
+============================================================
+
+Wire plane angles:
+  U: 60.0°
+  V: -60.0°
+  Y: 0.0°
+
+All position components (x, y, z) are DIFFERENTIABLE.

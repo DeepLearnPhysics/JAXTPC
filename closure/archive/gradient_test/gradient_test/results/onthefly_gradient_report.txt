@@ -1,0 +1,148 @@
+JAXTPC Gradient Analysis: On-The-Fly Kernel Computation
+============================================================
+
+
+RECOMBINATION
+----------------------------------------
+Status: PASS
+
+  recomb_A:
+    Analytical: -1254013.0
+    Numerical:  -1240000.0
+    Rel Diff:   1.13e-02
+    Match:      True
+
+  recomb_B:
+    Analytical: 3337934.0
+    Numerical:  3306666.666666667
+    Rel Diff:   9.46e-03
+    Match:      True
+
+  field_strength:
+    Analytical: 2002.760498046875
+    Numerical:  1984.0
+    Rel Diff:   9.46e-03
+    Match:      True
+
+  density:
+    Analytical: -717321.25
+    Numerical:  -710601.7191977078
+    Rel Diff:   9.46e-03
+    Match:      True
+
+  w_value:
+    Analytical: -29082284.0
+    Numerical:  -29079999.999999996
+    Rel Diff:   7.85e-05
+    Match:      True
+
+
+DIFFUSION_ONLY
+----------------------------------------
+Status: PASS
+
+  diffusion_long:
+    Analytical: 31050522.0
+    Numerical:  31051635.7421875
+    Rel Diff:   3.59e-05
+    Match:      True
+
+  diffusion_trans:
+    Analytical: 3064015.5
+    Numerical:  3063927.398868865
+    Rel Diff:   2.88e-05
+    Match:      True
+
+
+COMBINED
+----------------------------------------
+Status: PASS
+
+  recomb_A:
+    Analytical: -4913.111328125
+    Numerical:  -5000.0
+    Rel Diff:   1.74e-02
+    Match:      True
+
+  recomb_B:
+    Analytical: 13077.728515625
+    Numerical:  13333.333333333334
+    Rel Diff:   1.92e-02
+    Match:      True
+
+  diffusion_long:
+    Analytical: -216856920064.0
+    Numerical:  -216854838709.67743
+    Rel Diff:   9.60e-06
+    Match:      True
+
+  diffusion_trans:
+    Analytical: -82485460992.0
+    Numerical:  -82484662576.68712
+    Rel Diff:   9.68e-06
+    Match:      True
+
+
+FULL_SIMULATION
+----------------------------------------
+Status: FAIL
+
+  recomb_A:
+    Analytical: -4982079488.0
+    Numerical:  -3194880000.0
+    Rel Diff:   5.59e-01
+    Match:      False
+
+  recomb_B:
+    Analytical: 13261305856.0
+    Numerical:  9611946666.666668
+    Rel Diff:   3.80e-01
+    Match:      False
+
+  diffusion_long:
+    Analytical: -4768495616.0
+    Numerical:  169125161290322.56
+    Rel Diff:   1.00e+00
+    Match:      False
+
+  diffusion_trans:
+    Analytical: -1.1974295806803968e+16
+    Numerical:  -1.1905036564417178e+16
+    Rel Diff:   5.82e-03
+    Match:      True
+
+
+FULL_RECOMB
+----------------------------------------
+Status: FAIL
+
+  recomb_A:
+    Analytical: -4982078464.0
+    Numerical:  -4997120000.0
+    Rel Diff:   3.01e-03
+    Match:      True
+
+  recomb_B:
+    Analytical: 13261303808.0
+    Numerical:  17039360000.000002
+    Rel Diff:   2.22e-01
+    Match:      False
+
+  field_strength:
+    Analytical: 7956782.5
+    Numerical:  11141120.0
+    Rel Diff:   2.86e-01
+    Match:      False
+
+  density:
+    Analytical: -2849850368.0
+    Numerical:  -2863679083.0945563
+    Rel Diff:   4.83e-03
+    Match:      True
+
+  w_value:
+    Analytical: -115541213184.0
+    Numerical:  -115515530847.45761
+    Rel Diff:   2.22e-04
+    Match:      True
+

@@ -1,0 +1,36 @@
+JAXTPC Gradient Testing Report
+============================================================
+
+
+RECOMBINATION TEST
+----------------------------------------
+Analytical gradients: SUCCESS
+
+Numerical gradients:
+  recomb_A: 3.346534e+11
+  recomb_B: -5.966780e+11
+  field_strength: -3.580068e+08
+  density: 1.282259e+11
+  w_value: 1.283093e+12
+
+Comparison:
+  recomb_A: MATCH (rel_diff=4.83e-03)
+  recomb_B: MATCH (rel_diff=6.19e-03)
+  field_strength: MATCH (rel_diff=6.19e-03)
+  density: MATCH (rel_diff=6.19e-03)
+  w_value: MATCH (rel_diff=1.42e-04)
+
+FULL_SIMULATION TEST
+----------------------------------------
+Analytical gradients: SUCCESS
+
+Numerical gradients:
+  recomb_A: -2.070740e+04
+  recomb_B: 3.755289e+04
+
+Comparison:
+  recomb_A: MATCH (rel_diff=5.06e-05)
+  recomb_B: MATCH (rel_diff=2.65e-05)
+
+SENSITIVITY TEST
+----------------------------------------
