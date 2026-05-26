@@ -20,9 +20,9 @@ import numpy as np
 # shuffle): smaller files than gzip AND faster on both read and write — the
 # loader profiler found gzip is the slowest codec and Pareto-dominated
 # (blosc:zstd+shuffle ~2.3x faster read, blosc:lz4hc ~4x at gzip's size).
-# gzip remains the import-time fallback if hdf5plugin is unavailable.
-# Switch via set_codec() / run_batch --codec. Readers of blosc/zstd/lz4
-# output must `import hdf5plugin`.
+# Requires hdf5plugin for the default; a missing backend raises (no silent
+# downgrade to gzip). Switch via set_codec() / run_batch --codec. Readers of
+# blosc/zstd/lz4 output must `import hdf5plugin`.
 # ---------------------------------------------------------------------------
 def codec_kwargs(name):
     """Map a codec name to h5py create_dataset compression kwargs."""
@@ -53,28 +53,21 @@ def codec_kwargs(name):
 # Default is blosc-zstd (level 4 + byte shuffle): smaller files than gzip and
 # faster on both read and write (gzip is Pareto-dominated). See run_batch
 # --codec for alternatives (blosc-lz4hc = fastest read at gzip's size).
-# Falls back to gzip if hdf5plugin is unavailable so import never fails.
-try:
-    _COMPRESSION = codec_kwargs('blosc-zstd')
-except Exception:
-    _COMPRESSION = codec_kwargs('gzip')
+# Requires hdf5plugin; a missing backend raises ImportError here rather than
+# silently downgrading to gzip.
+_COMPRESSION = codec_kwargs('blosc-zstd')
 
 
 def set_codec(name):
     """Set the compression codec used by all save_event_* writers.
 
-    Falls back to gzip (with a warning) if the requested codec's backend
-    (hdf5plugin) is unavailable, so a missing optional dependency degrades
-    gracefully instead of aborting the run. An unknown codec name still
-    raises ValueError.
+    Raises ImportError if the codec's backend (hdf5plugin) is unavailable, or
+    ValueError for an unknown codec name. We deliberately do NOT fall back to
+    gzip — a missing backend or a typo should surface loudly rather than
+    silently change the output format.
     """
     global _COMPRESSION
-    try:
-        _COMPRESSION = codec_kwargs(name)
-    except ImportError:
-        import warnings
-        warnings.warn(f"hdf5plugin unavailable; codec {name!r} -> gzip fallback")
-        _COMPRESSION = codec_kwargs('gzip')
+    _COMPRESSION = codec_kwargs(name)
 
 
 _PLANE_LABELS = {0: 'U', 1: 'V', 2: 'Y'}
