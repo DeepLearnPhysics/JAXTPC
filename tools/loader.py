@@ -496,12 +496,7 @@ def load_event(file_path, sim_config, event_idx=0, verbose=False,
 
 
 def main():
-    """
-    Example usage of the particle step extractor.
-
-    This function demonstrates how to use the particle step extractor
-    from the command line with various options.
-    """
+    """Example usage of the particle step extractor."""
     import argparse
 
     parser = argparse.ArgumentParser(description='Extract particle step data from HDF5 files')
@@ -511,22 +506,20 @@ def main():
 
     args = parser.parse_args()
 
-    # Extract step data as DepositData
-    deposit_data, group_to_track = load_particle_step_data(args.file_path, args.event, args.verbose)
+    raw = load_particle_step_data(args.file_path, args.event, args.verbose)
 
-    # Print summary
-    n_segments = deposit_data.positions_mm.shape[0]
-    n_tracks = len(np.unique(deposit_data.track_ids))
-    total_de = float(np.sum(deposit_data.de))
+    n_segments = raw['positions_mm'].shape[0]
+    n_tracks = len(np.unique(raw['track_ids']))
+    total_de = float(np.sum(raw['de']))
 
-    print(f"\nLoaded DepositData:")
+    print(f"\nLoaded particle step data:")
     print(f"  Segments: {n_segments:,}")
     print(f"  Unique tracks: {n_tracks}")
     print(f"  Total dE: {total_de:.2f} MeV")
     print(f"\nFields:")
-    for field in deposit_data._fields:
-        arr = getattr(deposit_data, field)
-        print(f"  {field}: shape={arr.shape}, dtype={arr.dtype}")
+    for key, arr in raw.items():
+        if hasattr(arr, 'shape'):
+            print(f"  {key}: shape={arr.shape}, dtype={arr.dtype}")
 
 
 # =============================================================================

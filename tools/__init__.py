@@ -46,6 +46,7 @@ from tools.recombination import RECOMB_MODELS, compute_quanta, XI_FN
 from tools.particle_generator import (
     generate_muon_segments, generate_muon_segments_trig,
     load_dedx_table_jax, mask_outside_volume,
+    build_muon_forward, build_csda_range_table,
 )
 
 from tools.wires import sparse_buckets_to_dense
@@ -74,6 +75,7 @@ __all__ = [
     # Particle generation (differentiable)
     'generate_muon_segments', 'generate_muon_segments_trig',
     'load_dedx_table_jax', 'mask_outside_volume',
+    'build_muon_forward', 'build_csda_range_table',
     # Sparse utilities
     'sparse_buckets_to_dense',
     # Noise post-processing

@@ -409,7 +409,7 @@ class DetectorSimulator:
                     kernel.base_kernel, kernel.kernel_dx, kernel.kernel_dy,
                     kernel.s_levels, ks_w=kernel.ks_w, ks_t=kernel.ks_t)
                 def response_fn(positions_cm, drift_distance_cm, wire_offsets, time_offsets):
-                    s_values = jnp.clip(jnp.sqrt(drift_distance_cm / _global_max_drift), 0.0, 1.0)
+                    s_values = jnp.clip(jnp.sqrt(jnp.maximum(drift_distance_cm, 1e-6) / _global_max_drift), 0.0, 1.0)
                     return apply_diffusion_response(
                         dkernel, s_values, wire_offsets, time_offsets,
                         kernel.wire_spacing, kernel.num_wires)
@@ -597,15 +597,17 @@ class DetectorSimulator:
                         cfg.pre_window_us, readout_window_us)
                     response_fn = _build_response_fn_diff(sim_params, plane_type)
                     plane_kernel = kernels[plane_type]
-                    signal = compute_plane_signal(
-                        plane_int, response_fn, n_segments,
-                        cfg.response_chunk_size,
-                        cfg, vol_geom, plane_idx, plane_kernel)
+
+                    @jax.remat
+                    def _plane_response(pi):
+                        return compute_plane_signal(
+                            pi, response_fn, n_segments,
+                            cfg.response_chunk_size,
+                            cfg, vol_geom, plane_idx, plane_kernel)
+
+                    signal = _plane_response(plane_int)
                     plane_signals.append(signal)
-                max_w = max(vol_geom.num_wires)
-                padded = [jnp.pad(s, ((0, max_w - s.shape[0]), (0, 0)))
-                          for s in plane_signals]
-                return jnp.stack(padded)
+                return tuple(plane_signals)
 
             @jax.remat
             def _forward_diff(params, stacked_deps):
@@ -875,9 +877,9 @@ class DetectorSimulator:
         deposits = pad_deposit_data(deposits, cfg.total_pad)
         stacked_deps = jax.tree.map(lambda *xs: jnp.stack(xs), *deposits.volumes)
         all_signals = self._forward_diff(params, stacked_deps)
-        # all_signals shape: (n_volumes, n_planes, num_wires, num_time)
+        # all_signals is a tuple of (n_volumes, num_wires_plane, T) per plane
         return tuple(
-            all_signals[v, p]
+            all_signals[p][v]
             for v in range(cfg.n_volumes)
             for p in range(cfg.volumes[v].n_planes))
 
@@ -909,7 +911,7 @@ class DetectorSimulator:
         for vol_idx in range(cfg.n_volumes):
             vol = cfg.volumes[vol_idx]
             x_min, x_max = vol.ranges_cm[0]
-            vol_mask = (x_cm >= x_min) & (x_cm < x_max)
+            vol_mask = jax.lax.stop_gradient((x_cm >= x_min) & (x_cm < x_max))
             masked_de = padded_de * vol_mask
 
             # Transform to local coordinates
@@ -938,7 +940,8 @@ class DetectorSimulator:
 
         stacked_deps = jax.tree.map(lambda *xs: jnp.stack(xs), *volumes)
         all_signals = self._forward_diff(params, stacked_deps)
+        # all_signals is a tuple of (n_volumes, num_wires_plane, T) per plane
         return tuple(
-            all_signals[v, p]
+            all_signals[p][v]
             for v in range(cfg.n_volumes)
             for p in range(cfg.volumes[v].n_planes))

@@ -498,6 +498,43 @@ def generate_muon_segments_trig(
     return positions, de
 
 
+def build_muon_forward(simulator, n_segments, step_size_mm):
+    """Build a forward closure for muon optimization.
+
+    Returns a function ``forward(positions_mm, de) -> tuple`` of signal
+    arrays (one per volume-plane pair), suitable for wrapping with
+    ``jax.grad`` or ``jax.value_and_grad``.
+
+    Parameters
+    ----------
+    simulator : DetectorSimulator
+        Must be constructed with ``differentiable=True, n_segments=n_segments``.
+    n_segments : int
+        Number of segments (must match simulator's total_pad).
+    step_size_mm : float
+        Segment length in mm (used as constant ``dx`` for all segments).
+
+    Returns
+    -------
+    forward : callable
+        ``forward(positions_mm, de) -> tuple of signal arrays``
+    """
+    sim_params = simulator.default_sim_params
+    def forward(positions_mm, de):
+        return simulator.forward_segments(sim_params, positions_mm, de, dx=step_size_mm)
+    return forward
+
+
+def get_half_extents_mm(detector_config):
+    """Compute detector half-extents in mm from config ranges (cm)."""
+    ranges = [v['geometry']['ranges'] for v in detector_config['volumes']]
+    return tuple(
+        max(abs(lo), abs(hi)) * 10.0
+        for lo, hi in [(min(r[ax][0] for r in ranges), max(r[ax][1] for r in ranges))
+                       for ax in range(3)]
+    )
+
+
 def mask_outside_volume(positions_mm, de, half_extents_mm):
     """Zero out dE for segments outside the detector volume.
 
