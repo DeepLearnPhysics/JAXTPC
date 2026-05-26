@@ -44,6 +44,7 @@ from production.save import (
     write_config_sensor, write_config_edep, write_config_hits,
     save_event_sensor, save_event_edep, save_event_hits,
     encode_correspondence_csr, encode_correspondence_csr_pixel,
+    set_codec,
 )
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -180,6 +181,12 @@ def main():
     parser.add_argument('--workers', type=int, default=2,
                         help='Number of save worker threads (0=serial, default: 2)')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--codec', default='blosc-zstd',
+                        help='Output compression codec: gzip, gzip-1, lzf, '
+                             'lz4, zstd, blosc-lz4, blosc-zstd (default). '
+                             'blosc-zstd is smaller than gzip AND ~2.3x faster '
+                             'to read; blosc-lz4 is ~4x faster (+19%% disk). '
+                             'Non-gzip needs hdf5plugin (read + write).')
     parser.add_argument('--production-config', default=None,
                         help='Load optimized params from profiler config YAML')
     # Event identification
@@ -206,6 +213,10 @@ def main():
         prod_cfg = load_config(args.production_config)
         apply_to_args(args, prod_cfg)
         print(f'  Loaded production config: {args.production_config}')
+
+    # Output compression codec (default blosc-zstd; gzip fallback in save.py
+    # if hdf5plugin is unavailable).
+    set_codec(args.codec)
 
     include_intrinsic_noise = args.intrinsic
     include_coherent_noise = args.coherent
