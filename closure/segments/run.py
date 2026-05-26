@@ -502,7 +502,7 @@ def plot_full_closure(result, truth_signals, recon_signals, active_planes,
 def run_full_closure(h5_path, event_idx=0, n_seg=40000, total_steps=3000,
                      mode='baseline', config=None, plot_every=100,
                      config_yaml='config/cubic_wireplane_config.yaml',
-                     dx_mm=0.3, sobolev_s=1.0):
+                     dx_mm=0.3, sobolev_s=1.0, tag='', schedule_type='exponential'):
     """Run full event closure analysis with intermediate plotting.
 
     Parameters
@@ -641,7 +641,7 @@ def run_full_closure(h5_path, event_idx=0, n_seg=40000, total_steps=3000,
     save_event_display(
         truth_signals, active_planes, sim_truth.config,
         f'Truth Event (event {event_idx}, {n_truth:,} segments)',
-        os.path.join(OUT_DIR, 'truth_event.png'),
+        os.path.join(OUT_DIR, f'truth_event{tag}.png'),
         threshold_enc=t_enc)
 
     # --- 4. Initialize params (subsample + jitter + energy scaling) ---
@@ -701,8 +701,18 @@ def run_full_closure(h5_path, event_idx=0, n_seg=40000, total_steps=3000,
     # --- 8. Training loop with intermediate plotting ---
     print(f"\nOptimizing ({total_steps} steps, mode={mode})...")
 
-    schedule = optax.exponential_decay(
-        init_value=cfg['lr'], transition_steps=1, decay_rate=cfg['decay_rate'])
+    if schedule_type == 'cosine':
+        schedule = optax.cosine_decay_schedule(
+            init_value=cfg['lr'], decay_steps=total_steps, alpha=0.0)
+    elif schedule_type == 'warmup_cosine':
+        schedule = optax.warmup_cosine_decay_schedule(
+            init_value=0.0, peak_value=cfg['lr'],
+            warmup_steps=min(50, total_steps // 20),
+            decay_steps=total_steps, end_value=0.0)
+    else:
+        schedule = optax.exponential_decay(
+            init_value=cfg['lr'], transition_steps=1, decay_rate=cfg['decay_rate'])
+    print(f"  Schedule: {schedule_type}, lr={cfg['lr']}")
     optimizer = optax.adam(schedule, b1=cfg['b1'], b2=cfg['b2'])
 
     params = init_params
@@ -801,7 +811,7 @@ def run_full_closure(h5_path, event_idx=0, n_seg=40000, total_steps=3000,
                 recon_signals, active_planes, sim_truth.config,
                 f'Recon step {step}  (loss={loss_val:.4f}, '
                 f'dE_ratio={de_ratio_cur:.3f})',
-                os.path.join(OUT_DIR, f'recon_step_{step:04d}.png'),
+                os.path.join(OUT_DIR, f'recon_step_{step:04d}{tag}.png'),
                 threshold_enc=t_enc)
 
             # Diff event display (truth - recon)
@@ -810,7 +820,7 @@ def run_full_closure(h5_path, event_idx=0, n_seg=40000, total_steps=3000,
             save_event_display(
                 diff_signals, active_planes, sim_truth.config,
                 f'Diff (truth - recon) step {step}',
-                os.path.join(OUT_DIR, f'diff_step_{step:04d}.png'),
+                os.path.join(OUT_DIR, f'diff_step_{step:04d}{tag}.png'),
                 threshold_enc=t_enc)
 
             # Progress plot
@@ -828,7 +838,7 @@ def run_full_closure(h5_path, event_idx=0, n_seg=40000, total_steps=3000,
             plot_full_closure(
                 result_so_far, truth_signals, recon_signals, active_planes,
                 truth_total_de, n_seg, step + 1, mode, cfg,
-                tag='_progress')
+                tag=f'{tag}_progress')
 
     elapsed = time.time() - t0
     print(f"\nTraining complete in {elapsed:.1f}s "
@@ -908,6 +918,11 @@ if __name__ == '__main__':
                         help='Fixed segment dx in mm (default: 0.3)')
     parser.add_argument('--sobolev-s', type=float, default=1.0,
                         help='Sobolev exponent s (default: 1.0)')
+    parser.add_argument('--schedule', type=str, default='exponential',
+                        choices=['exponential', 'cosine', 'warmup_cosine'],
+                        help='LR schedule (default: exponential)')
+    parser.add_argument('--tag', type=str, default='',
+                        help='Tag appended to output filenames (e.g. --tag _v2)')
 
     args = parser.parse_args()
 
@@ -953,4 +968,6 @@ if __name__ == '__main__':
         config_yaml=args.config_yaml,
         dx_mm=args.dx,
         sobolev_s=args.sobolev_s,
+        tag=args.tag,
+        schedule_type=args.schedule,
     )
