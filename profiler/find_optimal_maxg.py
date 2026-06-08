@@ -289,8 +289,12 @@ def main():
     print(f'  Suggested MAXG (p{args.pctile} -> {args.round_to:,}) = {maxg:,}  '
           f'(overflow {100*np.mean(ng>maxg):.3f}% -> reprocess)')
     if info.get('box_dims'):
-        print(f'\n  box dims (readout-specific, footprint + margin {info["dim_margin"]} + kernel,'
-              f' from {info["n_dim_files"]} files):')
+        # Informational only: the simulator now derives per-group box dims
+        # analytically from the group definition + geometry at construction
+        # (tools.track_hits.compute_box_dims); they are not stored in the config.
+        print(f'\n  box dims (informational — sim derives these analytically; '
+              f'measured footprint + margin {info["dim_margin"]} + kernel, '
+              f'from {info["n_dim_files"]} files):')
         print(f'    extent max: {info["extent_max"]}')
         print(f'    -> {info["box_dims"]}')
 

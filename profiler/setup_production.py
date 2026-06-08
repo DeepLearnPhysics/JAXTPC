@@ -175,19 +175,24 @@ def _remake_maxg_medium(args, h5_files):
     cfg = _yaml.safe_load(open(args.output))
     det_path = cfg['detector_config']
     detector_config = generate_detector(det_path)
-    if 'box_bpy' in cfg:
-        box_kw = dict(box_bpy=cfg['box_bpy'], box_bpz=cfg['box_bpz'], box_bt=cfg['box_bt'])
-    else:
-        box_kw = dict(box_bw=cfg['box_bw'], box_btw=cfg['box_btw'])
 
     print('=' * 70)
     print(' Re-derive maxg_medium (standalone)')
     print('=' * 70)
-    print(f'  Config:  {args.output}  (maxg={cfg["maxg"]:,}, box={box_kw})')
+    print(f'  Config:  {args.output}  (maxg={cfg["maxg"]:,})')
     print(f'  n_groups scan: {len(h5_files)} file(s), geometry-only')
     _, info = find_optimal_maxg(h5_files, det_path, group_size=args.group_size,
                                 n_workers=args.workers, dim_files=1)
     ng = info['n_groups']
+    # Box dims for the timing sims: from the scan, not the config (configs no
+    # longer store box_* — the sim derives them analytically at construction).
+    bd = info.get('box_dims', {})
+    if info['readout'] == 'pixel' and bd:
+        box_kw = dict(box_bpy=bd['BPY'], box_bpz=bd['BPZ'], box_bt=bd['BT'])
+    elif bd:
+        box_kw = dict(box_bw=bd['BW'], box_btw=bd.get('BT', bd.get('BTW', 27)))
+    else:
+        box_kw = {}
 
     mm, *_ = benchmark_maxg_medium(
         detector_config, h5_files[0], total_pad=cfg['total_pad'],
@@ -722,13 +727,10 @@ def main():
     }
     if maxg_medium is not None:
         config_values['maxg_medium'] = maxg_medium
-    # Box (group-as-bucket) per-group dims, readout-specific (footprint + kernel)
-    bd = maxg_info.get('box_dims', {})
-    if bd:
-        if maxg_info['readout'] == 'pixel':
-            config_values.update(box_bpy=bd['BPY'], box_bpz=bd['BPZ'], box_bt=bd['BT'])
-        else:
-            config_values.update(box_bw=bd['BW'], box_btw=bd['BT'])
+    # Box (group-as-bucket) per-group dims are NOT stored: the simulator derives
+    # them analytically from the group definition + geometry at construction
+    # (tools.track_hits.compute_box_dims). The profiled box_dims below are used
+    # only to size the timing sims in this run.
 
     save_config(args.output, config_values, detector_config_path=args.config)
 
