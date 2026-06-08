@@ -4,7 +4,7 @@ Production HDF5 load functions.
 Reads simulation output from the three file types produced by
 ``run_batch.py`` (canonical names):
     sensor — sparse thresholded raw readout
-    edep   — 3D truth energy deposits (per-volume)
+    step   — 3D truth energy deposits (per-volume)
     hits   — per-particle charge attribution at sensor elements
 """
 
@@ -34,11 +34,11 @@ def _plane_label(plane_idx):
 # =============================================================================
 
 def get_file_paths(production_dir, dataset, file_index):
-    """Return (sensor_path, edep_path, hits_path) for a given batch file."""
+    """Return (sensor_path, step_path, hits_path) for a given batch file."""
     return tuple(
         os.path.join(production_dir, stem,
                      f'{dataset}_{stem}_{file_index:04d}.h5')
-        for stem in ('sensor', 'edep', 'hits')
+        for stem in ('sensor', 'step', 'hits')
     )
 
 
@@ -218,11 +218,11 @@ def load_event_sensor(sensor_path, event_idx):
 # Segment loading
 # =============================================================================
 
-def load_event_edep(edep_path, event_idx):
+def load_event_step(step_path, event_idx):
     """Load one event's 3D truth deposits (per-volume).
 
     Per the design (see particle-imaging-models/docs/DATASET_DESIGN.md),
-    edep holds pure physics only. Group/instance fields live in hits,
+    step holds pure physics only. Group/instance fields live in hits,
     per-track labels in labl.
 
     Returns
@@ -233,7 +233,7 @@ def load_event_edep(edep_path, event_idx):
     """
     event_key = f'event_{event_idx:03d}'
 
-    with h5py.File(edep_path, 'r') as f:
+    with h5py.File(step_path, 'r') as f:
         evt = f[event_key]
         n_volumes = int(evt.attrs.get('n_volumes', 2))
 
@@ -376,7 +376,7 @@ def load_event_hits(hits_path, event_idx, num_time_steps=None,
         {(vol, plane): (num_wires, num_time) ndarray}
     group_to_track : list of arrays, one per volume
     deposit_to_group : list of arrays, one per volume (per-deposit group id;
-        row-aligned with edep deposits in the same volume; None where missing)
+        row-aligned with step deposits in the same volume; None where missing)
     qs_fractions : list of arrays, one per volume (per-deposit fraction of
         its group's recombined charge; None where missing)
     """
@@ -491,7 +491,7 @@ def load_correspondence(hits_path, event_idx, v, num_time_steps=None):
     Returns
     -------
     dict with keys:
-        'd2g'    (N_dep,) int32    — deposit_to_group (row-aligned with edep[v])
+        'd2g'    (N_dep,) int32    — deposit_to_group (row-aligned with step[v])
         'qs'     (N_dep,) float32  — qs_fractions
         'g2t'    (n_groups,) int32 — group_to_track (optional label)
         'planes' {label: {'wire', 'time', 'charge', 'gid'}} — per-plane flat

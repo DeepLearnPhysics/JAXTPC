@@ -47,7 +47,7 @@ processes the first 10 files of shard 0.
 ```
 <outdir>/
 ├── sensor/run_<run_id>/sim_sensor_<NNNN>.h5      # sparse digitized readout
-├── edep/run_<run_id>/sim_edep_<NNNN>.h5          # truth deposits
+├── step/run_<run_id>/sim_step_<NNNN>.h5          # truth deposits
 ├── hits/run_<run_id>/sim_hits_<NNNN>.h5          # per-particle correspondence
 └── logs/
     ├── overflow_events_shard<SSS>.csv            # one row per skipped event
@@ -157,7 +157,7 @@ defaults; CLI flags override the file values if you want to experiment.
 - The `--workers` flag still controls the save-thread pool (unchanged).
 - All physics toggles (`--intrinsic`, `--electronics`, `--no-track-hits`,
   `--sce`, etc.) behave as before.
-- HDF5 schemas for sensor/edep/hits are unchanged.
+- HDF5 schemas for sensor/step/hits are unchanged.
 
 ## Recovery from interrupted runs
 

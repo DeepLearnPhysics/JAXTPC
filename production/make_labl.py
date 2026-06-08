@@ -2,7 +2,7 @@
 Temporary labl generator.
 
 Produces the ``labl/`` directory from the hits/ output + the edepsim
-source file. Edep is **not** consulted because edep is pure physics
+source file. Step is **not** consulted because step is pure physics
 and does not carry track-related arrays.
 
 Per-deposit → track_id comes from hits::
@@ -18,7 +18,7 @@ Output layout (matches pimm-data's ``JAXTPCLablReader``)::
     {outdir}/labl/{dataset}_labl_{NNNN}.h5
         /config/ attrs
         /event_NNN/volume_N/
-            # Per-deposit (N,) foreign key row-aligned with edep rows
+            # Per-deposit (N,) foreign key row-aligned with step rows
             deposit_to_track    (N,) int32
 
             # Per-unique-track (T,) dimension table

@@ -4,7 +4,7 @@ Production HDF5 save functions.
 Writes simulation output to three file types (canonical names; see
 docs/DATASET_DESIGN.md in particle-imaging-models):
     sensor — sparse thresholded wire/pixel readout (delta-encoded)
-    edep   — 3D truth deposits (uint16 positions + float16 physics)
+    step   — 3D truth deposits (uint16 positions + float16 physics)
     hits   — per-particle charge attribution at sensor elements (CSR + delta)
 
 All datasets are compressed with the codec set by ``set_codec`` (default
@@ -162,10 +162,10 @@ def write_config_sensor(f, cfg, params, recomb_model, dataset_name, file_index,
         g.attrs['n_bits'] = digitization_config.n_bits
 
 
-def write_config_edep(f, cfg, dataset_name, file_index, source_file,
+def write_config_step(f, cfg, dataset_name, file_index, source_file,
                       n_events, global_offset, group_size, gap_threshold_mm,
                       provenance=None):
-    """Write config group for edep file."""
+    """Write config group for step file."""
     if 'config' in f:
         return
     g = f.create_group('config')
@@ -371,7 +371,7 @@ def save_event_sensor(f, event_key, response_signals, threshold_adc,
                              vol_idx, plane_idx)
 
 
-def save_event_edep(f, event_key, deposits, source_event_idx, pos_step_mm=0.3,
+def save_event_step(f, event_key, deposits, source_event_idx, pos_step_mm=0.3,
                     cfg=None, event_id=None):
     """Save one event's 3D truth deposits — physics only.
 
@@ -586,12 +586,12 @@ def save_event_hits(f, event_key, hits_data, deposits, source_event_idx,
 
     Writes the hits file's event group with the full schema:
       - ``deposit_to_group`` (N_deposits,) int32 — per-deposit group id,
-        row-aligned with edep[v]. Lives in hits (not edep) because groups
-        are a hits concept that partitions edep deposits for sensor
+        row-aligned with step[v]. Lives in hits (not step) because groups
+        are a hits concept that partitions step deposits for sensor
         correspondence.
       - ``qs_fractions`` (N_deposits,) float16 — each deposit's share of
         its group's recombined charge (sums to ~1 per group). Used for
-        deposit-level disaggregation when traversing hits → edep.
+        deposit-level disaggregation when traversing hits → step.
       - ``group_to_track`` (G,) int32 — per-group Geant4 track_id. A
         convenience label; not part of the hit↔deposit correspondence.
       - one subgroup per readout plane with CSR-encoded per-pixel
