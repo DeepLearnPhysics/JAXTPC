@@ -61,13 +61,14 @@ def _time_sim(sim, deposits, n_iter):
 def bench_one(detector_config, data_path, event_idx, total_pad,
               response_chunk, hits_chunk, include_track_hits,
               max_keys, bucketed, n_timed, label='',
-              maxg=200_000, box_kw=None, inter_thresh=1.0, deposits=None):
+              maxg=200_000, inter_thresh=1.0, deposits=None,
+              group_size=5, gap_threshold_mm=5.0):
     """Benchmark a single chunk configuration. Returns (mean_ms, std_ms, times).
 
-    Pass maxg + box_kw (e.g. {'box_bpy':8,...} or {'box_bw':12,'box_btw':27})
-    to size the track-hits box exactly as production does — the default box
-    (6/6/88 or 16/96, maxg 200k) mistimes the hits scatter-add otherwise. Pass
-    a preloaded `deposits` to avoid reloading the (slow) event per candidate.
+    The track-hits box dims are derived analytically by the simulator from the
+    group definition (group_size/gap_threshold) + geometry, exactly as
+    production does — so pass the same group params used for the run. Pass a
+    preloaded `deposits` to avoid reloading the (slow) event per candidate.
     """
     jax.clear_caches()
     gc.collect()
@@ -76,8 +77,7 @@ def bench_one(detector_config, data_path, event_idx, total_pad,
     if include_track_hits:
         track_config = create_track_hits_config(
             max_keys=max_keys, hits_chunk_size=hits_chunk,
-            inter_thresh=inter_thresh, box_enabled=True, maxg=maxg,
-            **(box_kw or {}))
+            inter_thresh=inter_thresh, box_enabled=True, maxg=maxg)
 
     sim = DetectorSimulator(
         detector_config,
@@ -86,6 +86,8 @@ def bench_one(detector_config, data_path, event_idx, total_pad,
         include_track_hits=include_track_hits,
         track_config=track_config,
         use_bucketed=bucketed,
+        group_size=group_size,
+        gap_threshold_mm=gap_threshold_mm,
     )
     sim.warm_up()
 
@@ -112,7 +114,8 @@ def auto_search(detector_config, data_path, event_idx, total_pad,
                 chunk_label, lo, hi, include_track_hits,
                 fixed_response_chunk, max_keys, bucketed,
                 n_coarse=3, n_fine=10,
-                maxg=200_000, box_kw=None, inter_thresh=1.0, deposits=None):
+                maxg=200_000, inter_thresh=1.0, deposits=None,
+                group_size=5, gap_threshold_mm=5.0):
     """Two-pass search over divisors of total_pad in [lo, hi]."""
     candidates = select_candidates(total_pad, lo, hi)
     if not candidates:
@@ -134,7 +137,8 @@ def auto_search(detector_config, data_path, event_idx, total_pad,
             detector_config, data_path, event_idx, total_pad,
             rc, hc, include_track_hits, max_keys, bucketed,
             n_coarse, label=f'{val:>8,}',
-            maxg=maxg, box_kw=box_kw, inter_thresh=inter_thresh, deposits=deposits)
+            maxg=maxg, inter_thresh=inter_thresh, deposits=deposits,
+            group_size=group_size, gap_threshold_mm=gap_threshold_mm)
         coarse[val] = mean
 
     # Top 3
@@ -155,7 +159,8 @@ def auto_search(detector_config, data_path, event_idx, total_pad,
             detector_config, data_path, event_idx, total_pad,
             rc, hc, include_track_hits, max_keys, bucketed,
             n_fine, label=f'{val:>8,}',
-            maxg=maxg, box_kw=box_kw, inter_thresh=inter_thresh, deposits=deposits)
+            maxg=maxg, inter_thresh=inter_thresh, deposits=deposits,
+            group_size=group_size, gap_threshold_mm=gap_threshold_mm)
         fine[val] = mean
 
     best = min(fine, key=lambda k: fine[k])
@@ -185,11 +190,15 @@ def main():
                         help='Detector geometry YAML (or taken from --prod-config)')
     parser.add_argument('--prod-config', default=None,
                         help='Production config YAML. Reads the REAL total_pad / '
-                             'max_keys / maxg / box dims so the hits scatter-add is '
-                             'timed at production box size (the default 6/6/88 or '
-                             '16/96 box mistimes it), and saves chunks back to it.')
+                             'max_keys / maxg so the hits scatter-add is timed at '
+                             'production capacities, and saves chunks back to it. '
+                             '(Box dims are derived analytically by the simulator.)')
     parser.add_argument('--event', type=int, default=0, help='Event index (default: 0)')
     parser.add_argument('--total-pad', type=int, default=500_000)
+    parser.add_argument('--group-size', type=int, default=5,
+                        help='Deposits per group (must match production for box sizing)')
+    parser.add_argument('--gap-threshold', type=float, default=5.0,
+                        help='Group split gap in mm (must match production for box sizing)')
     parser.add_argument('--lo', type=int, default=1_000, help='Min chunk size (default: 1000)')
     parser.add_argument('--hi', type=int, default=100_000, help='Max chunk size (default: 100000)')
     parser.add_argument('--n-coarse', type=int, default=3)
@@ -205,10 +214,12 @@ def main():
 
     args = parser.parse_args()
 
-    # Resolve capacities/box from the production config when given, so the box
-    # is sized exactly as production runs it.
+    # Resolve capacities from the production config when given. Box dims are NOT
+    # read from it — the simulator derives them analytically from the group
+    # definition (group_size/gap_threshold), exactly as production runs.
     total_pad, max_keys = args.total_pad, args.max_keys
-    maxg, inter_thresh, box_kw, readout = 200_000, 1.0, None, None
+    maxg, inter_thresh = 200_000, 1.0
+    group_size, gap_threshold_mm = args.group_size, args.gap_threshold
     det_path, save_to, prev_rc = args.config, args.save_config, 50_000
     if args.prod_config:
         import yaml
@@ -219,17 +230,12 @@ def main():
         maxg = int(pc.get('maxg', maxg))
         inter_thresh = float(pc.get('inter_thresh', 1.0))
         prev_rc = int(pc.get('response_chunk', prev_rc))
-        if 'box_bpy' in pc:
-            readout = 'pixel'
-            box_kw = dict(box_bpy=pc['box_bpy'], box_bpz=pc['box_bpz'], box_bt=pc['box_bt'])
-        elif 'box_bw' in pc:
-            readout = 'wire'
-            box_kw = dict(box_bw=pc['box_bw'], box_btw=pc['box_btw'])
         save_to = save_to or args.prod_config
     if det_path is None:
         parser.error('need --config or --prod-config with a detector_config')
 
     detector_config = generate_detector(det_path)
+    readout = detector_config['volumes'][0].get('readout', {}).get('type', 'wire')
     bucketed = args.bucketed
     # Pixel is a single track_hits pass: response_chunk is never used -> skip it.
     skip_response = args.skip_response or (readout == 'pixel')
@@ -238,9 +244,9 @@ def main():
     print(' JAXTPC — Find Optimal Chunk Sizes')
     print('=' * 70)
     print(f'  Data:      {args.data}')
-    print(f'  Config:    {det_path}  (readout={readout or "?"})')
+    print(f'  Config:    {det_path}  (readout={readout})')
     print(f'  total_pad: {total_pad:,}  max_keys: {max_keys:,}  maxg: {maxg:,}')
-    print(f'  box:       {box_kw or "default"}  inter_thresh: {inter_thresh}')
+    print(f'  group_size: {group_size}  gap: {gap_threshold_mm}mm  inter_thresh: {inter_thresh}')
     print(f'  Range:     [{args.lo:,}, {args.hi:,}]   Device: {jax.devices()[0]}')
 
     # Load the (slow) event ONCE and reuse it across every candidate.
@@ -261,7 +267,8 @@ def main():
             include_track_hits=False, fixed_response_chunk=50_000,
             max_keys=max_keys, bucketed=bucketed,
             n_coarse=args.n_coarse, n_fine=args.n_fine,
-            maxg=maxg, box_kw=box_kw, inter_thresh=inter_thresh, deposits=deposits)
+            maxg=maxg, inter_thresh=inter_thresh, deposits=deposits,
+            group_size=group_size, gap_threshold_mm=gap_threshold_mm)
         if best_response:
             print(f'\n  Best response_chunk_size: {best_response:,}')
     else:
@@ -278,7 +285,8 @@ def main():
             include_track_hits=True, fixed_response_chunk=best_response,
             max_keys=max_keys, bucketed=bucketed,
             n_coarse=args.n_coarse, n_fine=args.n_fine,
-            maxg=maxg, box_kw=box_kw, inter_thresh=inter_thresh, deposits=deposits)
+            maxg=maxg, inter_thresh=inter_thresh, deposits=deposits,
+            group_size=group_size, gap_threshold_mm=gap_threshold_mm)
         if best_hits:
             print(f'\n  Best hits_chunk_size: {best_hits:,}')
 

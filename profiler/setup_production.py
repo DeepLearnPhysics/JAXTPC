@@ -2,7 +2,7 @@
 One-shot production setup: scan data, benchmark sim, save config.
 
 Steps:
-  1. Combined data scan (one pass) → total_pad, maxg, box_dims, max_keys
+  1. Combined data scan (one pass) → total_pad, maxg, max_keys
   2. (optional) Probe max_buckets for bucketed accumulation
   3. Find optimal response_chunk and hits_chunk (sim benchmark)
   4. Benchmark time(maxg) → fit linear cost model → compute maxg_medium
@@ -60,8 +60,9 @@ def _pick_bench_event(bench_file):
 
 
 def benchmark_maxg_medium(detector_config, bench_file, *, total_pad, max_keys,
-                          maxg, box_kw, response_chunk, hits_chunk,
-                          inter_thresh=1.0, ng, n_repeats=5):
+                          maxg, response_chunk, hits_chunk,
+                          inter_thresh=1.0, ng, n_repeats=5,
+                          group_size=5, gap_threshold_mm=5.0):
     """Time the sim at several maxg values on one moderate event, then minimize
     the amortized tiered cost over the n_groups CDF:
 
@@ -87,10 +88,11 @@ def benchmark_maxg_medium(detector_config, bench_file, *, total_pad, max_keys,
     # Keep only maxg values the bench event actually fits (else the box clips).
     _check_tc = create_track_hits_config(
         max_keys=max_keys, hits_chunk_size=hits_chunk, inter_thresh=inter_thresh,
-        box_enabled=True, maxg=maxg, **box_kw)
+        box_enabled=True, maxg=maxg)
     _check_sim = DetectorSimulator(
         detector_config, track_config=_check_tc, total_pad=total_pad,
-        response_chunk_size=response_chunk, include_track_hits=True)
+        response_chunk_size=response_chunk, include_track_hits=True,
+        group_size=group_size, gap_threshold_mm=gap_threshold_mm)
     _check_dep = load_event(bench_file, _check_sim.config, event_idx=bench_event)
     bench_max_gid = max(int(v.group_ids.max()) for v in _check_dep.volumes)
     del _check_sim
@@ -106,10 +108,11 @@ def benchmark_maxg_medium(detector_config, bench_file, *, total_pad, max_keys,
     for mg in maxg_test_values:
         tc = create_track_hits_config(
             max_keys=max_keys, hits_chunk_size=hits_chunk, inter_thresh=inter_thresh,
-            box_enabled=True, maxg=mg, **box_kw)
+            box_enabled=True, maxg=mg)
         sim = DetectorSimulator(
             detector_config, track_config=tc, total_pad=total_pad,
-            response_chunk_size=response_chunk, include_track_hits=True)
+            response_chunk_size=response_chunk, include_track_hits=True,
+            group_size=group_size, gap_threshold_mm=gap_threshold_mm)
         sim.warm_up()
         bench_dep = load_event(bench_file, sim.config, event_idx=bench_event)
         out = sim.process_event(bench_dep, key=jax.random.PRNGKey(0))
@@ -184,21 +187,13 @@ def _remake_maxg_medium(args, h5_files):
     _, info = find_optimal_maxg(h5_files, det_path, group_size=args.group_size,
                                 n_workers=args.workers, dim_files=1)
     ng = info['n_groups']
-    # Box dims for the timing sims: from the scan, not the config (configs no
-    # longer store box_* — the sim derives them analytically at construction).
-    bd = info.get('box_dims', {})
-    if info['readout'] == 'pixel' and bd:
-        box_kw = dict(box_bpy=bd['BPY'], box_bpz=bd['BPZ'], box_bt=bd['BT'])
-    elif bd:
-        box_kw = dict(box_bw=bd['BW'], box_btw=bd.get('BT', bd.get('BTW', 27)))
-    else:
-        box_kw = {}
 
     mm, *_ = benchmark_maxg_medium(
         detector_config, h5_files[0], total_pad=cfg['total_pad'],
-        max_keys=cfg['max_keys'], maxg=cfg['maxg'], box_kw=box_kw,
+        max_keys=cfg['max_keys'], maxg=cfg['maxg'],
         response_chunk=cfg['response_chunk'], hits_chunk=cfg['hits_chunk'],
-        inter_thresh=float(cfg.get('inter_thresh', 1.0)), ng=ng)
+        inter_thresh=float(cfg.get('inter_thresh', 1.0)), ng=ng,
+        group_size=args.group_size, gap_threshold_mm=args.gap_threshold)
     if mm is not None:
         update_config(args.output, {'maxg_medium': mm}, detector_config_path=det_path)
         print(f'\n  Updated maxg_medium = {mm:,} → {args.output}')
@@ -384,9 +379,6 @@ def main():
     for p in [50, 90, 99, 99.9, 99.95, 100]:
         print(f'    p{p:<6}= {int(np.percentile(ng, p)):>9,}')
     print(f'  Suggested MAXG = {maxg:,}')
-    if maxg_info.get('box_dims'):
-        print(f'  box dims ({maxg_info["readout"]}, footprint+kernel): '
-              f'{maxg_info["box_dims"]}  (extents {maxg_info["extent_max"]})')
 
     # max_keys from combined scan (apply the per-readout overlap divisor)
     est_max = int(keys.max()) if len(keys) > 0 else 0
@@ -435,7 +427,8 @@ def main():
             'response_chunk', args.lo, args.hi,
             include_track_hits=False, fixed_response_chunk=50_000,
             max_keys=max_keys, bucketed=args.bucketed,
-            n_coarse=args.n_coarse, n_fine=args.n_fine)
+            n_coarse=args.n_coarse, n_fine=args.n_fine,
+            group_size=args.group_size, gap_threshold_mm=args.gap_threshold)
 
         if not best_response:
             best_response = 50_000
@@ -463,7 +456,8 @@ def main():
                 'hits_chunk', args.lo, args.hi,
                 include_track_hits=True, fixed_response_chunk=best_response,
                 max_keys=max_keys, bucketed=args.bucketed,
-                n_coarse=args.n_coarse, n_fine=args.n_fine)
+                n_coarse=args.n_coarse, n_fine=args.n_fine,
+                group_size=args.group_size, gap_threshold_mm=args.gap_threshold)
             if found:
                 best_hits = found
                 print(f'  Best hits_chunk: {best_hits:,}')
@@ -480,17 +474,11 @@ def main():
     print(' Step 3: Benchmarking time(maxg) → maxg_medium')
     print('─' * 70)
 
-    bd = maxg_info.get('box_dims', {})
-    box_kw = {}
-    if maxg_info['readout'] == 'pixel' and bd:
-        box_kw = dict(box_bpy=bd['BPY'], box_bpz=bd['BPZ'], box_bt=bd['BT'])
-    elif bd:
-        box_kw = dict(box_bw=bd['BW'], box_btw=bd.get('BT', bd.get('BTW', 27)))
-
     maxg_medium, mg_arr, t_arr, time_high = benchmark_maxg_medium(
         detector_config, h5_files[0], total_pad=total_pad, max_keys=max_keys,
-        maxg=maxg, box_kw=box_kw, response_chunk=best_response,
-        hits_chunk=best_hits, inter_thresh=1.0, ng=ng)
+        maxg=maxg, response_chunk=best_response,
+        hits_chunk=best_hits, inter_thresh=1.0, ng=ng,
+        group_size=args.group_size, gap_threshold_mm=args.gap_threshold)
 
     # ── Plots for Step 1 + Step 3 ──────────────────────────────────────
     try:
@@ -600,19 +588,20 @@ def main():
         jax.clear_caches()
         gc.collect()
 
-        # Use the PROFILED box geometry (box_kw + maxg from Step 1/3), not the
-        # create_track_hits_config defaults -- otherwise the box clips per-group
-        # charge and the thresholds get calibrated on a distribution production
-        # won't produce.
+        # Box dims are derived analytically by the simulator from the group
+        # definition (group_size/gap_threshold) — same as production — so the
+        # thresholds are calibrated on the exact distribution production produces.
         track_config = create_track_hits_config(
             max_keys=max_keys, hits_chunk_size=best_hits,
-            inter_thresh=1.0, box_enabled=True, maxg=maxg, **box_kw)
+            inter_thresh=1.0, box_enabled=True, maxg=maxg)
         thresh_sim = DetectorSimulator(
             detector_config,
             total_pad=total_pad,
             response_chunk_size=best_response,
             include_track_hits=True,
             track_config=track_config,
+            group_size=args.group_size,
+            gap_threshold_mm=args.gap_threshold,
         )
         thresh_sim.warm_up()
 
@@ -729,8 +718,7 @@ def main():
         config_values['maxg_medium'] = maxg_medium
     # Box (group-as-bucket) per-group dims are NOT stored: the simulator derives
     # them analytically from the group definition + geometry at construction
-    # (tools.track_hits.compute_box_dims). The profiled box_dims below are used
-    # only to size the timing sims in this run.
+    # (tools.track_hits.compute_box_dims), including for the timing sims above.
 
     save_config(args.output, config_values, detector_config_path=args.config)
 
