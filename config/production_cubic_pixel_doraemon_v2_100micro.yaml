@@ -1,0 +1,17 @@
+# JAXTPC production config — cubic_pixel on doraemon data
+# Profiled from 100 files (20k events, run_0026628546).
+# max_keys from prior full-dataset validation (14M, zero overflows).
+# total_pad bumped to 1,330,000 for unseen tail in remaining 400 files.
+#
+# UNITS: pixel hits AND sensor signal are in ADC.
+detector_config: config/cubic_pixel_config.yaml
+total_pad: 1330000
+response_chunk: 38000
+hits_chunk: 66500
+max_keys: 14000000
+maxg: 280000
+maxg_medium: 130000
+inter_thresh: 1.0
+threshold_adc: 7.0
+corr_threshold: 1.0
+max_buckets: 1000
