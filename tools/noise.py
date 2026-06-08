@@ -208,9 +208,16 @@ def _generate_noise_for_buckets(key, max_buckets, B1, B2, spectrum_shape,
     )(keys, bucket_series_rms)
 
 
-def add_noise(response_signals, config, threshold_enc=0, key=None):
+def add_noise(response_signals, config, threshold_enc=0, key=None, *,
+              incoherent=True, coherent=False, coherent_cfg=None):
     """
-    Add realistic intrinsic noise to dense detector response signals.
+    Add tagged noise to dense detector response signals (host-level entry).
+
+    A single tagged function covering both forward noise components; ``incoherent``
+    / ``coherent`` select which are applied. The incoherent component reuses the
+    same jitted kernel (``_generate_noise_for_plane``) as the in-JIT production
+    path; the coherent component delegates to
+    :func:`tools.coherent_noise.add_coherent_noise`.
 
     Parameters
     ----------
@@ -220,10 +227,18 @@ def add_noise(response_signals, config, threshold_enc=0, key=None):
     config : SimConfig
         Simulation configuration (from sim.config).
     threshold_enc : float, optional
-        Electron threshold for deadband zeroing. Values with |x| < threshold
-        (converted to ADC) are set to zero. Default 0 (no zeroing).
+        Electron threshold for deadband zeroing (applied with the incoherent
+        component). Values with |x| < threshold (converted to ADC) are set to
+        zero. Default 0 (no zeroing).
     key : jax.Array, optional
         JAX PRNGKey. Default is PRNGKey(0).
+    incoherent : bool, optional
+        Add per-wire MicroBooNE-ENC noise. Default True (back-compatible).
+    coherent : bool, optional
+        Add per-group shared-waveform coherent noise. Default False.
+    coherent_cfg : dict, optional
+        Override the coherent spectral/group parameters (defaults match the
+        ``simulation.coherent_noise`` YAML block).
 
     Returns
     -------
@@ -233,35 +248,47 @@ def add_noise(response_signals, config, threshold_enc=0, key=None):
     if key is None:
         key = jax.random.PRNGKey(0)
 
-    noise_x, noise_y, noise_z, emp_freqs, emp_shape = load_noise_params(
-        config.noise_spectrum_path)
-
     deadband_adc = threshold_enc / config.electrons_per_adc
     num_time_ticks = config.num_time_steps
 
-    spectrum_shape = _get_noise_spectrum_shape(num_time_ticks, emp_freqs, emp_shape)
-    spectrum_jax = jnp.array(spectrum_shape)
+    noisy_signals = dict(response_signals)
 
-    noisy_signals = {}
+    if incoherent:
+        noise_x, noise_y, noise_z, emp_freqs, emp_shape = load_noise_params(
+            config.noise_spectrum_path)
+        spectrum_jax = jnp.array(
+            _get_noise_spectrum_shape(num_time_ticks, emp_freqs, emp_shape))
 
-    for (vol_idx, plane_idx), signal in response_signals.items():
-        num_wires = config.volumes[vol_idx].num_wires[plane_idx]
-        lengths = config.volumes[vol_idx].wire_lengths_m[plane_idx]
+        for (vol_idx, plane_idx), signal in list(noisy_signals.items()):
+            num_wires = config.volumes[vol_idx].num_wires[plane_idx]
+            lengths = config.volumes[vol_idx].wire_lengths_m[plane_idx]
 
-        series_rms = jnp.array(noise_y + noise_z * lengths, dtype=jnp.float32)
+            series_rms = jnp.array(noise_y + noise_z * lengths, dtype=jnp.float32)
 
-        key, subkey = jax.random.split(key)
-        noise = _generate_noise_for_plane(
-            subkey, num_wires, num_time_ticks,
-            spectrum_jax, series_rms, noise_x
-        )
+            key, subkey = jax.random.split(key)
+            noise = _generate_noise_for_plane(
+                subkey, num_wires, num_time_ticks,
+                spectrum_jax, series_rms, noise_x
+            )
 
-        noisy = jnp.asarray(signal) + noise
+            noisy = jnp.asarray(signal) + noise
 
-        if deadband_adc > 0:
-            noisy = jnp.where(jnp.abs(noisy) < deadband_adc, 0.0, noisy)
+            if deadband_adc > 0:
+                noisy = jnp.where(jnp.abs(noisy) < deadband_adc, 0.0, noisy)
 
-        noisy_signals[(vol_idx, plane_idx)] = noisy
+            noisy_signals[(vol_idx, plane_idx)] = noisy
+
+    if coherent:
+        from tools.coherent_noise import add_coherent_noise
+        key, coh_key = jax.random.split(key)
+        coh_rng = np.random.default_rng(
+            int(jax.random.randint(coh_key, (), 0, 2**31 - 1)))
+        num_wires_by_key = {
+            (v, p): config.volumes[v].num_wires[p]
+            for (v, p) in noisy_signals}
+        noisy_signals = add_coherent_noise(
+            noisy_signals, num_wires_by_key, num_time_ticks,
+            coherent_cfg=coherent_cfg, rng=coh_rng)
 
     return noisy_signals
 

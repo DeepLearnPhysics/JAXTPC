@@ -72,12 +72,33 @@ class DiffusionConfig(NamedTuple):
 
 
 class TrackHitsConfig(NamedTuple):
-    """Configuration for track hit labeling."""
-    threshold: float        # Minimum charge to keep
+    """Configuration for track hit labeling.
+
+    Threshold units differ per readout (see CLAUDE.md "Units convention"):
+    wire hits are in ENC (electrons), pixel hits are in ADC. So ``inter_thresh``
+    and downstream ``hits_threshold`` are interpreted in ENC for wire and ADC
+    for pixel — same field name, different units.
+    """
+    threshold: float        # Minimum charge to keep (legacy; not used in production)
     max_tracks: int         # Max tracks for array pre-allocation
-    max_keys: int           # Max unique (track, wire, time) combinations
+    max_keys: int           # Max unique (track, wire, time) combinations (merge path)
     hits_chunk_size: int    # Deposits per fori_loop chunk (must divide padding tiers)
-    inter_thresh: float     # Intermediate pruning threshold per merge iteration
+    inter_thresh: float     # In-JIT pruning threshold (merge & box). Units: ENC (wire) / ADC (pixel)
+    # Group-as-bucket ("box") path (production default). box_enabled selects it
+    # over the sort-merge fallback. maxg bounds the per-event group count (box
+    # first dim); the sim raises maxg_overflow above it. Box dims cover each
+    # group's local footprint + kernel (pixel: box_bpy/box_bpz/box_bt; wire:
+    # box_bw/box_btw) and are a function of the GROUP DEFINITION + geometry, so
+    # the simulator computes them analytically at construction
+    # (track_hits.compute_box_dims) when left as None. Pass explicit ints to
+    # override (tests / SCE margin).
+    box_enabled: bool = True
+    maxg: int = 200_000
+    box_bpy: int = None
+    box_bpz: int = None
+    box_bt: int = None
+    box_bw: int = None
+    box_btw: int = None
 
 
 class SimConfig(NamedTuple):
@@ -207,14 +228,33 @@ def create_track_hits_config(
     max_keys: int = 4000000,
     hits_chunk_size: int = 25000,
     inter_thresh: float = 1.0,
+    box_enabled: bool = True,
+    maxg: int = 200_000,
+    box_bpy: int = None,
+    box_bpz: int = None,
+    box_bt: int = None,
+    box_bw: int = None,
+    box_btw: int = None,
 ) -> TrackHitsConfig:
-    """Create TrackHitsConfig with specified parameters."""
+    """Create TrackHitsConfig with specified parameters.
+
+    Box dims (box_bpy/bpz/bt, box_bw/btw) default to None: the simulator fills
+    them analytically from the group definition + geometry at construction
+    (see tools.track_hits.compute_box_dims). Pass explicit ints to override.
+    """
     return TrackHitsConfig(
         threshold=threshold,
         max_tracks=max_tracks,
         max_keys=max_keys,
         hits_chunk_size=hits_chunk_size,
         inter_thresh=inter_thresh,
+        box_enabled=box_enabled,
+        maxg=maxg,
+        box_bpy=box_bpy,
+        box_bpz=box_bpz,
+        box_bt=box_bt,
+        box_bw=box_bw,
+        box_btw=box_btw,
     )
 
 
