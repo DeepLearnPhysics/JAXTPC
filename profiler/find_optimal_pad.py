@@ -13,8 +13,10 @@ Usage:
 import argparse
 import glob
 import math
+import multiprocessing as mp
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -58,6 +60,60 @@ def round_up_to_multiple(value, multiple):
     return int(math.ceil(value / multiple) * multiple)
 
 
+def _scan_file_for_pad(args):
+    """Worker: scan one HDF5 file, return (path, per-event counts)."""
+    fpath, volume_ranges, max_events = args
+    counts = []
+    with h5py.File(fpath, 'r') as f:
+        ds = f['pstep/lar_vol']
+        n_events = ds.shape[0]
+        if max_events is not None:
+            n_events = min(n_events, max_events)
+        for i in range(n_events):
+            row = ds[i]
+            positions_mm = np.column_stack([
+                row['x'].astype(np.float32),
+                row['y'].astype(np.float32),
+                row['z'].astype(np.float32),
+            ])
+            counts.append(count_deposits_per_volume(positions_mm, volume_ranges))
+    return fpath, counts
+
+
+def scan_files_for_pad(h5_files, volume_ranges, max_events=None,
+                       n_workers=1, print_progress=True):
+    """Scan files (optionally in parallel) and collect per-event volume counts.
+
+    Returns (all_counts, total_events) where all_counts is a list of
+    per-volume count lists (one entry per event).
+    """
+    args_list = [(fp, volume_ranges, max_events) for fp in h5_files]
+    all_counts = []
+    total = 0
+
+    if n_workers <= 1 or len(h5_files) <= 1:
+        for i, args in enumerate(args_list, 1):
+            fpath, counts = _scan_file_for_pad(args)
+            all_counts.extend(counts)
+            total += len(counts)
+            if print_progress and len(h5_files) > 1:
+                print(f'  [{i}/{len(h5_files)}] {os.path.basename(fpath)}: '
+                      f'{len(counts)} events', flush=True)
+        return all_counts, total
+
+    ctx = mp.get_context('spawn')
+    with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as ex:
+        futures = [ex.submit(_scan_file_for_pad, a) for a in args_list]
+        for done, fut in enumerate(as_completed(futures), 1):
+            fpath, counts = fut.result()
+            all_counts.extend(counts)
+            total += len(counts)
+            if print_progress:
+                print(f'  [{done}/{len(h5_files)}] {os.path.basename(fpath)}: '
+                      f'{len(counts)} events', flush=True)
+    return all_counts, total
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Find optimal total_pad from event data')
@@ -73,6 +129,9 @@ def main():
                         help='Save total_pad to production config YAML')
     parser.add_argument('--use-max', action='store_true',
                         help='Save the max-based suggestion (default: p99.9)')
+    parser.add_argument('--workers', type=int, default=1,
+                        help='Parallel worker processes for file scanning '
+                             '(default: 1 = serial)')
 
     args = parser.parse_args()
 
@@ -103,35 +162,10 @@ def main():
     print(f'  Files:     {len(h5_files)}')
     print()
 
-    # Scan all events
-    all_counts = []  # list of lists: [event][volume] = count
-    total_events = 0
-
-    for file_path in h5_files:
-        fname = os.path.basename(file_path)
-        with h5py.File(file_path, 'r') as f:
-            pstep_path = 'pstep/lar_vol'
-            if pstep_path not in f:
-                print(f"  WARNING: {pstep_path} not found in {fname}, skipping")
-                continue
-
-            ds = f[pstep_path]
-            n_events = ds.shape[0]
-            if args.events is not None:
-                n_events = min(n_events, args.events)
-
-            for i in range(n_events):
-                steps = ds[i]
-                positions_mm = np.column_stack([
-                    steps['x'].astype(np.float32),
-                    steps['y'].astype(np.float32),
-                    steps['z'].astype(np.float32),
-                ])
-                counts = count_deposits_per_volume(positions_mm, volume_ranges)
-                all_counts.append(counts)
-
-            total_events += n_events
-            print(f'  {fname}: {n_events} events scanned')
+    # Scan all events (optionally in parallel)
+    all_counts, total_events = scan_files_for_pad(
+        h5_files, volume_ranges, max_events=args.events,
+        n_workers=args.workers, print_progress=True)
 
     if not all_counts:
         print('No events found!')

@@ -2,12 +2,17 @@
 Measure charge/signal loss from thresholding at various levels.
 
 Two independent thresholds:
-  1. corr_threshold (electrons): filters correspondence entries in CSR encoding.
-     Charge loss = sum(dropped charge) / sum(total charge).
-  2. threshold_adc (ADC): filters sparse signal output.
+  1. corr_threshold: filters correspondence (hits) entries in CSR encoding.
+     UNITS DIFFER BY READOUT -- ENC (electrons) for wire, ADC for pixel. The loss
+     math uses abs() so it is unit-agnostic, but a mixed wire+pixel detector would
+     pool incompatible magnitudes (not guarded; current configs are single-readout).
+     Charge loss = sum(dropped |charge|) / sum(total |charge|).
+  2. threshold_adc (ADC, both readouts): filters sparse signal output.
      Signal loss = sum(|dropped signal|) / sum(|total signal|).
 
-Neither requires re-running the simulation — one sim run, then sweep in post-processing.
+Neither requires re-running the simulation -- one sim run (box path), then sweep in
+post-processing. Does NOT set inter_thresh (hardcoded 1.0 in setup_production; it
+drives max_keys). See CLAUDE.md "Units convention".
 
 Usage:
     python3 -m profiler.threshold_analysis --data events.h5 --config config.yaml

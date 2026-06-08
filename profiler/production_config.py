@@ -32,6 +32,8 @@ CONFIG_FIELDS = {
     'response_chunk': 'response_chunk',
     'hits_chunk':     'hits_chunk',
     'max_keys':       'max_keys',
+    'maxg':           'maxg',
+    'maxg_medium':    'maxg_medium',
     'inter_thresh':   'inter_thresh',
     'threshold_adc':  'threshold_adc',
     'corr_threshold': 'hits_threshold',
@@ -103,11 +105,12 @@ def update_config(path, updates, detector_config_path=None):
     save_config(path, existing, detector_config_path=det_path)
 
 
-def apply_to_args(args, config):
+def apply_to_args(args, config, explicit=None):
     """Apply loaded config values to an argparse Namespace.
 
-    Only overwrites args that are still at their default values.
-    This lets explicit CLI args take precedence over the config file.
+    Fills each managed field from the config UNLESS the user passed that arg
+    explicitly on the CLI. Precedence: explicit CLI > config file > argparse
+    default.
 
     Parameters
     ----------
@@ -115,13 +118,17 @@ def apply_to_args(args, config):
         Parsed CLI args from run_batch.py.
     config : dict
         From load_config().
+    explicit : set of str, optional
+        Arg dest names the user passed explicitly on the CLI (these are not
+        overwritten). If None, every present config field is applied.
 
     Returns
     -------
     argparse.Namespace
         Modified in-place and returned.
     """
+    explicit = explicit or set()
     for config_key, arg_name in CONFIG_FIELDS.items():
-        if config_key in config:
+        if config_key in config and arg_name not in explicit:
             setattr(args, arg_name, config[config_key])
     return args
