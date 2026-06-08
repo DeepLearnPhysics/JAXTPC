@@ -4,7 +4,7 @@
 Serves production HDF5 files + the viewer frontend. Files are matched
 by dataset_name (embedded in filenames as {dataset}_{kind}_{batch}.h5).
 
-Supports both flat directories and edep/hits/sensor subdirectory layouts.
+Supports both flat directories and step/hits/sensor subdirectory layouts.
 
 Usage:
     python3 viewer/serve_viewer.py production_run/
@@ -22,7 +22,7 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from glob import glob
 
-KINDS = ('edep', 'hits', 'sensor')
+KINDS = ('step', 'hits', 'sensor')
 OPTIONAL_KINDS = ('labl', 'sensor_optical', 'optical')
 
 # sensor_optical → optical in the manifest (GOOP PMT readout stored separately
@@ -37,11 +37,11 @@ def find_h5_files(prod_dir):
     found = {}  # kind -> [abspath, ...]
     for kind in KINDS + OPTIONAL_KINDS:
         files = []
-        # Subdirectory layout: prod_dir/edep/*.h5
+        # Subdirectory layout: prod_dir/step/*.h5
         sub = os.path.join(prod_dir, kind)
         if os.path.isdir(sub):
             files += glob(os.path.join(sub, f'*_{kind}_*.h5'))
-        # Flat layout: prod_dir/*_edep_*.h5
+        # Flat layout: prod_dir/*_step_*.h5
         files += glob(os.path.join(prod_dir, f'*_{kind}_*.h5'))
         # Deduplicate and filter
         files = sorted(set(os.path.abspath(f) for f in files))
@@ -80,7 +80,7 @@ def select_dataset(prod_dir, requested=None):
     datasets = discover_datasets(prod_dir)
 
     if not datasets:
-        sys.exit(f"Error: no HDF5 files matching *_{{edep,hits,sensor}}_*.h5 found in {prod_dir}")
+        sys.exit(f"Error: no HDF5 files matching *_{{step,hits,sensor}}_*.h5 found in {prod_dir}")
 
     if requested:
         if requested not in datasets:

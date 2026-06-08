@@ -1,6 +1,6 @@
 import h5wasm from 'https://cdn.jsdelivr.net/npm/h5wasm@0.10.1/dist/esm/hdf5_hl.js';
 
-let mod, edepF, hitsF, sensorF, lablF, optF, maxTime, nEvents, nVolumes, nPlanes;
+let mod, stepF, hitsF, sensorF, lablF, optF, maxTime, nEvents, nVolumes, nPlanes;
 let hasSensor = false;
 let hasLabl = false;
 let hasOptical = false;
@@ -90,7 +90,7 @@ function aggregateDisplay(pk, ch, mod2) {
 
 function decodeEvent(idx) {
   const key = 'event_' + String(idx).padStart(3, '0');
-  const sEvt = edepF.get(key);
+  const sEvt = stepF.get(key);
   const cEvt = hitsF.get(key);
   const lEvt = hasLabl ? lablF.get(key) : null;
   const srcIdx = readAttr(sEvt, 'source_event_idx') || idx;
@@ -584,11 +584,11 @@ self.onmessage = async function(e) {
     mod = await h5wasm.ready;
     const base = e.data.base;
     const manifest = e.data.manifest;
-    const edepKey = manifest.edep || manifest.seg;
+    const stepKey = manifest.step || manifest.seg;
     const hitsKey = manifest.hits || manifest.inst;
-    mountUrl(base + '/' + edepKey, 'edep.h5');
+    mountUrl(base + '/' + stepKey, 'step.h5');
     mountUrl(base + '/' + hitsKey, 'hits.h5');
-    edepF = new h5wasm.File('/edep.h5', 'r');
+    stepF = new h5wasm.File('/step.h5', 'r');
     hitsF = new h5wasm.File('/hits.h5', 'r');
 
     // Sensor file is optional for pixel (signal derivable from inst)
@@ -606,27 +606,27 @@ self.onmessage = async function(e) {
     }
 
     // Verify run_id consistency across files
-    const edepRid = readAttr(edepF.get('config'), 'run_id');
+    const stepRid = readAttr(stepF.get('config'), 'run_id');
     const hitsRid = readAttr(hitsF.get('config'), 'run_id');
-    if (edepRid != null && hitsRid != null && edepRid !== hitsRid) {
-      throw new Error(`run_id mismatch: edep=${edepRid}, hits=${hitsRid}`);
+    if (stepRid != null && hitsRid != null && stepRid !== hitsRid) {
+      throw new Error(`run_id mismatch: step=${stepRid}, hits=${hitsRid}`);
     }
     if (hasSensor) {
       const sensorRid = readAttr(sensorF.get('config'), 'run_id');
-      if (edepRid != null && sensorRid != null && edepRid !== sensorRid) {
-        throw new Error(`run_id mismatch: edep=${edepRid}, sensor=${sensorRid}`);
+      if (stepRid != null && sensorRid != null && stepRid !== sensorRid) {
+        throw new Error(`run_id mismatch: step=${stepRid}, sensor=${sensorRid}`);
       }
     }
     if (hasLabl) {
       const lablRid = readAttr(lablF.get('config'), 'run_id');
-      if (edepRid != null && lablRid != null && edepRid !== lablRid) {
-        throw new Error(`run_id mismatch: edep=${edepRid}, labl=${lablRid}`);
+      if (stepRid != null && lablRid != null && stepRid !== lablRid) {
+        throw new Error(`run_id mismatch: step=${stepRid}, labl=${lablRid}`);
       }
     }
 
     maxTime = readAttr(hitsF.get('config'), 'num_time_steps');
-    nEvents = readAttr(edepF.get('config'), 'n_events');
-    nVolumes = readAttr(edepF.get('config'), 'n_volumes') || 2;
+    nEvents = readAttr(stepF.get('config'), 'n_events');
+    nVolumes = readAttr(stepF.get('config'), 'n_volumes') || 2;
     const nwRaw = hitsF.get('config/num_wires').value;
     nPlanes = nwRaw.length / nVolumes;
     isPixel = (nPlanes === 0);
@@ -671,7 +671,7 @@ self.onmessage = async function(e) {
     }
     // Read volume ranges (n_volumes, 3, 2) in mm
     let volRanges = null;
-    const vrDs = edepF.get('config/volume_ranges');
+    const vrDs = stepF.get('config/volume_ranges');
     if (vrDs) {
       const vr = new Float32Array(vrDs.value);
       volRanges = [];

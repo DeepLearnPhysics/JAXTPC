@@ -185,7 +185,7 @@ function deTex(){return lightMode?infernoTex:warmTex;}
 // DATA LOADING (via Worker)
 // ============================================================
 // Map each optical region to the earliest true deposit t0 of its interactions.
-// Uses tpc_t_step from the optical file itself (no edep/labl dependency).
+// Uses tpc_t_step from the optical file itself (no step/labl dependency).
 let optRegionRevealUs=null;
 function buildOptRegionReveal(){
   optRegionRevealUs=null;
