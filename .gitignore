@@ -9,6 +9,11 @@ __pycache__/
 logs/
 profiler/figures/
 
+# Local scratch: profiling experiments + production run logs/artifacts
+experiments/
+neutrino_data/
+tests/golden/data/
+
 # Harness / editor
 .claude/
 .DS_Store
