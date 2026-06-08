@@ -36,7 +36,8 @@ def simulation_result():
     jax.clear_caches()
     gc.collect()
 
-    track_config = create_track_hits_config()
+    # box_enabled now defaults to True; this test pins the merge path it was written for.
+    track_config = create_track_hits_config(box_enabled=False)
     simulator = DetectorSimulator(
         detector_config,
         include_track_hits=True,

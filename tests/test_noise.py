@@ -164,3 +164,80 @@ class TestStandaloneNoise:
         noisy = add_noise(fake, sim_config, key=jax.random.PRNGKey(42))
         for key, arr in noisy.items():
             assert float(jnp.std(arr)) > 0, f"{key}: noise should be nonzero"
+
+    def test_add_noise_incoherent_reproducible(self, sim_config):
+        """Default (incoherent) add_noise is deterministic for a fixed key —
+        the in-JIT incoherent kernel is unchanged by the tagged refactor."""
+        from tools.noise import add_noise
+        fake = {(s, p): jnp.zeros((sim_config.volumes[s].num_wires[p],
+                                    sim_config.num_time_steps))
+                for s in range(sim_config.n_volumes)
+                for p in range(sim_config.volumes[s].n_planes)}
+        a = add_noise(fake, sim_config, key=jax.random.PRNGKey(5))
+        b = add_noise(fake, sim_config, key=jax.random.PRNGKey(5))
+        for k in a:
+            np.testing.assert_array_equal(np.asarray(a[k]), np.asarray(b[k]))
+
+
+class TestCoherentNoise:
+    """Tests for the tagged coherent component (tools/coherent_noise.py)."""
+
+    def test_add_coherent_noise_matches_per_plane(self):
+        """The dict-level applier == per-plane generate_coherent_noise drawn
+        from the same Generator, in insertion order."""
+        from tools.coherent_noise import (add_coherent_noise,
+                                           generate_coherent_noise)
+        sigs = {(0, 0): np.zeros((100, 256), np.float32),
+                (0, 1): np.zeros((50, 256), np.float32)}
+        nwk = {(0, 0): 100, (0, 1): 50}
+        cfg = dict(group_size=32, beta=0.15, rms_adc=2.5)
+
+        out = add_coherent_noise({k: v.copy() for k, v in sigs.items()},
+                                 nwk, 256, coherent_cfg=cfg,
+                                 rng=np.random.default_rng(7))
+
+        rng = np.random.default_rng(7)
+        exp00 = generate_coherent_noise(100, 256, group_size=32, beta=0.15,
+                                        rms_adc=2.5, rng=rng)
+        exp01 = generate_coherent_noise(50, 256, group_size=32, beta=0.15,
+                                        rms_adc=2.5, rng=rng)
+        np.testing.assert_allclose(np.asarray(out[(0, 0)]), exp00, atol=1e-5)
+        np.testing.assert_allclose(np.asarray(out[(0, 1)]), exp01, atol=1e-5)
+
+    def test_coherent_shared_within_group_and_no_root_n(self):
+        """Wires in a group are identical, and per-channel RMS ~ rms_adc
+        (the shared waveform is NOT averaged down by 1/sqrt(group_size))."""
+        from tools.coherent_noise import generate_coherent_noise
+        gs, rms = 64, 2.5
+        noise = generate_coherent_noise(256, 4096, group_size=gs, rms_adc=rms,
+                                        rng=np.random.default_rng(3))
+        for g0 in range(0, 256, gs):
+            assert np.allclose(noise[g0:g0 + gs], noise[g0][None, :])
+        per_channel_rms = noise.std(axis=1).mean()
+        assert 0.75 * rms < per_channel_rms < 1.5 * rms
+
+    def test_add_noise_coherent_tag(self, ):
+        """Host add_noise(coherent=True) adds a per-group shared waveform."""
+        import os
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                   'config', 'cubic_wireplane_config.yaml')
+        if not os.path.exists(config_path):
+            pytest.skip("Config file not found")
+        from tools.geometry import generate_detector
+        from tools.simulation import DetectorSimulator
+        from tools.noise import add_noise
+        det = generate_detector(config_path)
+        sim = DetectorSimulator(det, include_noise=False,
+                                include_electronics=False,
+                                include_track_hits=False)
+        cfg = sim.config
+        fake = {(s, p): jnp.zeros((cfg.volumes[s].num_wires[p],
+                                    cfg.num_time_steps))
+                for s in range(cfg.n_volumes)
+                for p in range(cfg.volumes[s].n_planes)}
+        out = add_noise(fake, cfg, key=jax.random.PRNGKey(1),
+                        incoherent=False, coherent=True,
+                        coherent_cfg=dict(group_size=64))
+        arr = np.asarray(out[(0, 0)])
+        assert float(arr.std()) > 0
+        assert np.allclose(arr[0], arr[1]), "wires 0,1 share a coherent group"
