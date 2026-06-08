@@ -38,7 +38,7 @@ JAXTPC/
 │   ├── setup_production.py       # Auto-tune total_pad, chunks, max_keys
 │   ├── find_optimal_pad.py       # Scan data for max deposits per volume
 │   ├── find_optimal_chunks.py    # Find optimal chunk sizes
-│   ├── find_optimal_max_keys.py  # Probe track-hits capacity
+│   ├── find_optimal_maxg.py      # Scan → maxg + max_keys (one pass)
 │   └── ...                       # Per-parameter tuning scripts
 ├── tests/                        # Pytest test suite
 │   ├── test_pipeline.py          # End-to-end integration tests
