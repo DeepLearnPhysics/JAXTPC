@@ -2,7 +2,7 @@
 Temporary labl generator.
 
 Produces the ``labl/`` directory from the hits/ output + the edepsim
-source file. Edep is **not** consulted because edep is pure physics
+source file. Step is **not** consulted because step is pure physics
 and does not carry track-related arrays.
 
 Per-deposit → track_id comes from hits::
@@ -18,7 +18,7 @@ Output layout (matches pimm-data's ``JAXTPCLablReader``)::
     {outdir}/labl/{dataset}_labl_{NNNN}.h5
         /config/ attrs
         /event_NNN/volume_N/
-            # Per-deposit (N,) foreign key row-aligned with edep rows
+            # Per-deposit (N,) foreign key row-aligned with step rows
             deposit_to_track    (N,) int32
 
             # Per-unique-track (T,) dimension table
@@ -49,6 +49,13 @@ import time
 
 import h5py
 import numpy as np
+
+# Register blosc/zstd/lz4 HDF5 filters so hits output written with the
+# default run_batch codec (blosc-zstd) is readable. No-op if absent.
+try:
+    import hdf5plugin  # noqa: F401
+except ImportError:
+    pass
 
 # Ensure tools/ is importable when run from project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

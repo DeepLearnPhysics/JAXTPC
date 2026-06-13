@@ -36,17 +36,19 @@ JAXTPC/
 │   └── data/                  # PDG muon dE/dx table
 ├── production/                # Batch processing pipeline
 │   ├── run_batch.py           # CLI batch simulator → structured HDF5 output
-│   ├── save.py                # HDF5 writers (sensor/edep/hits with delta + CSR encoding)
+│   ├── save.py                # HDF5 writers (sensor/step/hits with delta + CSR encoding)
 │   ├── load.py                # HDF5 readers + minimal viz config builder
 │   ├── make_labl.py           # Separate writer: per-track labl/ files (stand-in)
 │   └── view_production.ipynb  # Visualize production output (no sim needed)
 ├── profiler/                  # Production parameter auto-tuning
-│   ├── setup_production.py    # One-shot pad/chunks/max_keys/thresholds config
+│   ├── setup_production.py    # One-shot pad/maxg/max_keys/chunks/thresholds config
 │   ├── find_optimal_pad.py    # Scan data → total_pad
+│   ├── find_optimal_maxg.py   # One CPU scan → maxg + max_keys
+│   ├── estimate_max_keys.py   # Charge-aware max_keys estimator (value tables + charge model)
+│   ├── compare_max_keys.py    # Validate/calibrate estimate vs actual box sim (GPU)
+│   ├── scan_values.py         # CPU-only values + config patch + plots
 │   ├── find_optimal_chunks.py # Two-pass timing → response_chunk, hits_chunk
-│   ├── find_optimal_max_keys.py / find_optimal_max_buckets.py
-│   ├── threshold_analysis.py  # Post-sim sweep → threshold_adc, corr_threshold
-│   └── benchmark_sim.py       # Feature/parameter timing sweeps
+│   └── threshold_analysis.py  # Post-sim sweep → threshold_adc, corr_threshold
 ├── tests/                     # Pytest suite (77 tests, CPU-only, synthetic data)
 │   └── conftest.py            # Fixtures: jax_key, minimal_detector_config, ...
 ├── viewer/                    # Interactive 3D/2D HTML viewer + GIF export
@@ -154,6 +156,25 @@ For each event, per volume, per plane:
    - **Digitization** (`electronics.py`): ADC quantization with per-plane pedestals (12-bit default)
    - **Track labeling** (`track_hits.py`): Group-based charge attribution using diffusion kernel neighbors
 
+### Units convention (wire ≠ pixel, by design)
+
+The wire and pixel paths use *different* unit conventions at the hits stage. This is intentional: wire applies the field response *pre*-electronics so the kernel is dimensionless, while pixel bakes the chip gain into the kernel and skips the digitize step entirely.
+
+| Readout | Kernel | Hits stage | Sensor signal | Pipeline |
+|---|---|---|---|---|
+| **Wire** | Dimensionless e-impulse fraction | **ENC** (electrons) | **ADC** (12-bit, post-digitize) | response (ENC) → electronics → noise → digitize → ADC |
+| **Pixel** | ADC per drift-electron (gain baked in) | **ADC** | **ADC** (no separate digitize) | response → done (signal and hits derived from same pass) |
+
+**Threshold units by readout** (the ones that bite — same field name, different meaning):
+
+| Threshold | Wire | Pixel | Where applied |
+|---|---|---|---|
+| `inter_thresh` | ENC | ADC | In JIT: box compaction (`track_hits.py:1144` wire / `:839` pixel) and merge per-chunk pruning (`merge_chunk_sensor_hits:315`) |
+| `corr_threshold` / `hits_threshold` | ENC | ADC | Host, CSR encode (`save.py:447` wire / `:528` pixel) |
+| `threshold_adc` | ADC | ADC | Host, `to_sparse` (`output.py:155, 203, 250…`) on sensor only |
+
+**Wire kernel NPZ caveat:** `tools/responses/{U,V,Y}_plane_kernel.npz` carry `units = 'ADC_per_electron'` plus an `adc_per_electron ≈ 0.005` field. **In this pipeline `tools/kernels.py:load_response_kernels` treats the kernel values as a dimensionless field-impulse contribution** — `intensity (electrons) × kernel → ENC`. The `adc_per_electron`/`electrons_per_adc` metadata is *not* consumed in the JIT path; it's informational, reflecting the kernel's first-principles calibration source. The "ADC" in `_digitize_signal` is just the quantization step (round + pedestal + clip) on values that the downstream electronics chain has shaped into ADC-scale.
+
 ## Output Formats
 
 Three internal formats, converted via `tools/output.py`:
@@ -183,7 +204,7 @@ response_signals, track_hits_raw, deposits = simulator.process_event(deposits, k
 ### Batch production
 ```bash
 python3 production/run_batch.py --data events.h5 --events 100 --dataset myrun --outdir output/
-python3 production/run_batch.py --data events.h5 --noise --electronics --bucketed --workers 2
+python3 production/run_batch.py --data events.h5 --intrinsic --electronics --workers 2
 
 # Recommended: generate optimized config with profiler, then use it
 python3 -m profiler.setup_production --data events.h5 --config config/cubic_wireplane_config.yaml
@@ -192,24 +213,26 @@ python3 production/run_batch.py --data events.h5 \
     --production-config config/production_cubic_wireplane_config.yaml
 ```
 
-The profiler scans data and probes the simulator to set `total_pad`, `response_chunk`, `hits_chunk`, `max_keys`, `max_buckets`, `threshold_adc`, `corr_threshold`, `inter_thresh`. Without it, mis-sized `total_pad`/`max_keys`/`max_buckets` raise `RuntimeError` at runtime. See `profiler/README.md`.
+The profiler scans data (CPU) and benchmarks the sim (GPU, chunks + maxg_medium only) to set `total_pad`, `maxg`/`maxg_medium`, box dims, `max_keys`, `response_chunk`, `hits_chunk`, `threshold_adc`, `corr_threshold`. `max_keys` is a **charge-aware geometry estimate** (`estimate_max_keys.py`): per deposit, count response-kernel cells clearing the absolute `inter_thresh` for that deposit's intensity (recombination × attenuation), summed — then corrected by a per-readout overlap knob (**pixel `c*=2.5`** threshold, **wire `÷3.79`** factor; calibrated on doraemon, verify with `compare_max_keys`). Track-hits is **box mode by default**. Without a profiled config, mis-sized `total_pad`/`max_keys`/`max_buckets` raise `RuntimeError` (or truncate+log) at runtime. See `profiler/README.md`.
 
 Produces three HDF5 file types per batch:
 - `{dataset}_sensor_{NNNN}.h5` — sparse thresholded raw readout (delta-encoded, uint16 if digitized)
-- `{dataset}_edep_{NNNN}.h5` — 3D truth deposits (pure physics: positions + de/dx/theta/phi/t0_us + charge/photons; no instance or track info)
+- `{dataset}_step_{NNNN}.h5` — 3D truth deposits (pure physics: positions + de/dx/theta/phi/t0_us + charge/photons; no instance or track info)
 - `{dataset}_hits_{NNNN}.h5` — per-particle sensor decomposition + group machinery (deposit_to_group, qs_fractions, group_to_track per volume; per-plane CSR-encoded pixel entries)
 
 A fourth file, `{dataset}_labl_{NNNN}.h5`, carries per-track labels and the per-deposit → track_id foreign key. It is produced separately via `production/make_labl.py` (temp stand-in; reads hits + edepsim). See `production/README.md` for the labl schema and workflow.
 
-Threaded save architecture: main thread runs GPU sim, worker threads encode CSR + write HDF5 in parallel.
+Threaded save architecture: reader prefetch thread loads the next event's HDF5 while GPU sim runs; main thread dispatches sim; save worker threads (default 4) encode CSR + write HDF5 in parallel with per-file locks (`sen_lock`, `step_lock`, `hits_lock`) so sensor/step/hits writes overlap across workers. Enable `JAXTPC_PROFILE_SAVE=1` to see per-phase timings (encode/lockwait/write-sensor/write-step/write-hits) in the save log.
+
+**Output compression** (`--codec`, default `blosc-zstd`): all datasets are compressed with the codec set via `production/save.py:set_codec`. blosc-zstd is smaller than gzip *and* faster on both read and write (gzip is Pareto-dominated). Alternatives: `blosc-lz4hc` (gzip's size, ~4× faster reads), `blosc-lz4` (fastest read+write, +19% size), `gzip`, `lzf`. **Reading non-gzip output requires `import hdf5plugin`** — `production/load.py` and pimm-data's readers register it automatically; ad-hoc `h5py` consumers must import it themselves. Re-encode existing files between codecs with `pimm-data/scripts/transcode_codec.py`.
 
 ### Loading production output
 ```python
-from production.load import build_viz_config, load_event_sensor, load_event_edep, load_event_hits
+from production.load import build_viz_config, load_event_sensor, load_event_step, load_event_hits
 
 viz_config = build_viz_config('output/sensor/sim_sensor_0000.h5')
 dense_signals, attrs, pedestals = load_event_sensor(sensor_path, event_idx=0)
-volumes = load_event_edep(edep_path, event_idx=0)
+volumes = load_event_step(step_path, event_idx=0)
 track_hits, truth_dense, g2t = load_event_hits(hits_path, event_idx=0, num_time_steps=2701)
 ```
 
@@ -230,7 +253,7 @@ All tests run CPU-only on synthetic data. Markers: `slow` (kernel-dependent inte
 ### Interactive viewer / GIF export
 ```bash
 python3 viewer/serve_viewer.py output/ --open               # browser viewer
-python3 viewer/export_gif.py output/edep/sim_edep_0000.h5 --event 0
+python3 viewer/export_gif.py output/step/sim_step_0000.h5 --event 0
 ```
 
 ## Key Technical Patterns
@@ -250,6 +273,14 @@ python3 viewer/export_gif.py output/edep/sim_edep_0000.h5 --event 0
 - Factory pattern: per-volume functions built at init, captured in JIT closure
 - Padding entries have `de=0` → zero charges after recombination → zero contributions everywhere downstream (single masking point in `compute_volume_physics`)
 
+### Tiered production (planned)
+Sim cost is linear in capacities (`sim_time ≈ 0.13 + 5.4µs × maxg`). A single conservative `maxg` (sized for the tail) pays worst-case cost on every event. **Tiered routing** builds two `DetectorSimulator` instances (medium + high) with different `maxg`/`total_pad`/`max_keys` and routes per-event based on the **exact n_groups** (free on the host after load via `len(deposits.group_to_track[v])`):
+```python
+max_ng = max(len(g2t) for g2t in deposits.group_to_track)
+sim = sim_high if max_ng >= maxg_medium else sim_medium
+```
+Per-volume routing is not practical: `lax.scan`/`vmap` require uniform shapes across the volume axis, and all capacities are shared within one simulator. Per-event routing with two simulators requires zero changes to `tools/` — only `run_batch.py` dispatch logic + a second production config YAML. GPU memory is sequential (only one sim runs at a time). Profiler emits both medium (p99) and high (max + margin) configs. Expected ~2× throughput improvement over single-high for the doraemon dataset.
+
 ### Segment Correspondence
 - Deposits grouped into runs of N consecutive steps per track, split on spatial gaps
 - Group IDs computed per-volume (groups never span volumes)
@@ -263,6 +294,7 @@ python3 viewer/export_gif.py output/edep/sim_edep_0000.h5 --event 0
 - NumPy (host-side array operations)
 - Matplotlib (visualization)
 - H5py (HDF5 I/O)
+- hdf5plugin (blosc/zstd/lz4 HDF5 filters — required to read production output, whose default codec is blosc-zstd)
 - PyYAML (YAML config parsing)
 
 ## Development Notes
@@ -270,7 +302,7 @@ python3 viewer/export_gif.py output/edep/sim_edep_0000.h5 --event 0
 - Use `python3` (not `python`) on this system
 - Tests live in `tests/` (pytest, CPU-only); see the Tests section above for commands
 - JIT compilation causes initial warmup; `simulator.warm_up()` triggers it with dummy data
-- Memory management important for large events (500k+ deposits per volume) — use `--bucketed` (required for pixel readout) and/or the profiler to size capacities
+- Memory management important for large events (500k+ deposits per volume) — pixel readout uses the box (group-as-bucket) track-hits path by default; `--bucketed` is an optional wire-only sensor-accumulation memory-saver (not required for pixel). Use the profiler to size capacities (`total_pad`/`max_keys`/`maxg`)
 - Response kernels stored as NPZ in `tools/responses/` (U/V/Y plane types)
 - Group ids in production `hits/` files are **1-based** (entry `group_to_track[0]` is unused); see `production/README.md` for the full correspondence schema
 - Do not add Claude as a `Co-Authored-By` trailer on commits

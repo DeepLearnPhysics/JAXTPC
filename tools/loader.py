@@ -289,6 +289,13 @@ class ParticleStepExtractor:
                     if self.verbose:
                         print(f"Error extracting field {field}: {e}")
 
+        # New edep-sim renamed the per-step ancestry field
+        # 'root_track_id' -> 'ancestor_track_id'. Alias it back so every
+        # downstream step_data.get('root_track_id') consumer (loader,
+        # run_batch, make_labl) works on both old and new data.
+        if 'root_track_id' not in result and 'ancestor_track_id' in result:
+            result['root_track_id'] = result['ancestor_track_id']
+
         return result
 
     def get_step_to_particle_mapping(self, event_idx=0):

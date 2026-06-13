@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Generate a rotating 3D GIF/MP4 of JAXTPC segments cycling through color modes.
 
-Reads production edep HDF5 files directly and renders with matplotlib.
+Reads production step HDF5 files directly and renders with matplotlib.
 One full 360° rotation synchronized with dE → Track → PDG → Ancestor → Interaction.
 
 Usage:
-    python3 viewer/export_gif.py path/to/sim_edep_0000.h5 --event 0
-    python3 viewer/export_gif.py path/to/sim_edep_0000.h5 -e 0 -o rotate.mp4 --fps 30
-    python3 viewer/export_gif.py path/to/sim_edep_0000.h5 -e 0 --volume 0 --max-points 50000
+    python3 viewer/export_gif.py path/to/sim_step_0000.h5 --event 0
+    python3 viewer/export_gif.py path/to/sim_step_0000.h5 -e 0 -o rotate.mp4 --fps 30
+    python3 viewer/export_gif.py path/to/sim_step_0000.h5 -e 0 --volume 0 --max-points 50000
 """
 
 import argparse
@@ -15,6 +15,13 @@ import os
 import sys
 import numpy as np
 import h5py
+
+# Register blosc/zstd/lz4 HDF5 filters so step output written with the
+# default run_batch codec (blosc-zstd) is readable. No-op if absent.
+try:
+    import hdf5plugin  # noqa: F401
+except ImportError:
+    pass
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.animation import FuncAnimation, PillowWriter
@@ -107,19 +114,19 @@ def categorical_colors(ids, alpha=0.7):
 
 # ── Data loading ─────────────────────────────────────────────────
 
-def _default_labl_path(edep_path):
-    """Auto-locate the labl file alongside edep, if any.
+def _default_labl_path(step_path):
+    """Auto-locate the labl file alongside step, if any.
 
-    Looks first for sibling layout (..../edep/{ds}_edep_NNNN.h5 ->
+    Looks first for sibling layout (..../step/{ds}_step_NNNN.h5 ->
     ..../labl/{ds}_labl_NNNN.h5), then for a flat layout where files
     share a directory.
     """
-    base = os.path.basename(edep_path)
-    for old_pat, new_pat in [('_edep_', '_labl_')]:
+    base = os.path.basename(step_path)
+    for old_pat, new_pat in [('_step_', '_labl_')]:
         if old_pat not in base:
             continue
         labl_base = base.replace(old_pat, new_pat)
-        parent = os.path.dirname(edep_path)
+        parent = os.path.dirname(step_path)
         # Sibling subdir layout
         sibling = os.path.normpath(os.path.join(parent, '..', 'labl', labl_base))
         if os.path.isfile(sibling):
@@ -171,16 +178,16 @@ def _per_deposit_labels(labl_vol_group, n):
     }
 
 
-def load_edep_data(edep_path, event_idx, labl_path=None):
-    """Load 3D deposits from edep, joined with per-track labels from labl
+def load_step_data(step_path, event_idx, labl_path=None):
+    """Load 3D deposits from step, joined with per-track labels from labl
     if available. ``labl_path=None`` triggers auto-detection."""
     if labl_path is None:
-        labl_path = _default_labl_path(edep_path)
+        labl_path = _default_labl_path(step_path)
     has_labl = labl_path is not None and os.path.isfile(labl_path)
 
     event_key = f'event_{event_idx:03d}'
 
-    with h5py.File(edep_path, 'r') as f:
+    with h5py.File(step_path, 'r') as f:
         evt = f[event_key]
         n_volumes = int(evt.attrs.get('n_volumes', 2))
 
@@ -453,7 +460,7 @@ def make_gif(data, output, fps=30, duration=12.0, rotations=1, dpi=200,
 def main():
     parser = argparse.ArgumentParser(
         description='Generate rotating 3D GIF of JAXTPC energy deposits')
-    parser.add_argument('edep_file', help='Path to *_edep_*.h5 file')
+    parser.add_argument('step_file', help='Path to *_step_*.h5 file')
     parser.add_argument('--event', '-e', type=int, default=0,
                         help='Event index (default: 0)')
     parser.add_argument('--volume', '-v', type=int, default=None,
@@ -480,15 +487,15 @@ def main():
                         help='Use light background')
     parser.add_argument('--labl', default=None,
                         help='Path to *_labl_*.h5 (auto-detected next to '
-                             'edep by default; categorical color modes are '
+                             'step by default; categorical color modes are '
                              'skipped if labl is unavailable).')
     args = parser.parse_args()
 
-    if not os.path.isfile(args.edep_file):
-        sys.exit(f"Error: {args.edep_file} not found")
+    if not os.path.isfile(args.step_file):
+        sys.exit(f"Error: {args.step_file} not found")
 
-    print(f"Loading {args.edep_file} event {args.event}...")
-    volumes, has_labl = load_edep_data(args.edep_file, args.event,
+    print(f"Loading {args.step_file} event {args.event}...")
+    volumes, has_labl = load_step_data(args.step_file, args.event,
                                        labl_path=args.labl)
     if not has_labl:
         print("  Note: no labl file found — only the dE color mode will render.")

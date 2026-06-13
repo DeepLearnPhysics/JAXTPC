@@ -102,6 +102,8 @@ class DetectorSimulator:
         differentiable=False,
         n_segments=None,
         iterate_mode='scan',
+        group_size=5,
+        gap_threshold_mm=5.0,
     ):
         print("--- Creating DetectorSimulator ---")
 
@@ -138,6 +140,21 @@ class DetectorSimulator:
             if track_config is None:
                 from tools.config import create_track_hits_config as _create_thc
                 track_config = _create_thc(hits_chunk_size=5000)
+
+        # Coherent noise is a wire-group model (tools/coherent_noise.py); there
+        # is no pixel coherent model, and it needs dense output. Fail fast at
+        # construction (covers notebook callers too) instead of silently skipping
+        # on pixel or crashing per-event under bucketed.
+        if include_coherent_noise:
+            if _readout != 'wire':
+                raise ValueError(
+                    f"include_coherent_noise=True is only supported for wire "
+                    f"readout (detector readout is '{_readout}'). Coherent noise "
+                    f"is a per-wire-group model; there is no pixel coherent model.")
+            if use_bucketed:
+                raise ValueError(
+                    "include_coherent_noise=True is not supported with "
+                    "use_bucketed=True. Use dense output for coherent noise.")
 
         # Validate chunk alignment
         if total_pad % response_chunk_size != 0:
@@ -241,6 +258,26 @@ class DetectorSimulator:
                 max_sigma_trans_unitless=global_sigma_trans,
                 max_sigma_long_unitless=global_sigma_long,
             )
+
+        # Analytic box-dim sizing for the group-as-bucket track-hits path.
+        # Box dims are a function of the GROUP DEFINITION (group_size,
+        # gap_threshold) + readout geometry + response-kernel window — not the
+        # data — so compute them here (after the kernel load that provides the
+        # pixel kernel window) and freeze them into cfg.track_hits. Explicit
+        # dims passed by the caller (tests / SCE margin) are left untouched.
+        if include_track_hits and cfg.track_hits is not None and cfg.track_hits.box_enabled:
+            from tools.track_hits import compute_box_dims
+            tc = cfg.track_hits
+            box_kw = compute_box_dims(
+                cfg.volumes, cfg.time_step_us, self._readout_type,
+                group_size, gap_threshold_mm,
+                pixel_kernel=(self.response_kernels
+                              if self._readout_type == 'pixel' else None))
+            updates = {k: v for k, v in box_kw.items() if getattr(tc, k) is None}
+            if updates:
+                cfg = cfg._replace(track_hits=tc._replace(**updates))
+                self._sim_config = cfg
+                print(f"   Box dims (analytic): {updates}")
 
         # Build shared factories
         sce_factory, _build_response_fn, _build_response_fn_diff, _recomb_fn = \
@@ -756,31 +793,37 @@ class DetectorSimulator:
                             f"count={count:,} >= max_keys={max_keys:,}. "
                             f"Increase --max-keys or run profiler.setup_production.")
 
-        # Add coherent noise (NumPy, outside JIT — per-group, not per-deposit)
-        if self._include_coherent_noise and self._readout_type == 'wire':
-            if cfg.use_bucketed:
-                raise ValueError(
-                    "include_coherent_noise is not supported with use_bucketed=True. "
-                    "Use dense output format for coherent noise simulation.")
-            from tools.coherent_noise import generate_coherent_noise
+            # Check for maxg (group-bucket capacity) overflow in the box path.
+            # The box is indexed by group_id (first dim = maxg); a group_id >=
+            # maxg would be silently clipped (corrupting the result), so detect
+            # it on the host (group_ids are known at load) and raise — caught by
+            # run_batch, logged as maxg_overflow, skipped, reprocessed at higher
+            # maxg. Always active when box_enabled (no env gating).
+            if cfg.track_hits is not None and cfg.track_hits.box_enabled:
+                maxg = cfg.track_hits.maxg
+                for vi, vd in enumerate(deposits.volumes):
+                    max_gid = int(vd.group_ids.max())
+                    if max_gid >= maxg:
+                        raise RuntimeError(
+                            f"maxg overflow vol {vi}: n_groups={max_gid + 1:,} "
+                            f">= maxg={maxg:,}. Increase --maxg or run "
+                            f"profiler.setup_production.")
+
+        # Add coherent noise (NumPy, outside JIT — per-group, not per-deposit).
+        # Tagged, first-class: tools.coherent_noise.add_coherent_noise. The
+        # in-JIT incoherent path above is untouched (bit-identical).
+        if self._include_coherent_noise:
+            # readout==wire and dense output are guaranteed by the __init__ guard
+            from tools.coherent_noise import add_coherent_noise
             import numpy as np_host
-            coh_cfg = self._coherent_noise_config
             coh_rng = np_host.random.default_rng(
-                int(jax.random.randint(noise_key, (), 0, 2**31)))
-            for (v, p), sig in response_signals.items():
-                n_wires = cfg.volumes[v].num_wires[p]
-                coh_noise = generate_coherent_noise(
-                    n_wires=n_wires,
-                    n_ticks=cfg.num_time_steps,
-                    group_size=int(coh_cfg.get('group_size', 64)),
-                    beta=float(coh_cfg.get('beta', 0.15)),
-                    rms_adc=float(coh_cfg.get('rms_adc', 2.5)),
-                    corner_freq_hz=float(coh_cfg.get('corner_freq_hz', 20000.0)),
-                    spectral_slope=float(coh_cfg.get('spectral_slope', 1.5)),
-                    sampling_rate_hz=float(coh_cfg.get('sampling_rate_hz', 2e6)),
-                    rng=coh_rng,
-                )
-                response_signals[(v, p)] = jnp.asarray(sig) + jnp.asarray(coh_noise)
+                int(jax.random.randint(noise_key, (), 0, 2**31 - 1)))
+            num_wires_by_key = {
+                (v, p): cfg.volumes[v].num_wires[p]
+                for (v, p) in response_signals}
+            response_signals = add_coherent_noise(
+                response_signals, num_wires_by_key, cfg.num_time_steps,
+                coherent_cfg=self._coherent_noise_config, rng=coh_rng)
 
         # Rebuild filled deposits
         filled_volumes = tuple(

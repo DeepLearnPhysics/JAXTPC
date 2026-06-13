@@ -443,6 +443,13 @@ def create_digitize_fn_for_volume(cfg, vol_geom, digitization_config=None):
         Signature: (sig, plane_idx) -> digitized signal.
     dig_config : DigitizationConfig or None
     """
+    # Pixel skips digitize by design: the pixel kernel already encodes ADC per
+    # drift-electron (chip gain baked in), so pixel hits and signal are already
+    # in ADC after the single response pass — no further conversion or
+    # quantization. Wire reaches this digitize after response (kernel = dim'less
+    # e-impulse, output ENC) + electronics + noise have shaped values into
+    # ADC-scale magnitudes; digitize here only rounds + adds pedestal + clips
+    # to the bit range. See CLAUDE.md "Units convention".
     if not cfg.include_digitize or vol_geom.readout_type == 'pixel':
         return _noop_digitize, None
 

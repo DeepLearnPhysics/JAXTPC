@@ -2,9 +2,13 @@
 detector_config: config/cubic_wireplane_config.yaml
 total_pad: 970000
 response_chunk: 5000
-hits_chunk: 5000
-max_keys: 6200000
-inter_thresh: 1.0
-threshold_adc: 0.2
-corr_threshold: 1.0
+hits_chunk: 121250
+max_keys: 6000000
+maxg: 240000              # box track-hits group capacity; p99.95 over 100k events (233,108), 0.034% overflow -> reprocess
+maxg_medium: 180000       # tiered mode: p99 of n_groups; 99% of events route here (smaller box, ~24% faster)
+# Wire convention: hits in ENC, sensor signal in ADC (post-digitize). See
+# CLAUDE.md "Units convention".
+inter_thresh: 1.0         # ENC (wire): in-JIT box compaction filter on hits charge
+threshold_adc: 0.2        # ADC (wire sensor sparse output, post-digitize)
+corr_threshold: 1.0       # ENC (wire hits CSR encode)
 max_buckets: 1000

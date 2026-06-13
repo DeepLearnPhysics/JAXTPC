@@ -48,14 +48,6 @@ def coherent_spectrum(n_ticks, corner_freq_hz=20000.0, spectral_slope=1.5,
     return spectrum.astype(np.float32)
 
 
-def _expected_rms(spectrum, n_ticks):
-    """Parseval RMS of a signal with the given amplitude spectrum."""
-    S = np.asarray(spectrum, dtype=np.float64)
-    N = n_ticks
-    var = (S[0]**2 + 4.0 * np.sum(S[1:-1]**2) + S[-1]**2) / N**2
-    return float(np.sqrt(max(var, 0.0)))
-
-
 def generate_group_waveforms(n_groups, n_ticks, beta=0.15, rms_adc=2.5,
                              corner_freq_hz=20000.0, spectral_slope=1.5,
                              sampling_rate_hz=2e6, rng=None):
@@ -106,9 +98,14 @@ def generate_group_waveforms(n_groups, n_ticks, beta=0.15, rms_adc=2.5,
     right = np.concatenate([base[1:], np.zeros((1, n_ticks), dtype=np.float32)], axis=0)
     waveforms = base - beta * (left + right)
 
-    expected = _expected_rms(spectrum, n_ticks)
-    if expected > 0:
-        waveforms *= rms_adc / expected
+    # Normalize to the target RMS *after* the inter-group coupling. The coupling
+    # subtracts independent neighbor waveforms, which inflates the variance, so
+    # normalizing the pre-coupling spectrum (Parseval) would leave the realized
+    # RMS ~2% high at the default beta (growing with beta). Measure the coupled
+    # waveforms directly so rms_adc is honored.
+    realized = float(np.sqrt(np.mean(waveforms.astype(np.float64) ** 2)))
+    if realized > 0:
+        waveforms *= rms_adc / realized
 
     return waveforms
 
@@ -163,3 +160,44 @@ def generate_coherent_noise(n_wires, n_ticks, group_size=64, beta=0.15,
         sampling_rate_hz=sampling_rate_hz, rng=rng,
     )
     return broadcast_to_wires(waveforms, n_wires, group_size)
+
+
+# Parameter keys read from the ``simulation.coherent_noise`` config block, with
+# their defaults (mirrors config/cubic_wireplane_config.yaml). The SAME group_size
+# is what the inverse coherent-noise filter (helix.tpc.remove_coherent) must use.
+_COHERENT_DEFAULTS = dict(group_size=64, beta=0.15, rms_adc=2.5,
+                          corner_freq_hz=20000.0, spectral_slope=1.5,
+                          sampling_rate_hz=2e6)
+
+
+def add_coherent_noise(response_signals, num_wires_by_key, n_ticks,
+                       coherent_cfg=None, rng=None):
+    """Add per-group coherent noise to a dict of dense plane signals.
+
+    The tagged, first-class coherent component of the forward noise model:
+    iterates ``{key: (n_wires, n_ticks)}`` signals and adds a per-group shared
+    waveform (see :func:`generate_coherent_noise`) to each plane, returning a new
+    dict. ``num_wires_by_key`` maps each signal key to its wire count;
+    ``coherent_cfg`` overrides the spectral/group parameters (defaults match the
+    ``simulation.coherent_noise`` YAML block). NumPy-only — works on JAX arrays
+    via duck-typed addition without importing JAX.
+    """
+    cfg = {**_COHERENT_DEFAULTS, **(coherent_cfg or {})}
+    if rng is None:
+        rng = np.random.default_rng()
+
+    out = {}
+    for key, sig in response_signals.items():
+        coh = generate_coherent_noise(
+            n_wires=int(num_wires_by_key[key]),
+            n_ticks=n_ticks,
+            group_size=int(cfg['group_size']),
+            beta=float(cfg['beta']),
+            rms_adc=float(cfg['rms_adc']),
+            corner_freq_hz=float(cfg['corner_freq_hz']),
+            spectral_slope=float(cfg['spectral_slope']),
+            sampling_rate_hz=float(cfg['sampling_rate_hz']),
+            rng=rng,
+        )
+        out[key] = sig + coh
+    return out

@@ -7,7 +7,7 @@ Batch simulation of particle events in a liquid argon TPC, producing structured 
 ```
 production/
 ├── run_batch.py              # Main batch simulation script
-├── save.py                   # HDF5 save functions (sensor/edep/hits encoding)
+├── save.py                   # HDF5 save functions (sensor/step/hits encoding)
 ├── load.py                   # HDF5 load/decode functions
 ├── view_production.ipynb     # Visualize production output (no simulation needed)
 └── README.md                 # This file
@@ -37,7 +37,7 @@ python3 production/run_batch.py \
     --events-per-file 100 \
     --threshold-adc 2.0 \
     --workers 2 \
-    --noise \
+    --intrinsic \
     --electronics \
     --no-track-hits
 ```
@@ -82,12 +82,13 @@ See `profiler/` for individual scripts to tune each parameter separately.
 | `--config` | `config/cubic_wireplane_config.yaml` | Detector configuration YAML |
 | `--production-config` | none | Load optimized params from profiler config YAML |
 | `--dataset` | `sim` | Dataset name prefix for output files |
-| `--outdir` | `.` | Output directory (creates `sensor/`, `edep/`, `hits/` subdirs) |
+| `--outdir` | `.` | Output directory (creates `sensor/`, `step/`, `hits/` subdirs) |
 | `--events` | all | Number of events to process |
 | `--events-per-file` | 1000 | Events per output HDF5 file |
 | `--threshold-adc` | 2.0 | Minimum signal amplitude to store (ADC) |
+| `--codec` | `blosc-zstd` | Output compression: `blosc-zstd` (smaller than gzip + faster read/write), `blosc-lz4hc` (gzip size, ~4× faster read), `blosc-lz4` (fastest, +19% size), `gzip`, `gzip-1`, `lzf`, `lz4`, `zstd`. Non-gzip codecs require `hdf5plugin` to read. |
 | `--workers` | 2 | Number of save worker threads (0 = serial) |
-| `--noise` | off | Enable intrinsic noise |
+| `--intrinsic` | off | Enable intrinsic (electronics) noise |
 | `--electronics` | off | Enable RC-RC electronics response |
 | `--no-digitize` | on | Disable ADC digitization |
 | `--no-track-hits` | on | Disable per-particle decomposition (hits file) |
@@ -117,7 +118,7 @@ For each event, `run_batch.py` performs:
    - Optional: electronics response, noise, ADC digitization
 4. **Save** to three HDF5 file types (offloaded to worker threads):
    - `sensor/`: sparse thresholded raw readout
-   - `edep/`: compact 3D truth deposits
+   - `step/`: compact 3D truth deposits
    - `hits/`: per-particle sensor decomposition (group-level 3D-to-2D mapping)
 
 The canonical layout in ``docs/DATASET_DESIGN.md`` (in
@@ -149,15 +150,15 @@ The `view_production.ipynb` notebook loads and visualizes production output with
 ```python
 from production.load import (
     get_file_paths, build_viz_config,
-    load_event_sensor, load_event_edep, load_event_hits,
+    load_event_sensor, load_event_step, load_event_hits,
 )
 
-sensor_path, edep_path, hits_path = get_file_paths('output/', 'myrun', file_index=0)
+sensor_path, step_path, hits_path = get_file_paths('output/', 'myrun', file_index=0)
 viz_config = build_viz_config(sensor_path)  # minimal config from HDF5 metadata
 dense_signals, attrs, pedestals = load_event_sensor(sensor_path, event_idx=0)
 # pedestals is {(vol, plane): int} if digitized, None otherwise
 # To get signed ADC: signal = dense_signals[(v,p)].astype(int) - pedestals[(v,p)]
-edep = load_event_edep(edep_path, event_idx=0)       # list of per-volume dicts
+step = load_event_step(step_path, event_idx=0)       # list of per-volume dicts
 track_hits, truth_dense, g2t, d2g, qs = load_event_hits(
     hits_path, event_idx=0, num_time_steps=2701)
 # g2t, d2g, qs are lists of per-volume arrays (deposit_to_group is the
@@ -172,7 +173,7 @@ Three file types per batch, split by `events_per_file`:
 
 ```
 {dataset}_sensor_{NNNN}.h5  — raw sensor readout (sparse wire/pixel signals)
-{dataset}_edep_{NNNN}.h5    — 3D truth deposits (energy deposit data)
+{dataset}_step_{NNNN}.h5    — 3D truth deposits (energy deposit data)
 {dataset}_hits_{NNNN}.h5    — per-particle sensor decomposition
 ```
 
@@ -210,11 +211,11 @@ times = time_start + np.cumsum(delta_time)
 signal_adc = values.astype(np.int32) - pedestal  # signed ADC
 ```
 
-### 2. Edep File (`_edep_`)
+### 2. Step File (`_step_`)
 
 Pure 3D truth physics. Deposit-level scalars only — no instance
 identifiers, no per-track metadata, no group machinery. Per the design
-doc (in ``particle-imaging-models/docs/DATASET_DESIGN.md``), edep is
+doc (in ``particle-imaging-models/docs/DATASET_DESIGN.md``), step is
 loadable standalone for SSL on 3D deposits or per-deposit physics
 regression; any labeling / correspondence goes through ``labl/`` or
 ``hits/``.
@@ -269,12 +270,12 @@ entries (which groups contributed to which pixels).
         attrs: n_actual, n_groups
         deposit_to_group  (N,) int32     per-deposit: which group each
                                          deposit belongs to. Row-aligned
-                                         with edep deposits in volume N.
+                                         with step deposits in volume N.
         qs_fractions      (N,) float16   per-deposit: each deposit's
                                          share of its group's recombined
                                          charge. Used for deposit-level
                                          disaggregation when traversing
-                                         hits -> edep.
+                                         hits -> step.
         group_to_track    (G,) int32     per-group: Geant4 track_id of
                                          each group.
         {plane_label}/                   one subgroup per readout plane
@@ -330,7 +331,7 @@ stop-gap script `make_labl.py`, see below). Lives under
 
 /event_{NNN}/
     volume_N/
-        # Per-deposit FK (N,) — row-aligned with edep deposits for vol N
+        # Per-deposit FK (N,) — row-aligned with step deposits for vol N
         deposit_to_track     (N,) int32    deposit i -> Geant4 track_id
 
         # Per-unique-track (T,) dimension table
@@ -379,13 +380,13 @@ an edepsim-side integrated writer when productionizing.
 
 ## Bidirectional Correspondence
 
-Correspondence between 3D deposits (edep) and 2D pixels (sensor) is
+Correspondence between 3D deposits (step) and 2D pixels (sensor) is
 carried by **group ids only** — `group_to_track` is a *label*, not part
 of the mapping. The three hits arrays below are all you need:
 
 | Array | Shape | Meaning |
 |---|---|---|
-| `deposit_to_group` (`d2g`) | `(N_dep,)` | per-deposit → group id (row-aligned with edep[v]) |
+| `deposit_to_group` (`d2g`) | `(N_dep,)` | per-deposit → group id (row-aligned with step[v]) |
 | `qs_fractions` (`qs`)      | `(N_dep,)` | per-deposit share of its group's recombined charge (sums to ~1 per group) |
 | per-plane CSR (`group_ids`, `delta_wires`/`delta_times`, `peak_charges`, `charges_u16`) | `(N_entries,)` flat | each entry = one group's charge contribution at one pixel |
 
@@ -436,7 +437,7 @@ totals_U = deposit_charge_per_plane(corr, 'U')   # (N_dep,) float32
 # totals_U[i] = qs[i] * sum of group[d2g[i]]'s charge on plane U.
 # Zero for deposits in sub-threshold groups.
 ```
-For a typical event: `totals_U.sum()` is ~25–30% of `edep['charge'].sum()`
+For a typical event: `totals_U.sum()` is ~25–30% of `step['charge'].sum()`
 (the rest is lifetime attenuation + sub-threshold charge not written).
 
 **Indexing note.** Group ids are **1-based** in `d2g` (`min=1`); entry
@@ -465,11 +466,15 @@ Typical event with ~170K deposits, group_size=5, threshold=2.0 ADC:
 | File | Per event | Per 1000 events |
 |---|---|---|
 | Sensor | ~2.4 MB | ~2.4 GB |
-| Edep | ~1.3 MB | ~1.3 GB |
+| Step | ~1.3 MB | ~1.3 GB |
 | Hits | ~8.0 MB | ~8.0 GB |
 | **Total** | **~11.7 MB** | **~11.7 GB** |
 
 Without correspondence (`--no-track-hits`): ~3.7 MB/event, ~3.7 GB per 1000 events.
+
+These figures were measured under the old gzip default; the current default
+(`blosc-zstd`) produces somewhat smaller files (e.g. step ~−20%, hits/sensor
+~−6 to −12%). `blosc-lz4` trades ~19% larger files for the fastest reads.
 
 ## Performance
 

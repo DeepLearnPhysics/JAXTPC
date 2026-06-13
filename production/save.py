@@ -3,12 +3,71 @@ Production HDF5 save functions.
 
 Writes simulation output to three file types (canonical names; see
 docs/DATASET_DESIGN.md in particle-imaging-models):
-    sensor — sparse thresholded wire/pixel readout (delta-encoded + lzf)
-    edep   — 3D truth deposits (uint16 positions + float16 physics)
+    sensor — sparse thresholded wire/pixel readout (delta-encoded)
+    step   — 3D truth deposits (uint16 positions + float16 physics)
     hits   — per-particle charge attribution at sensor elements (CSR + delta)
+
+All datasets are compressed with the codec set by ``set_codec`` (default
+blosc-zstd; see ``codec_kwargs``). Readers must ``import hdf5plugin`` for
+non-gzip codecs.
 """
 
 import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Compression codec (parameterized). Default is blosc-zstd (level 4 + byte
+# shuffle): smaller files than gzip AND faster on both read and write — the
+# loader profiler found gzip is the slowest codec and Pareto-dominated
+# (blosc:zstd+shuffle ~2.3x faster read, blosc:lz4hc ~4x at gzip's size).
+# Requires hdf5plugin for the default; a missing backend raises (no silent
+# downgrade to gzip). Switch via set_codec() / run_batch --codec. Readers of
+# blosc/zstd/lz4 output must `import hdf5plugin`.
+# ---------------------------------------------------------------------------
+def codec_kwargs(name):
+    """Map a codec name to h5py create_dataset compression kwargs."""
+    if name in (None, 'gzip'):
+        return dict(compression='gzip', compression_opts=4)
+    if name == 'gzip-1':
+        return dict(compression='gzip', compression_opts=1)
+    if name == 'lzf':
+        return dict(compression='lzf')
+    if name in ('lz4', 'zstd', 'blosc-lz4', 'blosc-lz4hc', 'blosc-zstd'):
+        import hdf5plugin
+        SHUF = hdf5plugin.Blosc.SHUFFLE
+        if name == 'lz4':
+            return dict(**hdf5plugin.LZ4())
+        if name == 'zstd':
+            return dict(**hdf5plugin.Zstd(clevel=3))
+        if name == 'blosc-lz4':
+            return dict(**hdf5plugin.Blosc(cname='lz4', clevel=5, shuffle=SHUF))
+        if name == 'blosc-lz4hc':
+            # gzip's ratio at ~4x faster reads (slower to write); read-heavy.
+            return dict(**hdf5plugin.Blosc(cname='lz4hc', clevel=5, shuffle=SHUF))
+        # blosc-zstd: smaller than gzip AND faster on read + write. Default.
+        return dict(**hdf5plugin.Blosc(cname='zstd', clevel=4, shuffle=SHUF))
+    raise ValueError(f'unknown codec {name!r}')
+
+
+# Module-global compression kwargs applied by every dataset write below.
+# Default is blosc-zstd (level 4 + byte shuffle): smaller files than gzip and
+# faster on both read and write (gzip is Pareto-dominated). See run_batch
+# --codec for alternatives (blosc-lz4hc = fastest read at gzip's size).
+# Requires hdf5plugin; a missing backend raises ImportError here rather than
+# silently downgrading to gzip.
+_COMPRESSION = codec_kwargs('blosc-zstd')
+
+
+def set_codec(name):
+    """Set the compression codec used by all save_event_* writers.
+
+    Raises ImportError if the codec's backend (hdf5plugin) is unavailable, or
+    ValueError for an unknown codec name. We deliberately do NOT fall back to
+    gzip — a missing backend or a typo should surface loudly rather than
+    silently change the output format.
+    """
+    global _COMPRESSION
+    _COMPRESSION = codec_kwargs(name)
 
 
 _PLANE_LABELS = {0: 'U', 1: 'V', 2: 'Y'}
@@ -103,10 +162,10 @@ def write_config_sensor(f, cfg, params, recomb_model, dataset_name, file_index,
         g.attrs['n_bits'] = digitization_config.n_bits
 
 
-def write_config_edep(f, cfg, dataset_name, file_index, source_file,
+def write_config_step(f, cfg, dataset_name, file_index, source_file,
                       n_events, global_offset, group_size, gap_threshold_mm,
                       provenance=None):
-    """Write config group for edep file."""
+    """Write config group for step file."""
     if 'config' in f:
         return
     g = f.create_group('config')
@@ -186,16 +245,16 @@ def _save_wire_plane(g, arr, threshold_adc, digitized, pedestals, vol_idx, plane
     time_s = time_idx[order].astype(np.int32)
     values_s = values[order]
 
-    g.create_dataset('delta_wire', data=np.diff(wire_s, prepend=wire_s[0]).astype(np.int16), compression='gzip')
-    g.create_dataset('delta_time', data=np.diff(time_s, prepend=time_s[0]).astype(np.int16), compression='gzip')
+    g.create_dataset('delta_wire', data=np.diff(wire_s, prepend=wire_s[0]).astype(np.int16), **_COMPRESSION)
+    g.create_dataset('delta_time', data=np.diff(time_s, prepend=time_s[0]).astype(np.int16), **_COMPRESSION)
 
     if digitized and pedestals is not None:
         ped = int(pedestals[vol_idx, plane_idx])
         values_unsigned = np.round(values_s + ped).clip(0, 65535).astype(np.uint16)
-        g.create_dataset('values', data=values_unsigned, compression='gzip')
+        g.create_dataset('values', data=values_unsigned, **_COMPRESSION)
         g.attrs['pedestal'] = ped
     else:
-        g.create_dataset('values', data=values_s.astype(np.float32), compression='gzip')
+        g.create_dataset('values', data=values_s.astype(np.float32), **_COMPRESSION)
 
     g.attrs['wire_start'] = int(wire_s[0])
     g.attrs['time_start'] = int(time_s[0])
@@ -216,16 +275,16 @@ def _save_wire_plane_sparse(g, sparse_dict, digitized, pedestals, vol_idx, plane
     time_s = time_s[order]
     values_s = values_s[order]
 
-    g.create_dataset('delta_wire', data=np.diff(wire_s, prepend=wire_s[0]).astype(np.int16), compression='gzip')
-    g.create_dataset('delta_time', data=np.diff(time_s, prepend=time_s[0]).astype(np.int16), compression='gzip')
+    g.create_dataset('delta_wire', data=np.diff(wire_s, prepend=wire_s[0]).astype(np.int16), **_COMPRESSION)
+    g.create_dataset('delta_time', data=np.diff(time_s, prepend=time_s[0]).astype(np.int16), **_COMPRESSION)
 
     if digitized and pedestals is not None:
         ped = int(pedestals[vol_idx, plane_idx])
         values_unsigned = np.round(values_s + ped).clip(0, 65535).astype(np.uint16)
-        g.create_dataset('values', data=values_unsigned, compression='gzip')
+        g.create_dataset('values', data=values_unsigned, **_COMPRESSION)
         g.attrs['pedestal'] = ped
     else:
-        g.create_dataset('values', data=values_s, compression='gzip')
+        g.create_dataset('values', data=values_s, **_COMPRESSION)
 
     g.attrs['wire_start'] = int(wire_s[0])
     g.attrs['time_start'] = int(time_s[0])
@@ -257,10 +316,10 @@ def _save_pixel_plane(g, sparse_dict):
     time_s = time_idx[order].astype(np.int32)
     values_s = values[order]
 
-    g.create_dataset('delta_py', data=np.diff(py_s, prepend=py_s[0]).astype(np.int16), compression='gzip')
-    g.create_dataset('delta_pz', data=np.diff(pz_s, prepend=pz_s[0]).astype(np.int16), compression='gzip')
-    g.create_dataset('delta_time', data=np.diff(time_s, prepend=time_s[0]).astype(np.int16), compression='gzip')
-    g.create_dataset('values', data=values_s.astype(np.float32), compression='gzip')
+    g.create_dataset('delta_py', data=np.diff(py_s, prepend=py_s[0]).astype(np.int16), **_COMPRESSION)
+    g.create_dataset('delta_pz', data=np.diff(pz_s, prepend=pz_s[0]).astype(np.int16), **_COMPRESSION)
+    g.create_dataset('delta_time', data=np.diff(time_s, prepend=time_s[0]).astype(np.int16), **_COMPRESSION)
+    g.create_dataset('values', data=values_s.astype(np.float32), **_COMPRESSION)
 
     g.attrs['py_start'] = int(py_s[0])
     g.attrs['pz_start'] = int(pz_s[0])
@@ -271,7 +330,7 @@ def _save_pixel_plane(g, sparse_dict):
 def save_event_sensor(f, event_key, response_signals, threshold_adc,
                       source_event_idx, deposits, cfg=None,
                       digitized=False, event_id=None):
-    """Save one event's raw sensor readout (sparse, delta-encoded, gzip).
+    """Save one event's raw sensor readout (sparse, delta-encoded).
 
     Handles both wire (2D) and pixel (3D) output formats.
     For pixel volumes, the signal must be densified before calling this
@@ -312,7 +371,7 @@ def save_event_sensor(f, event_key, response_signals, threshold_adc,
                              vol_idx, plane_idx)
 
 
-def save_event_edep(f, event_key, deposits, source_event_idx, pos_step_mm=0.3,
+def save_event_step(f, event_key, deposits, source_event_idx, pos_step_mm=0.3,
                     cfg=None, event_id=None):
     """Save one event's 3D truth deposits — physics only.
 
@@ -356,22 +415,22 @@ def save_event_edep(f, event_key, deposits, source_event_idx, pos_step_mm=0.3,
         # Positions: uint16 voxelized
         origin = pos.min(axis=0).astype(np.float32)
         pos_u16 = np.round((pos - origin) / pos_step_mm).clip(0, 65535).astype(np.uint16)
-        vg.create_dataset('positions', data=pos_u16, compression='gzip')
+        vg.create_dataset('positions', data=pos_u16, **_COMPRESSION)
         vg.attrs['pos_origin_x'] = float(origin[0])
         vg.attrs['pos_origin_y'] = float(origin[1])
         vg.attrs['pos_origin_z'] = float(origin[2])
         vg.attrs['pos_step_mm'] = pos_step_mm
 
         # Physics: float16
-        vg.create_dataset('de', data=np.asarray(vol.de[:n]).astype(np.float16), compression='gzip')
-        vg.create_dataset('dx', data=np.asarray(vol.dx[:n]).astype(np.float16), compression='gzip')
-        vg.create_dataset('theta', data=np.asarray(vol.theta[:n]).astype(np.float16), compression='gzip')
-        vg.create_dataset('phi', data=np.asarray(vol.phi[:n]).astype(np.float16), compression='gzip')
-        vg.create_dataset('t0_us', data=np.asarray(vol.t0_us[:n]).astype(np.float16), compression='gzip')
+        vg.create_dataset('de', data=np.asarray(vol.de[:n]).astype(np.float16), **_COMPRESSION)
+        vg.create_dataset('dx', data=np.asarray(vol.dx[:n]).astype(np.float16), **_COMPRESSION)
+        vg.create_dataset('theta', data=np.asarray(vol.theta[:n]).astype(np.float16), **_COMPRESSION)
+        vg.create_dataset('phi', data=np.asarray(vol.phi[:n]).astype(np.float16), **_COMPRESSION)
+        vg.create_dataset('t0_us', data=np.asarray(vol.t0_us[:n]).astype(np.float16), **_COMPRESSION)
 
         # Sim-derived per-deposit scalars
-        vg.create_dataset('charge', data=np.asarray(vol.charge[:n]).astype(np.float32), compression='gzip')
-        vg.create_dataset('photons', data=np.asarray(vol.photons[:n]).astype(np.float32), compression='gzip')
+        vg.create_dataset('charge', data=np.asarray(vol.charge[:n]).astype(np.float32), **_COMPRESSION)
+        vg.create_dataset('photons', data=np.asarray(vol.photons[:n]).astype(np.float32), **_COMPRESSION)
 
 
 def encode_correspondence_csr(gp_pk, gp_gid, gp_ch, gp_count, num_time_steps,
@@ -527,12 +586,12 @@ def save_event_hits(f, event_key, hits_data, deposits, source_event_idx,
 
     Writes the hits file's event group with the full schema:
       - ``deposit_to_group`` (N_deposits,) int32 — per-deposit group id,
-        row-aligned with edep[v]. Lives in hits (not edep) because groups
-        are a hits concept that partitions edep deposits for sensor
+        row-aligned with step[v]. Lives in hits (not step) because groups
+        are a hits concept that partitions step deposits for sensor
         correspondence.
       - ``qs_fractions`` (N_deposits,) float16 — each deposit's share of
         its group's recombined charge (sums to ~1 per group). Used for
-        deposit-level disaggregation when traversing hits → edep.
+        deposit-level disaggregation when traversing hits → step.
       - ``group_to_track`` (G,) int32 — per-group Geant4 track_id. A
         convenience label; not part of the hit↔deposit correspondence.
       - one subgroup per readout plane with CSR-encoded per-pixel
@@ -579,16 +638,16 @@ def save_event_hits(f, event_key, hits_data, deposits, source_event_idx,
             vol_grp.create_dataset(
                 'deposit_to_group',
                 data=np.asarray(vol.group_ids[:n]).astype(np.int32),
-                compression='gzip')
+                **_COMPRESSION)
             vol_grp.create_dataset(
                 'qs_fractions',
                 data=np.asarray(vol.qs_fractions[:n]).astype(np.float16),
-                compression='gzip')
+                **_COMPRESSION)
 
         g2t = deposits.group_to_track[v]
         if g2t is not None:
             vol_grp.create_dataset('group_to_track', data=g2t,
-                                   compression='gzip')
+                                   **_COMPRESSION)
             vol_grp.attrs['n_groups'] = len(g2t)
 
         for (vi, pi), csr in hits_data.items():
@@ -596,7 +655,7 @@ def save_event_hits(f, event_key, hits_data, deposits, source_event_idx,
                 continue
             g = vol_grp.create_group(_plane_label(pi, vi, cfg))
             for k, arr in csr.items():
-                g.create_dataset(k, data=arr, compression='gzip')
+                g.create_dataset(k, data=arr, **_COMPRESSION)
             g.attrs['n_groups_plane'] = len(csr['group_ids'])
             delta_key = 'delta_py' if 'delta_py' in csr else 'delta_wires'
             g.attrs['n_entries'] = len(csr[delta_key])

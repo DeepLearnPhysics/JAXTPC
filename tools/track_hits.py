@@ -10,9 +10,59 @@ The track labeling runs in parallel with the main simulation to provide
 particle attribution data for physics analysis.
 """
 
+import math
+
 import jax
 import jax.numpy as jnp
 from functools import partial
+
+# The "group-as-bucket" (box) track-hits path replaces the global sort-merge
+# with per-group local scatter-add boxes. It is selected per simulator via
+# TrackHitsConfig.box_enabled, with capacity (maxg) and per-group box dims
+# (pixel: box_bpy/box_bpz/box_bt; wire: box_bw/box_btw) carried in the config.
+
+
+def compute_box_dims(volumes, time_step_us, readout_type, group_size,
+                     gap_threshold_mm, pixel_kernel=None):
+    """Analytic per-group box dims from the group definition + geometry + kernel.
+
+    A group is at most ``group_size`` consecutive deposits of one track, split
+    whenever the gap between consecutive deposits exceeds ``gap_threshold_mm``
+    (loader.compute_group_ids). So a group's footprint along ANY axis is bounded
+    by ``span = (group_size - 1) * gap_threshold_mm`` — a hard maximum set by the
+    grouping rule, not the data. Projected through the readout pitch and the
+    drift velocity, plus the response-kernel window, this bounds the per-group
+    box exactly (no per-dataset scan needed). Returns the max over all
+    (volume, plane) as a single dim set, matching the shared-scalar
+    TrackHitsConfig layout.
+
+    Units: positions/gap in mm; geometry (pitch, velocity) in cm; time in ticks
+    (cm_per_tick = velocity_cm_us * time_step_us).
+    """
+    span_cm = (group_size - 1) * gap_threshold_mm / 10.0
+
+    if readout_type == 'pixel':
+        kpy, kpz, kt = (pixel_kernel.kernel_py, pixel_kernel.kernel_pz,
+                        pixel_kernel.kernel_time)
+        bpy = bpz = bt = 0
+        for v in volumes:
+            cm_per_tick = v.diffusion.velocity_cm_us * time_step_us
+            sp = math.ceil(span_cm / v.pixel_pitch_cm)
+            st = math.ceil(span_cm / cm_per_tick)
+            bpy = max(bpy, sp + kpy)
+            bpz = max(bpz, sp + kpz)
+            bt = max(bt, st + kt)
+        return {'box_bpy': int(bpy), 'box_bpz': int(bpz), 'box_bt': int(bt)}
+
+    bw = bt = 0
+    for v in volumes:
+        Kw, Kt = v.diffusion.K_wire, v.diffusion.K_time
+        cm_per_tick = v.diffusion.velocity_cm_us * time_step_us
+        bt = max(bt, math.ceil(span_cm / cm_per_tick) + (2 * Kt + 1))
+        for spacing_cm in v.wire_spacings_cm:
+            bw = max(bw, math.ceil(span_cm / spacing_cm) + (2 * Kw + 1))
+    return {'box_bw': int(bw), 'box_btw': int(bt)}
+
 
 from tools.wires import (
     compute_angular_scaling_vmap,
@@ -766,6 +816,108 @@ def create_pixel_track_hits_fn(cfg, vol_geom, pixel_kernel):
             max_safe_chunks
         )
 
+        if cfg.track_hits.box_enabled:
+            BPY, BPZ, BT, MAXG = (cfg.track_hits.box_bpy, cfg.track_hits.box_bpz,
+                                  cfg.track_hits.box_bt, cfg.track_hits.maxg)
+            hcs = cfg.track_hits.hits_chunk_size
+            tp = charges.shape[0]
+            BIG = jnp.int32(2**30)
+            ad = prepare_pixel_vmap(charges, tick_us, py_idx, pz_idx,
+                                    py_offset, pz_offset, attenuation_factors, True,
+                                    cfg.time_step_us, num_py, num_pz)
+            pyc_all, pzc_all, tc_all = ad[0], ad[1], ad[4]
+            vmask_all = (jnp.arange(tp) < n_actual) & (group_ids > 0)
+            mpy = jax.ops.segment_min(jnp.where(vmask_all, pyc_all, BIG), group_ids, num_segments=MAXG)
+            mpz = jax.ops.segment_min(jnp.where(vmask_all, pzc_all, BIG), group_ids, num_segments=MAXG)
+            mtt = jax.ops.segment_min(jnp.where(vmask_all, tc_all, BIG), group_ids, num_segments=MAXG)
+            oy = mpy - py_zero_bin
+            oz = mpz - pz_zero_bin
+            ot = mtt - time_zero_bin
+
+            def bbody(i, st):
+                box, rowsums = st
+                start = i * hcs
+                c_charges = jax.lax.dynamic_slice(charges, (start,), (hcs,))
+                c_tick = jax.lax.dynamic_slice(tick_us, (start,), (hcs,))
+                c_py = jax.lax.dynamic_slice(py_idx, (start,), (hcs,))
+                c_pz = jax.lax.dynamic_slice(pz_idx, (start,), (hcs,))
+                c_py_off = jax.lax.dynamic_slice(py_offset, (start,), (hcs,))
+                c_pz_off = jax.lax.dynamic_slice(pz_offset, (start,), (hcs,))
+                c_atten = jax.lax.dynamic_slice(attenuation_factors, (start,), (hcs,))
+                c_pos_cm = jax.lax.dynamic_slice(positions_cm, (start, 0), (hcs, 3))
+                c_drift = jax.lax.dynamic_slice(drift_distance_cm, (start,), (hcs,))
+                c_gids = jax.lax.dynamic_slice(group_ids, (start,), (hcs,))
+                dd = prepare_pixel_vmap(c_charges, c_tick, c_py, c_pz, c_py_off,
+                                        c_pz_off, c_atten, True, cfg.time_step_us, num_py, num_pz)
+                pyc, pzc, pyo, pzo, tic, tio, inten = dd
+                contrib = response_fn(c_pos_cm, c_drift, pyo, pzo, tio)
+                sig_val = inten[:, None, None, None] * contrib
+                gpy = pyc[:, None, None, None] - py_zero_bin + kpy[None, :, None, None]
+                gpz = pzc[:, None, None, None] - pz_zero_bin + kpz[None, None, :, None]
+                gt = tic[:, None, None, None] - time_zero_bin + kt[None, None, None, :]
+                indet = ((gpy >= 0) & (gpy < num_py) & (gpz >= 0) & (gpz < num_pz)
+                         & (gt >= 0) & (gt < cfg.num_time_steps))
+                sig_val = jnp.where(indet, sig_val, 0.0)
+                chunk_rs = jnp.sum(jnp.where(jnp.abs(sig_val) > cfg.track_hits.inter_thresh,
+                                             sig_val, 0.0), axis=(1, 2, 3))
+                rowsums = jax.lax.dynamic_update_slice(rowsums, chunk_rs, (start,))
+                full = (hcs, kernel_py, kernel_pz, kernel_time)
+                g_full = jnp.broadcast_to(c_gids[:, None, None, None], full)
+                ly = jnp.broadcast_to(gpy, full) - oy[g_full]
+                lz = jnp.broadcast_to(gpz, full) - oz[g_full]
+                lt = jnp.broadcast_to(gt, full) - ot[g_full]
+                inbox = (ly >= 0) & (ly < BPY) & (lz >= 0) & (lz < BPZ) & (lt >= 0) & (lt < BT)
+                addv = jnp.where(inbox & (sig_val != 0.0), sig_val, 0.0).reshape(-1)
+                gi = jnp.clip(g_full, 0, MAXG - 1).reshape(-1)
+                lyi = jnp.clip(ly, 0, BPY - 1).reshape(-1)
+                lzi = jnp.clip(lz, 0, BPZ - 1).reshape(-1)
+                lti = jnp.clip(lt, 0, BT - 1).reshape(-1)
+                box = box.at[gi, lyi, lzi, lti].add(addv)
+                return (box, rowsums)
+
+            box0 = jnp.zeros((MAXG, BPY, BPZ, BT), jnp.float32)
+            box, final_rowsums = jax.lax.fori_loop(
+                0, num_chunks, bbody, (box0, jnp.zeros(tp, jnp.float32)))
+
+            mk = cfg.track_hits.max_keys
+            flat = box.reshape(-1)
+            over = jnp.abs(flat) > cfg.track_hits.inter_thresh
+            cidx = jnp.where(over, size=mk, fill_value=0)[0]
+            cnt = jnp.sum(over).astype(jnp.int32)
+            vm = jnp.arange(mk) < cnt
+            cellsz = BPY * BPZ * BT
+            gg = cidx // cellsz
+            rem = cidx % cellsz
+            lly = rem // (BPZ * BT)
+            rem2 = rem % (BPZ * BT)
+            llz = rem2 // BT
+            llt = rem2 % BT
+            gpyv = lly + oy[gg]
+            gpzv = llz + oz[gg]
+            gtv = llt + ot[gg]
+            final_sk = jnp.where(vm, gpyv * num_pz + gpzv, SENTINEL_PK).astype(jnp.int32)
+            final_tk = jnp.where(vm, gtv, 0).astype(jnp.int32)
+            final_gk = jnp.where(vm, gg, 0).astype(jnp.int32)
+            final_ch = jnp.where(vm, flat[cidx], 0.0).astype(jnp.float32)
+            final_count = cnt
+
+            _, j1 = jax.lax.sort_key_val(final_tk, jnp.arange(mk, dtype=jnp.int32))
+            _, j2 = jax.lax.sort_key_val(final_sk[j1], j1)
+            ssk, stk, sch = final_sk[j2], final_tk[j2], final_ch[j2]
+            stv = jnp.ones(mk, bool).at[1:].set((ssk[1:] != ssk[:-1]) | (stk[1:] != stk[:-1]))
+            seg = jnp.cumsum(stv) - 1
+            ssum = jax.ops.segment_sum(sch, seg, num_segments=mk)
+            sstarts = stv & (ssk < SENTINEL_PK)
+            sidx = jnp.where(sstarts, size=mk, fill_value=0)[0]
+            scnt = jnp.sum(sstarts).astype(jnp.int32)
+            smask = jnp.arange(mk) < scnt
+            sig_sk = jnp.where(smask, ssk[sidx], SENTINEL_PK).astype(jnp.int32)
+            sig_tk = jnp.where(smask, stk[sidx], 0).astype(jnp.int32)
+            sig_ch = jnp.where(smask, ssum[seg[sidx]], 0.0).astype(jnp.float32)
+
+            return ((final_sk, final_tk, final_gk, final_ch, final_count, final_rowsums),
+                    (sig_sk, sig_tk, sig_ch, scnt))
+
         def body(i, state):
             s_sk, s_tk, s_gk, s_ch, s_count, s_rowsums = state
             start = i * cfg.track_hits.hits_chunk_size
@@ -979,6 +1131,72 @@ def create_track_hits_fn_for_volume(cfg, vol_geom, pixel_kernel=None):
             (n_actual + cfg.track_hits.hits_chunk_size - 1) // cfg.track_hits.hits_chunk_size,
             max_safe_chunks
         )
+
+        if cfg.track_hits.box_enabled:
+            BW, BT, MAXG = cfg.track_hits.box_bw, cfg.track_hits.box_btw, cfg.track_hits.maxg
+            hcs = cfg.track_hits.hits_chunk_size
+            tp = charges.shape[0]
+            BIG = jnp.int32(2**30)
+            Kw, Kt = diffusion.K_wire, diffusion.K_time
+            center_tick = jnp.floor(tick_us / cfg.time_step_us).astype(jnp.int32)
+            vmask_all = (jnp.arange(tp) < n_actual) & (group_ids > 0)
+            ow = jax.ops.segment_min(jnp.where(vmask_all, closest_wire_idx, BIG),
+                                     group_ids, num_segments=MAXG) - Kw   # min cell wire/group
+            ot = jax.ops.segment_min(jnp.where(vmask_all, center_tick, BIG),
+                                     group_ids, num_segments=MAXG) - Kt
+
+            def wbody(i, st):
+                box, rowsums = st
+                start = i * hcs
+                c_charges = jax.lax.dynamic_slice(charges, (start,), (hcs,))
+                c_drift_time = jax.lax.dynamic_slice(drift_time_us, (start,), (hcs,))
+                c_tick = jax.lax.dynamic_slice(tick_us, (start,), (hcs,))
+                c_drift_dist = jax.lax.dynamic_slice(drift_distance_cm, (start,), (hcs,))
+                c_wire_idx = jax.lax.dynamic_slice(closest_wire_idx, (start,), (hcs,))
+                c_wire_dist = jax.lax.dynamic_slice(closest_wire_distances, (start,), (hcs,))
+                c_atten = jax.lax.dynamic_slice(attenuation_factors, (start,), (hcs,))
+                c_theta_xz = jax.lax.dynamic_slice(theta_xz, (start,), (hcs,))
+                c_theta_y = jax.lax.dynamic_slice(theta_y, (start,), (hcs,))
+                c_ang_scale = jax.lax.dynamic_slice(angular_scaling_factor, (start,), (hcs,))
+                c_valid = jax.lax.dynamic_slice(valid_mask, (start,), (hcs,))
+                c_gids = jax.lax.dynamic_slice(group_ids, (start,), (hcs,))
+                wire_idx, time_idx, sig_val = prepare_deposit_vmap_hit(
+                    c_charges, c_drift_time, c_tick, c_drift_dist,
+                    c_wire_idx, c_wire_dist, c_atten,
+                    c_theta_xz, c_theta_y, c_ang_scale, c_valid,
+                    diffusion.K_wire, diffusion.K_time, spacing_cm, cfg.time_step_us,
+                    diffusion.long_cm2_us, diffusion.trans_cm2_us,
+                    diffusion.velocity_cm_us, num_wires_plane, cfg.num_time_steps)
+                chunk_rs = jnp.sum(jnp.where(sig_val > cfg.track_hits.inter_thresh,
+                                             sig_val, 0.0), axis=1)
+                rowsums = jax.lax.dynamic_update_slice(rowsums, chunk_rs, (start,))
+                g_full = jnp.repeat(c_gids[:, jnp.newaxis], K_total, axis=1)
+                lw = wire_idx - ow[g_full]
+                lt = time_idx - ot[g_full]
+                inbox = (lw >= 0) & (lw < BW) & (lt >= 0) & (lt < BT) & (sig_val > 0.0)
+                addv = jnp.where(inbox, sig_val, 0.0).reshape(-1)
+                gi = jnp.clip(g_full, 0, MAXG - 1).reshape(-1)
+                lwi = jnp.clip(lw, 0, BW - 1).reshape(-1)
+                lti = jnp.clip(lt, 0, BT - 1).reshape(-1)
+                box = box.at[gi, lwi, lti].add(addv)
+                return (box, rowsums)
+
+            box0 = jnp.zeros((MAXG, BW, BT), jnp.float32)
+            box, final_rowsums = jax.lax.fori_loop(
+                0, num_chunks, wbody, (box0, jnp.zeros(tp, jnp.float32)))
+            mk = cfg.track_hits.max_keys
+            flat = box.reshape(-1)
+            over = jnp.abs(flat) > cfg.track_hits.inter_thresh
+            cidx = jnp.where(over, size=mk, fill_value=0)[0]
+            cnt = jnp.sum(over).astype(jnp.int32)
+            vm = jnp.arange(mk) < cnt
+            cell = BW * BT
+            gg = cidx // cell; rem = cidx % cell; lww = rem // BT; ltt = rem % BT
+            final_sk = jnp.where(vm, lww + ow[gg], SENTINEL_PK).astype(jnp.int32)
+            final_tk = jnp.where(vm, ltt + ot[gg], 0).astype(jnp.int32)
+            final_gk = jnp.where(vm, gg, 0).astype(jnp.int32)
+            final_ch = jnp.where(vm, flat[cidx], 0.0).astype(jnp.float32)
+            return (final_sk, final_tk, final_gk, final_ch, cnt, final_rowsums)
 
         def body(i, state):
             s_sk, s_tk, s_gk, s_ch, s_count, s_rowsums = state

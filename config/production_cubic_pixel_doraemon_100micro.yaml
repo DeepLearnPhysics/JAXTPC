@@ -1,0 +1,27 @@
+# JAXTPC production config — cubic_pixel on doraemon data
+# Sized 2026-05-25 from actual-sim validation on the doraemon dataset
+# (top-500 densest events ranked by max-volume segment count).
+#
+# Pixel structure note: pixel readout uses NO bucketed accumulation. A single
+# track_hits pass produces both the hits and the group-collapsed signal, so:
+#   - hits_chunk  = the per-pass fori_loop chunk -> the speed lever (266->20 iters)
+#   - max_keys    = size of that merge -> the sizing parameter
+#   - response_chunk = unused in the pixel compute path, but must divide total_pad
+#   - max_buckets    = unused for pixel (no bucketed accumulation)
+#
+# UNITS: pixel hits AND sensor signal are in ADC (the pixel kernel bakes in the
+# chip's ADC/electron gain; pixel skips electronics/noise/digitize entirely).
+# So inter_thresh, threshold_adc, and corr_threshold below are ALL in ADC.
+# Contrast with wire, where hits are in ENC and only the sensor signal is ADC
+# (post-digitize). See CLAUDE.md "Units convention".
+detector_config: config/cubic_pixel_config.yaml
+total_pad: 1330000        # max per-volume deposits in dataset = 1,327,898; 970k CRASHED on dense events
+response_chunk: 66500     # unused for pixel; kept as a divisor of total_pad (1,330,000 / 20)
+hits_chunk: 66500         # SPEED LEVER: 1,330,000 / 20; ~3.6x faster than 5000 (266 -> 20 iters)
+max_keys: 14000000        # matches documented true dataset max ~14.0M -> ~0 max_keys skips (was 8M, skipped ~0.4-0.8%). Box mode: output-buffer size only, no merge-sort penalty (sweep: ~3% slower vs 8M)
+maxg: 240000              # box group capacity; readout-independent p99.95 over 100k events (233,108), 0.034% overflow -> reprocess
+maxg_medium: 180000       # tiered mode: p99 of n_groups; 99% of events route here (smaller box, ~24% faster)
+inter_thresh: 1.0         # ADC (pixel): in-JIT box compaction filter, |sig| > 1.0 ADC
+threshold_adc: 7.0        # ADC (pixel sensor sparse output) — carried over from generic pixel config, NOT re-tuned for doraemon
+corr_threshold: 1.0       # ADC (pixel hits CSR encode), |chs| > 1.0 ADC — carried over, NOT re-tuned for doraemon
+max_buckets: 1000         # unused for pixel (no bucketed accumulation)

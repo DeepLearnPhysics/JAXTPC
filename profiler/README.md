@@ -1,187 +1,167 @@
 # JAXTPC Profiler
 
-Tools for finding optimal simulation parameters and generating production configs.
+Tools for sizing simulation capacities and generating production configs.
 
-## Quick Start
+The production sim's capacities (`total_pad`, `max_keys`, `maxg`, box dims, chunk
+sizes, thresholds) must be sized for the data — otherwise the sim raises
+`RuntimeError` (`total_pad`), reprocesses (`maxg`), or truncates+logs (`max_keys`)
+at runtime. The profiler scans the data and benchmarks the sim to set them.
+
+## Quick start
 
 ```bash
-# One command: scans data, probes max_keys/max_buckets, finds optimal chunks, saves config
-python3 -m profiler.setup_production --data events.h5 --config config/cubic_wireplane_config.yaml
+# One command: scan + estimate capacities + optimize chunks + save config
+python3 -m profiler.setup_production --data run_dir/ \
+    --config config/cubic_pixel_config.yaml \
+    -o config/production_pixel.yaml
 
-# Use the generated config in production
+# Use it in production
 python3 production/run_batch.py --data events.h5 \
-    --config config/cubic_wireplane_config.yaml \
-    --production-config config/production_cubic_wireplane_config.yaml
+    --config config/cubic_pixel_config.yaml \
+    --production-config config/production_pixel.yaml
 ```
+
+`--data` accepts files, directories (globbed `*.h5`), or several of each.
+
+## The pipeline (`setup_production`)
+
+| Step | Output | Cost |
+|---|---|---|
+| 1. Combined scan | `total_pad`, `maxg`, box dims, **`max_keys`** | **CPU** (parallel `--workers`) |
+| 2. Chunk optimization | `response_chunk`, `hits_chunk` | GPU (one JIT per candidate) |
+| 3. maxg benchmark | `maxg_medium` (tiered-routing split) | GPU |
+| 4. Threshold analysis (`--run-thresholds`) | `corr_threshold`, `threshold_adc` | GPU |
+
+**Only steps 2–4 need the GPU.** Step 1 is one CPU pass that yields: deposit counts
+→ `total_pad` (max, or `--use-p999`); the n_groups distribution → `maxg` (p99.95,
+readout-independent); per-group footprint extents → box dims; and the per-deposit
+**charge-aware** key estimate → `max_keys`.
+
+Track-hits uses the **box** path by default (`create_track_hits_config(box_enabled=True)`).
+
+## The `max_keys` estimate (charge-aware)
+
+`max_keys` = the number of per-group box cells whose accumulated `|signal| >
+inter_thresh` (`tools/track_hits.py`, box path). The profiler estimates it **without
+simulating** each event: for every deposit it counts the response-kernel cells that
+clear the *absolute* threshold given that deposit's intensity (recombination × drift
+attenuation), and sums (`estimate_max_keys.py`). The cheap, charge-independent
+geometry count (kernel cells > 0.5% of peak) under-counts ~3× because it ignores the
+deposit's brightness; the charge-aware count fixes that.
+
+The per-deposit sum over-counts the within-group **union** by a per-readout overlap
+factor, corrected by two calibrated knobs (`--cstar`, `--divisor`):
+
+| readout | knob (default) | why |
+|---|---|---|
+| **pixel** | `c* = 2.5` (threshold ×) | overlap lives in the kernel *tails* — a higher threshold removes it |
+| **wire** | `÷ 3.79` (flat factor) | overlap is *structural* (1-D wire projection × 3 planes); the threshold plateaus, so a factor is used |
+
+Defaults are readout-aware and calibrated on the doraemon dataset. **Re-verify for very
+different data with `compare_max_keys`.**
 
 ## Scripts
 
-### `setup_production` — One-shot production config generator
-
-Runs the full optimization pipeline and saves a YAML config:
-
-1. Scans events for optimal `total_pad`
-2. Probes `max_keys` with representative events
-3. Probes `max_buckets` (if pixel readout or `--bucketed`)
-4. Finds optimal `response_chunk` and `hits_chunk` via coarse/fine search
-
+### `setup_production` — one-shot config generator
 ```bash
-python3 -m profiler.setup_production --data events.h5 --config config.yaml
-python3 -m profiler.setup_production --data events.h5 --config config.yaml -o config/my_production.yaml
-python3 -m profiler.setup_production --data events.h5 --config config.yaml --use-max --probe-events 10
+python3 -m profiler.setup_production --data run_dir/ --config config.yaml -o out.yaml
+python3 -m profiler.setup_production ... --headroom 1.1 --cstar 2.5 --divisor 1
+python3 -m profiler.setup_production ... --run-thresholds   # also calibrate thresholds
+python3 -m profiler.setup_production ... --skip-chunks       # reuse defaults, skip GPU Step 2
 ```
 
-### Individual Scripts
-
-Each script optimizes a single parameter and can save to a shared config file via `--save-config`.
-
-#### `find_optimal_pad` — Scan data for `total_pad`
-
-Reads positions from HDF5, splits into volumes by geometry, reports deposit count statistics. No simulation needed.
-
+### `compare_max_keys` — validate / calibrate the estimate (GPU)
+Runs the **actual box sim** on the top-K densest events and compares to the geometry
+estimate. Use it to confirm `max_keys` won't overflow, and to calibrate `c*`/`divisor`
+for new data (sweep the threshold until EST/ACTUAL ≈ 1.0).
 ```bash
-python3 -m profiler.find_optimal_pad --data events.h5 --config config.yaml
-python3 -m profiler.find_optimal_pad --data events.h5 --config config.yaml --events 100 --save-config config/prod.yaml
+python3 -m profiler.compare_max_keys --data run_dir/ --config config/cubic_pixel_config.yaml \
+    --rank-validate --top-k 50 --maxg 130000 --box-bpy 8 --box-bpz 8 --box-bt 83 \
+    --total-pad 450000 --hits-chunk 28125 --probe-max-keys 12000000
+```
+Reports per-event `PERDEP`/`CHG` estimate vs `ACTUAL`, and the ratios. (`--no-box` for the
+legacy merge path.)
+
+### `scan_values` — CPU-only values + plots (no GPU)
+Runs just Step 1 (charge-aware `max_keys` + `maxg` + box dims + `total_pad`) over all
+files and **patches an existing config**, keeping its GPU-derived chunks + `maxg_medium`.
+Saves distribution plots to `profiler/figures/`. Use when only the **data** changed (not
+the sim/geometry) — pixel + wire can run concurrently.
+```bash
+python3 profiler/scan_values.py --config config/cubic_pixel_config.yaml --data run_dir/ \
+    --existing config/production_pixel.yaml --out config/production_pixel.yaml \
+    --tag pixel --cstar 2.5 --divisor 1 --headroom 1.1
+# wire: --cstar 1 --divisor 3.79
 ```
 
-#### `find_optimal_max_keys` — Probe track-hits capacity
+### Individual step tools
+- **`find_optimal_pad`** — scan deposit counts → `total_pad` (CPU, no sim).
+- **`find_optimal_maxg`** — `maxg` + box dims + charge-aware `max_keys` in one CPU scan
+  (pass `value_tables` + `charge_model` + `key_thresh` for the charge-aware path).
+- **`find_optimal_chunks`** — divisor search → `response_chunk` (track_hits off),
+  `hits_chunk` (track_hits on), timed on the GPU.
+- **`threshold_analysis`** — one sim, then post-process sweeps → `corr_threshold`
+  (hits charge loss), `threshold_adc` (sparse signal loss). Keeps the largest threshold
+  losing ≤1%.
+- Aux/diagnostic: `sweep_chunks(_2d)`, `bench_fit` (GPU timing/peak-mem probes).
 
-Runs with a large `max_keys`, records actual entry counts per plane, suggests a safe value with headroom.
-
-```bash
-python3 -m profiler.find_optimal_max_keys --data events.h5 --config config.yaml
-python3 -m profiler.find_optimal_max_keys --data events.h5 --config config.yaml --events 10 --headroom 2.0
-```
-
-#### `find_optimal_max_buckets` — Probe bucketed tile capacity
-
-Same approach as `max_keys` but for the bucketed accumulation active tile count. Required for pixel readout.
-
-```bash
-python3 -m profiler.find_optimal_max_buckets --data events.h5 --config config/cubic_pixel_config.yaml
-python3 -m profiler.find_optimal_max_buckets --data events.h5 --config config.yaml --bucketed
-```
-
-#### `find_optimal_chunks` — Two-pass chunk size search
-
-Enumerates divisors of `total_pad`, times each with coarse pass (few iterations), then fine pass on top 3.
-Phase 1 finds `response_chunk` (track_hits off), Phase 2 finds `hits_chunk` (track_hits on).
-
-```bash
-python3 -m profiler.find_optimal_chunks --data events.h5 --config config.yaml --total-pad 300000
-python3 -m profiler.find_optimal_chunks --data events.h5 --config config.yaml --lo 5000 --hi 100000 --n-fine 15
-```
-
-#### `find_optimal_inter_thresh` — Smallest safe intermediate pruning threshold
-
-Sweeps `inter_thresh` values and compares charge output against a baseline (inter_thresh=0). Finds the largest value within a charge loss tolerance. Each value requires a JIT recompilation.
-
-```bash
-python3 -m profiler.find_optimal_inter_thresh --data events.h5 --config config.yaml
-python3 -m profiler.find_optimal_inter_thresh --data events.h5 --config config.yaml --tolerance 0.001
-```
-
-#### `threshold_analysis` — Measure charge/signal loss from output thresholds
-
-Runs one simulation, then sweeps thresholds in post-processing (no re-simulation):
-- `corr_threshold`: filters correspondence entries, measures charge loss
-- `threshold_adc`: filters sparse signal output, measures signal loss
-
-```bash
-python3 -m profiler.threshold_analysis --data events.h5 --config config.yaml --events 5
-python3 -m profiler.threshold_analysis --data events.h5 --config config.yaml --mode corr
-python3 -m profiler.threshold_analysis --data events.h5 --config config.yaml --mode adc --adc-values 0.5 1.0 2.0 5.0
-```
-
-#### `benchmark_sim` — Time simulation with different configurations
-
-Sweeps feature combinations (noise, electronics, track_hits, digitize) or a single numeric parameter.
-
-```bash
-python3 -m profiler.benchmark_sim --data events.h5 --config config.yaml
-python3 -m profiler.benchmark_sim --data events.h5 --config config.yaml --sweep total_pad 100000 200000 500000
-python3 -m profiler.benchmark_sim --data events.h5 --config config.yaml --features-only --runs 10
-```
-
-## Production Config Format
-
-Generated YAML stored in `config/`:
+## Production config format
 
 ```yaml
-# config/production_cubic_wireplane_config.yaml
-detector_config: config/cubic_wireplane_config.yaml
-total_pad: 300000
-response_chunk: 50000
-hits_chunk: 25000
-max_keys: 4000000
-inter_thresh: 1.0
-threshold_adc: 2.0
-corr_threshold: 25.0
-max_buckets: 50000
+detector_config: config/cubic_pixel_config.yaml
+total_pad: 450000
+response_chunk: 28125
+hits_chunk: 28125
+max_keys: 9000000
+maxg: 110000          # group-bucket capacity (p99.95; rare overflow -> reprocess)
+maxg_medium: 50000    # tiered routing: medium-tier maxg
+box_bpy: 8            # pixel per-group footprint dims  (wire: box_bw, box_btw)
+box_bpz: 8
+box_bt: 83
+inter_thresh: 1.0     # in-JIT box cell threshold   (ENC wire / ADC pixel)
+threshold_adc: 2.0    # sparse sensor output cutoff (ADC, both readouts)
+corr_threshold: 25.0  # hits CSR cutoff             (ENC wire / ADC pixel)
+max_buckets: 1000     # bucketed tile capacity (unused for pixel)
 ```
 
 ## Parameters
 
-| Parameter | What it controls | How to optimize |
+| Parameter | Controls | Set by |
 |---|---|---|
-| `total_pad` | Max deposits per volume (JIT shape) | `find_optimal_pad` — data scan, no sim |
-| `response_chunk` | Deposits per response fori_loop batch | `find_optimal_chunks` — timing sweep |
-| `hits_chunk` | Deposits per track_hits fori_loop batch | `find_optimal_chunks` — timing sweep |
-| `max_keys` | Track-hits merge state capacity | `find_optimal_max_keys` — probe actual counts |
-| `max_buckets` | Active tile capacity (bucketed mode) | `find_optimal_max_buckets` — probe actual counts |
-| `inter_thresh` | Track-hits intermediate pruning | `find_optimal_inter_thresh` — charge loss sweep |
-| `threshold_adc` | Sparse signal output threshold | `threshold_analysis` — signal loss sweep |
-| `corr_threshold` | Correspondence charge cutoff | `threshold_analysis` — charge loss sweep |
+| `total_pad` | max deposits/volume (JIT shape) | Step 1 scan |
+| `maxg` / `maxg_medium` | group-bucket capacity / tiered split | Step 1 / Step 3 |
+| `box_bpy/bpz/bt` (pixel), `box_bw/btw` (wire) | per-group footprint dims | Step 1 |
+| `max_keys` | box-cell capacity | Step 1 charge-aware estimate (`c*`/`divisor`) |
+| `response_chunk` / `hits_chunk` | fori_loop batch sizes (speed) | Step 2 timing |
+| `inter_thresh` | in-JIT box cell threshold | fixed 1.0 (drives `max_keys`) |
+| `threshold_adc` / `corr_threshold` | output thresholds | Step 4 (`--run-thresholds`) |
 
-## Recommended Order
+## Units caveat (thresholds differ by readout)
 
-```bash
-DATA=events.h5
-CFG=config/cubic_wireplane_config.yaml
-OUT=config/production.yaml
+- `inter_thresh`, `corr_threshold` — **ENC** (wire) vs **ADC** (pixel).
+- `threshold_adc` — **ADC** for both.
 
-# 1. Data scan (no sim)
-python3 -m profiler.find_optimal_pad --data $DATA --config $CFG --save-config $OUT
+See `CLAUDE.md` "Units convention".
 
-# 2. Capacity probes (one sim build each)
-python3 -m profiler.find_optimal_max_keys --data $DATA --config $CFG --save-config $OUT
-python3 -m profiler.find_optimal_max_buckets --data $DATA --config $CFG --save-config $OUT  # pixel/bucketed only
+## Overflow protection
 
-# 3. Chunk timing sweep (multiple sim builds)
-python3 -m profiler.find_optimal_chunks --data $DATA --config $CFG --save-config $OUT
-
-# 4. Quality analysis (one sim, post-process sweep)
-python3 -m profiler.threshold_analysis --data $DATA --config $CFG --save-config $OUT --save-corr 25 --save-adc 2.0
-python3 -m profiler.find_optimal_inter_thresh --data $DATA --config $CFG --save-config $OUT
-
-# Or do it all at once:
-python3 -m profiler.setup_production --data $DATA --config $CFG -o $OUT
-```
-
-## Overflow Protection
-
-Both `total_pad` and `max_keys` raise `RuntimeError` if exceeded at runtime:
-
-- **total_pad**: deposits in a volume exceed capacity. Raised during data loading.
-- **max_keys**: track-hits merge state overflows. Raised after simulation.
-- **max_buckets**: active bucket tiles exceed capacity. Raised after simulation.
-
-Using a profiler-generated config avoids all three.
+- **`total_pad`** — deposits exceed capacity → `RuntimeError` at load.
+- **`maxg`** — n_groups exceeds capacity → logged; sized at p99.95 so reprocess the rare tail.
+- **`max_keys`** — box-cell count exceeds capacity → the count is still correct but stored
+  keys truncate + log. Size with `compare_max_keys` on the tail.
 
 ## Contents
 
 ```
 profiler/
-├── __init__.py                      # Package docstring
-├── timing.py                        # TimingResult, sync_result, time_function
-├── production_config.py             # Save/load/update production config YAML
-├── setup_production.py              # One-shot: pad + max_keys + max_buckets + chunks
-├── find_optimal_pad.py              # Scan data → total_pad
-├── find_optimal_max_keys.py         # Probe → max_keys
-├── find_optimal_max_buckets.py      # Probe → max_buckets
-├── find_optimal_chunks.py           # Two-pass search → response_chunk, hits_chunk
-├── find_optimal_inter_thresh.py     # Charge loss sweep → inter_thresh
-├── threshold_analysis.py            # Signal/charge loss sweep → threshold_adc, corr_threshold
-├── benchmark_sim.py                 # Feature combo and parameter timing
-└── README.md                        # This file
+  setup_production.py    # one-shot orchestrator (steps 1-4)
+  estimate_max_keys.py   # charge-aware max_keys estimator (value tables + charge model)
+  find_optimal_maxg.py   # maxg + box dims + max_keys (one CPU scan)
+  find_optimal_pad.py    # total_pad scan
+  find_optimal_chunks.py # response_chunk + hits_chunk (GPU timing)
+  compare_max_keys.py    # validate/calibrate estimate vs actual box (GPU)
+  scan_values.py         # CPU-only values + config patch + plots
+  threshold_analysis.py  # corr_threshold + threshold_adc
+  sweep_chunks(_2d).py / bench_fit.py  # aux GPU timing/peak-mem probes
+  plots.py / production_config.py / timing.py  # helpers
 ```

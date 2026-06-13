@@ -12,10 +12,11 @@ import pytest
 
 from production.save import (
     save_event_sensor, write_config_sensor, encode_correspondence_csr,
-    save_event_edep, write_config_edep,
+    encode_correspondence_csr_pixel,
+    save_event_step, write_config_step,
 )
 from production.load import (
-    load_event_sensor, load_event_edep, build_viz_config,
+    load_event_sensor, load_event_step, build_viz_config,
 )
 
 
@@ -68,8 +69,8 @@ def _mock_deposits(n_per_vol=50):
     )
 
 
-def _mock_edep_deposits(n_per_vol=20):
-    """Create mock DepositData with full physics fields for edep save tests."""
+def _mock_step_deposits(n_per_vol=20):
+    """Create mock DepositData with full physics fields for step save tests."""
     from collections import namedtuple
     rng = np.random.RandomState(42)
     VD = namedtuple('VD', ['n_actual', 'positions_mm', 'de', 'dx',
@@ -251,6 +252,28 @@ class TestCSREncoding:
 
         np.testing.assert_allclose(recovered, ch, rtol=1e-3)
 
+    def test_pixel_i16_roundtrip_signed(self):
+        """Pixel charges are bipolar: charges_i16 carries the sign and is
+        normalized by |peak|, so |peak| * i16/32767 recovers the originals --
+        including a group whose peak entry is negative. Guards the reader
+        sign-flip bug (reader must use |peak|, not the signed peak)."""
+        num_pz = 100
+        sk = np.array([10 * num_pz + 20, 10 * num_pz + 21,
+                       10 * num_pz + 22], dtype=np.int64)   # spatial keys
+        tk = np.array([100, 100, 100], dtype=np.int32)
+        gid = np.array([0, 0, 0], dtype=np.int32)
+        ch = np.array([-100.0, 50.0, -80.0], dtype=np.float32)  # negative peak
+
+        csr = encode_correspondence_csr_pixel(sk, tk, gid, ch, 3, num_pz=num_pz)
+
+        assert 'charges_i16' in csr
+        peak = float(csr['peak_charges'][0])
+        assert peak < 0.0                       # signed peak is preserved
+        recovered = np.abs(peak) * csr['charges_i16'].astype(np.float32) / 32767.0
+        np.testing.assert_allclose(recovered, ch, rtol=2e-3, atol=1e-2)
+        # signs follow the data, not the (negative) peak
+        assert recovered[0] < 0 and recovered[1] > 0 and recovered[2] < 0
+
     def test_csr_encode_decode_roundtrip_via_hdf5(self):
         """Full CSR encode → HDF5 write → HDF5 read → decode roundtrip."""
         import h5py
@@ -293,15 +316,15 @@ class TestCSREncoding:
             os.unlink(tmp_path)
 
 
-class TestEdepRoundtrip:
-    """Test edep save → load roundtrip."""
+class TestStepRoundtrip:
+    """Test step save → load roundtrip."""
 
     def test_position_roundtrip_tolerance(self, mock_sim_config):
         """Saved positions should be recoverable within voxelization tolerance."""
         cfg, _ = mock_sim_config
         import h5py
 
-        deposits = _mock_edep_deposits(n_per_vol=30)
+        deposits = _mock_step_deposits(n_per_vol=30)
         pos_step_mm = 0.3
 
         with tempfile.NamedTemporaryFile(suffix='.h5', delete=False) as tmp:
@@ -309,10 +332,10 @@ class TestEdepRoundtrip:
 
         try:
             with h5py.File(tmp_path, 'w') as f:
-                write_config_edep(f, cfg, 'test', 0, 'test.h5', 1, 0, 5, 5.0)
-                save_event_edep(f, 'event_000', deposits, 0, pos_step_mm=pos_step_mm)
+                write_config_step(f, cfg, 'test', 0, 'test.h5', 1, 0, 5, 5.0)
+                save_event_step(f, 'event_000', deposits, 0, pos_step_mm=pos_step_mm)
 
-            volumes = load_event_edep(tmp_path, 0)
+            volumes = load_event_step(tmp_path, 0)
 
             for vi in range(2):
                 orig = deposits.volumes[vi].positions_mm[:deposits.volumes[vi].n_actual]
@@ -329,17 +352,17 @@ class TestEdepRoundtrip:
         cfg, _ = mock_sim_config
         import h5py
 
-        deposits = _mock_edep_deposits(n_per_vol=15)
+        deposits = _mock_step_deposits(n_per_vol=15)
 
         with tempfile.NamedTemporaryFile(suffix='.h5', delete=False) as tmp:
             tmp_path = tmp.name
 
         try:
             with h5py.File(tmp_path, 'w') as f:
-                write_config_edep(f, cfg, 'test', 0, 'test.h5', 1, 0, 5, 5.0)
-                save_event_edep(f, 'event_000', deposits, 0)
+                write_config_step(f, cfg, 'test', 0, 'test.h5', 1, 0, 5, 5.0)
+                save_event_step(f, 'event_000', deposits, 0)
 
-            volumes = load_event_edep(tmp_path, 0)
+            volumes = load_event_step(tmp_path, 0)
 
             for vi in range(2):
                 vol = volumes[vi]
@@ -376,10 +399,10 @@ class TestEdepRoundtrip:
 
         try:
             with h5py.File(tmp_path, 'w') as f:
-                write_config_edep(f, cfg, 'test', 0, 'test.h5', 1, 0, 5, 5.0)
-                save_event_edep(f, 'event_000', deposits, 0)
+                write_config_step(f, cfg, 'test', 0, 'test.h5', 1, 0, 5, 5.0)
+                save_event_step(f, 'event_000', deposits, 0)
 
-            volumes = load_event_edep(tmp_path, 0)
+            volumes = load_event_step(tmp_path, 0)
 
             for vi in range(2):
                 assert volumes[vi]['n_actual'] == 0
@@ -391,20 +414,20 @@ class TestEdepRoundtrip:
         cfg, _ = mock_sim_config
         import h5py
 
-        dep0 = _mock_edep_deposits(n_per_vol=10)
-        dep1 = _mock_edep_deposits(n_per_vol=15)
+        dep0 = _mock_step_deposits(n_per_vol=10)
+        dep1 = _mock_step_deposits(n_per_vol=15)
 
         with tempfile.NamedTemporaryFile(suffix='.h5', delete=False) as tmp:
             tmp_path = tmp.name
 
         try:
             with h5py.File(tmp_path, 'w') as f:
-                write_config_edep(f, cfg, 'test', 0, 'test.h5', 2, 0, 5, 5.0)
-                save_event_edep(f, 'event_000', dep0, 0)
-                save_event_edep(f, 'event_001', dep1, 1)
+                write_config_step(f, cfg, 'test', 0, 'test.h5', 2, 0, 5, 5.0)
+                save_event_step(f, 'event_000', dep0, 0)
+                save_event_step(f, 'event_001', dep1, 1)
 
-            vol0 = load_event_edep(tmp_path, 0)
-            vol1 = load_event_edep(tmp_path, 1)
+            vol0 = load_event_step(tmp_path, 0)
+            vol1 = load_event_step(tmp_path, 1)
 
             assert vol0[0]['n_actual'] == 10
             assert vol1[0]['n_actual'] == 15

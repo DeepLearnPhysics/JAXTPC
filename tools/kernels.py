@@ -391,6 +391,16 @@ def load_response_kernels(response_path=None, num_s=16,
 
     Wire spacing is read from the kernel files (not a parameter).
 
+    Units note: the NPZ files carry a misleading ``units = 'ADC_per_electron'``
+    metadata field plus an ``adc_per_electron`` value, reflecting the kernel's
+    first-principles calibration source. This loader treats the kernel values
+    as a *dimensionless* field-impulse fraction — ``intensity (e-) × kernel →
+    ENC`` at the hits stage. The wire signal becomes ADC only after the
+    downstream electronics → noise → digitize chain. The ``electrons_per_adc``
+    metadata is not consumed in the JIT path. Contrast with
+    ``load_pixel_response_kernel`` (pixel kernel bakes in chip gain). See
+    CLAUDE.md "Units convention".
+
     Parameters
     ----------
     response_path : str
@@ -733,6 +743,14 @@ def load_pixel_response_kernel(npz_path, num_s=16, time_spacing=0.5,
     bins). Spatial interpolation maps from NPZ bins to pixel-pitch positions.
     Time interpolation extracts at NPZ resolution, then rebins to simulation
     time steps by summing groups of rebin_factor bins.
+
+    Units note: the pixel kernel is calibrated in ADC per drift-electron — the
+    chip gain is *baked into the kernel*. So ``intensity (e-) × kernel → ADC``
+    at the hits stage, and pixel skips the electronics/noise/digitize chain
+    (``electronics.py:447`` etc. short-circuit). Both pixel hits and the
+    group-collapsed signal are in ADC counts. Contrast with
+    ``load_response_kernels`` (wire kernel is dimensionless e-impulse). See
+    CLAUDE.md "Units convention".
 
     Parameters
     ----------

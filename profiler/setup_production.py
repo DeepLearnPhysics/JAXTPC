@@ -1,15 +1,16 @@
 """
-One-shot production setup: scan data for total_pad, estimate max_keys,
-find optimal chunks, save config.
+One-shot production setup: scan data, benchmark sim, save config.
 
 Steps:
-  1. Scan all files → total_pad (no sim)
-  2. Estimate max_keys from deposit geometry across all files (no sim)
-  3. Find optimal response_chunk and hits_chunk (sim on single event)
-  4. Save everything to a production config YAML
+  1. Combined data scan (one pass) → total_pad, maxg, max_keys
+  2. (optional) Probe max_buckets for bucketed accumulation
+  3. Find optimal response_chunk and hits_chunk (sim benchmark)
+  4. Benchmark time(maxg) → fit linear cost model → compute maxg_medium
+  5. (optional) Threshold analysis
+  6. Save everything to a production config YAML
 
-Accepts multiple --data files or a directory. Steps 1-2 scan everything;
-step 3 uses a single random event for chunk benchmarking.
+Accepts multiple --data files or a directory. Step 1 scans everything;
+steps 3-4 use a single event for benchmarking.
 
 Usage:
     python3 -m profiler.setup_production --data events.h5 --config config.yaml
@@ -48,6 +49,158 @@ def _resolve_data_paths(data_arg):
     return paths
 
 
+def _pick_bench_event(bench_file):
+    """A moderate-density (~p40) event so the small maxg test points fit it
+    without clipping (clipping would distort the time(maxg) slope)."""
+    import h5py
+    with h5py.File(bench_file, 'r') as f:
+        lv = f['pstep/lar_vol']
+        lens = np.array([lv[i].shape[0] for i in range(lv.shape[0])])
+    return int(np.argsort(lens)[int(0.4 * len(lens))])
+
+
+def benchmark_maxg_medium(detector_config, bench_file, *, total_pad, max_keys,
+                          maxg, response_chunk, hits_chunk,
+                          inter_thresh=1.0, ng, n_repeats=5,
+                          group_size=5, gap_threshold_mm=5.0):
+    """Time the sim at several maxg values on one moderate event, then minimize
+    the amortized tiered cost over the n_groups CDF:
+
+        amortized(m) = F(m)·time(m) + (1-F(m))·time(maxg_high)
+
+    The time(maxg) slope is the O(maxg × cells) box reduction (event- and
+    padding-independent given chunking), so one moderate event suffices.
+    Returns (maxg_medium|None, mg_arr, t_arr, time_high).
+    """
+    import gc
+    import time as _time
+    from tools.simulation import DetectorSimulator
+    from tools.config import create_track_hits_config
+    from tools.loader import load_event
+
+    bench_event = _pick_bench_event(bench_file)
+
+    test_pctiles = [50, 75, 90, 99]
+    maxg_test_values = {round_up_to_multiple(int(np.percentile(ng, p)), 10_000)
+                        for p in test_pctiles}
+    maxg_test_values.add(maxg)
+
+    # Keep only maxg values the bench event actually fits (else the box clips).
+    _check_tc = create_track_hits_config(
+        max_keys=max_keys, hits_chunk_size=hits_chunk, inter_thresh=inter_thresh,
+        box_enabled=True, maxg=maxg)
+    _check_sim = DetectorSimulator(
+        detector_config, track_config=_check_tc, total_pad=total_pad,
+        response_chunk_size=response_chunk, include_track_hits=True,
+        group_size=group_size, gap_threshold_mm=gap_threshold_mm)
+    _check_dep = load_event(bench_file, _check_sim.config, event_idx=bench_event)
+    bench_max_gid = max(int(v.group_ids.max()) for v in _check_dep.volumes)
+    del _check_sim
+    print(f'  Benchmark event {bench_event}: max_group_id = {bench_max_gid:,}')
+
+    maxg_test_values = sorted(m for m in maxg_test_values if m > bench_max_gid)
+    if maxg not in maxg_test_values:
+        maxg_test_values.append(maxg)
+        maxg_test_values.sort()
+    print(f'  Testing maxg values: {maxg_test_values}')
+
+    maxg_times = {}
+    for mg in maxg_test_values:
+        tc = create_track_hits_config(
+            max_keys=max_keys, hits_chunk_size=hits_chunk, inter_thresh=inter_thresh,
+            box_enabled=True, maxg=mg)
+        sim = DetectorSimulator(
+            detector_config, track_config=tc, total_pad=total_pad,
+            response_chunk_size=response_chunk, include_track_hits=True,
+            group_size=group_size, gap_threshold_mm=gap_threshold_mm)
+        sim.warm_up()
+        bench_dep = load_event(bench_file, sim.config, event_idx=bench_event)
+        out = sim.process_event(bench_dep, key=jax.random.PRNGKey(0))
+        jax.tree.map(lambda x: x.block_until_ready()
+                     if hasattr(x, 'block_until_ready') else None, out[0])
+        times = []
+        for r in range(n_repeats):
+            t0 = _time.time()
+            out = sim.process_event(bench_dep, key=jax.random.PRNGKey(r + 100))
+            jax.tree.map(lambda x: x.block_until_ready()
+                         if hasattr(x, 'block_until_ready') else None, out[0])
+            times.append(_time.time() - t0)
+        maxg_times[mg] = float(np.mean(times))
+        print(f'    maxg={mg:>9,}  mean={maxg_times[mg]:.3f}s')
+        del sim, bench_dep
+        jax.clear_caches()
+        gc.collect()
+
+    print('\n  n_groups CDF:')
+    for p in [50, 75, 90, 95, 99, 99.5, 99.9, 100]:
+        print(f'    p{p:<6}= {int(np.percentile(ng, p)):>9,}')
+
+    mg_arr = np.array(sorted(maxg_times.keys()), float)
+    t_arr = np.array([maxg_times[int(m)] for m in mg_arr], float)
+    time_high = maxg_times[maxg]
+    maxg_medium = None
+    if len(mg_arr) >= 2:
+        best_amort = time_high
+        for mc in np.arange(mg_arr[0], maxg, 10_000):
+            mc = int(mc)
+            t_mc = float(np.interp(mc, mg_arr, t_arr))
+            frac = float(np.mean(ng < mc))
+            amort = frac * t_mc + (1 - frac) * time_high
+            if amort < best_amort:
+                best_amort = amort
+                maxg_medium = mc
+        if maxg_medium is not None:
+            maxg_medium = round_up_to_multiple(maxg_medium, 10_000)
+            frac_m = float(np.mean(ng < maxg_medium))
+            t_med = float(np.interp(maxg_medium, mg_arr, t_arr))
+            final_amort = frac_m * t_med + (1 - frac_m) * time_high
+            print(f'\n  Optimal maxg_medium = {maxg_medium:,}')
+            print(f'    {frac_m*100:.1f}% medium ({t_med:.3f}s), '
+                  f'{(1-frac_m)*100:.1f}% high ({time_high:.3f}s)')
+            print(f'    amortized = {final_amort:.3f}s  '
+                  f'(saving {time_high - final_amort:.3f}s/event vs single-tier)')
+        else:
+            print('\n  No beneficial maxg_medium found (single tier is optimal)')
+    else:
+        print('\n  Not enough benchmark points for maxg_medium')
+    return maxg_medium, mg_arr, t_arr, time_high
+
+
+def _remake_maxg_medium(args, h5_files):
+    """Standalone: re-derive ONLY maxg_medium for an existing production config,
+    keeping its chunks / max_keys / maxg / box. Geometry-only n_groups scan +
+    benchmark_maxg_medium. Updates the config in place."""
+    import yaml as _yaml
+    from tools.geometry import generate_detector
+    from profiler.find_optimal_maxg import find_optimal_maxg
+    from profiler.production_config import update_config
+
+    cfg = _yaml.safe_load(open(args.output))
+    det_path = cfg['detector_config']
+    detector_config = generate_detector(det_path)
+
+    print('=' * 70)
+    print(' Re-derive maxg_medium (standalone)')
+    print('=' * 70)
+    print(f'  Config:  {args.output}  (maxg={cfg["maxg"]:,})')
+    print(f'  n_groups scan: {len(h5_files)} file(s), geometry-only')
+    _, info = find_optimal_maxg(h5_files, det_path, group_size=args.group_size,
+                                n_workers=args.workers, dim_files=1)
+    ng = info['n_groups']
+
+    mm, *_ = benchmark_maxg_medium(
+        detector_config, h5_files[0], total_pad=cfg['total_pad'],
+        max_keys=cfg['max_keys'], maxg=cfg['maxg'],
+        response_chunk=cfg['response_chunk'], hits_chunk=cfg['hits_chunk'],
+        inter_thresh=float(cfg.get('inter_thresh', 1.0)), ng=ng,
+        group_size=args.group_size, gap_threshold_mm=args.gap_threshold)
+    if mm is not None:
+        update_config(args.output, {'maxg_medium': mm}, detector_config_path=det_path)
+        print(f'\n  Updated maxg_medium = {mm:,} → {args.output}')
+    else:
+        print('\n  No beneficial split — maxg_medium left unchanged')
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='One-shot production config setup')
@@ -61,12 +214,16 @@ def main():
     parser.add_argument('--use-p999', action='store_true',
                         help='Use p99.9 deposit count instead of max for total_pad')
     parser.add_argument('--bucketed', action='store_true')
-    parser.add_argument('--probe-max-buckets', type=int, default=100_000,
-                        help='Large max_buckets for probing active tiles (default: 100k)')
     parser.add_argument('--headroom', type=float, default=1.3,
-                        help='Multiply observed max entries by this (default: 1.3)')
-    parser.add_argument('--probe-events', type=int, default=5,
-                        help='Events to probe for max_buckets (default: 5)')
+                        help='Multiply observed max_keys by this (default: 1.3)')
+    parser.add_argument('--cstar', type=float, default=None,
+                        help='Threshold multiplier for the charge-aware max_keys '
+                             'estimate (c* x inter_thresh). Default by readout: '
+                             'pixel 2.5 (-> ~1.0x actual), wire 1.0.')
+    parser.add_argument('--divisor', type=float, default=None,
+                        help='Per-readout overlap divisor on the max_keys estimate. '
+                             'Default by readout: pixel 1.0, wire 3.79 (wire overlap '
+                             'is structural; the threshold cannot remove it).')
     parser.add_argument('--n-coarse', type=int, default=3)
     parser.add_argument('--n-fine', type=int, default=10)
     parser.add_argument('--lo', type=int, default=1_000)
@@ -75,6 +232,11 @@ def main():
                         help='Skip hits_chunk optimization')
     parser.add_argument('--group-size', type=int, default=5)
     parser.add_argument('--gap-threshold', type=float, default=5.0)
+    parser.add_argument('--maxg-dim-files', type=int, default=20,
+                        help='Files to full-group for box dims (MAXG uses fast-P2 '
+                             'over all files). Box-dim extents are stable, so a '
+                             'subset suffices; avoids the group sort on every file '
+                             '(default: 20)')
     parser.add_argument('--tag', default=None,
                         help='Tag for figure filenames (default: config name)')
     parser.add_argument('--skip-chunks', action='store_true',
@@ -85,6 +247,14 @@ def main():
                         help='Run threshold analysis to calibrate corr_threshold and threshold_adc')
     parser.add_argument('--threshold-events', type=int, default=3,
                         help='Events to use for threshold analysis (default: 3)')
+    parser.add_argument('--workers', type=int, default=1,
+                        help='Parallel worker processes for Step 1+2 file scanning '
+                             '(default: 1 = serial; set ~= CPU count for speed)')
+    parser.add_argument('--remake-maxg-medium', action='store_true',
+                        help='Standalone: re-derive ONLY maxg_medium for the '
+                             'existing -o/--output config (keeps chunks/max_keys/'
+                             'maxg/box). Use when the data changed but the geometry '
+                             'and capacities did not.')
 
     args = parser.parse_args()
 
@@ -96,6 +266,14 @@ def main():
     if args.output is None:
         base = os.path.splitext(os.path.basename(args.config))[0]
         args.output = f'config/production_{base}.yaml'
+
+    # Standalone maxg_medium re-derivation (skips the full pipeline).
+    if args.remake_maxg_medium:
+        if not os.path.exists(args.output):
+            print(f'--remake-maxg-medium needs an existing config at {args.output}')
+            return
+        _remake_maxg_medium(args, h5_files)
+        return
 
     tag = args.tag or os.path.splitext(os.path.basename(args.config))[0]
 
@@ -109,50 +287,80 @@ def main():
     print(f'  Output:  {args.output}')
     print(f'  Device:  {jax.devices()[0]}')
 
-    # ── Step 1: Find total_pad ──────────────────────────────────────────
+    # ── Step 1: Combined scan — total_pad + MAXG + box dims + max_keys ──
+    # One pass over all files yields deposit counts (→ total_pad), n_groups
+    # distribution (→ maxg), per-group footprint extents (→ box dims), and
+    # per-event key estimates (→ max_keys). Previously three separate scans.
 
     print('\n' + '─' * 70)
-    print(' Step 1: Scanning events for optimal total_pad')
+    print(' Step 1: Scanning events (total_pad + MAXG + box dims + max_keys)')
     print('─' * 70)
 
-    from profiler.find_optimal_pad import get_volume_ranges, count_deposits_per_volume
     from tools.geometry import generate_detector
-    import h5py
+    from tools.config import create_sim_config
+    from profiler.find_optimal_maxg import find_optimal_maxg
+    from profiler.estimate_max_keys import (build_wire_element_table,
+        build_pixel_element_table, build_pixel_value_table,
+        build_wire_value_table, build_charge_model)
+    import yaml as _yaml
 
     detector_config = generate_detector(args.config)
-    volume_ranges = get_volume_ranges(detector_config)
+    sc = create_sim_config(detector_config, total_pad=2_000_000)
 
-    all_counts = []
-    total_scanned = 0
-    for fpath in h5_files:
-        fname = os.path.basename(fpath)
-        with h5py.File(fpath, 'r') as f:
-            ds = f['pstep/lar_vol']
-            n_events = ds.shape[0]
-            if args.events_pad is not None:
-                n_events = min(n_events, args.events_pad)
+    element_tables = {}
+    for v, vol_geom in enumerate(sc.volumes):
+        if vol_geom.readout_type == 'pixel':
+            element_tables[v] = build_pixel_element_table(sc, vol_geom)
+        else:
+            element_tables[v] = build_wire_element_table(vol_geom.diffusion)
+    for v, tbl in element_tables.items():
+        print(f'  Vol {v} ({sc.volumes[v].readout_type}) element table: {tbl.tolist()}')
 
-            for i in range(n_events):
-                steps = ds[i]
-                positions_mm = np.column_stack([
-                    steps['x'].astype(np.float32),
-                    steps['y'].astype(np.float32),
-                    steps['z'].astype(np.float32),
-                ])
-                counts = count_deposits_per_volume(positions_mm, volume_ranges)
-                all_counts.append(counts)
-            total_scanned += n_events
-        if len(h5_files) > 1:
-            print(f'  {fname}: {n_events} events')
+    # Charge-aware max_keys: per-deposit footprint at threshold c* x inter_thresh,
+    # summed, then divided by a per-readout overlap factor. Both are calibrated so
+    # the estimate ~= the actual box key count (verify with compare_max_keys):
+    #   pixel: c*=2.5, divisor=1   (a higher threshold removes the kernel-tail overlap)
+    #   wire : c*=1,   divisor=3.79 (overlap is structural from the 1-D wire
+    #                                projection; the threshold plateaus, so use a factor)
+    # These defaults are calibrated on the doraemon dataset -- re-check for very
+    # different data. Value tables carry the kernel's cell-value distribution; the
+    # charge model gives per-deposit intensity (recombination x drift attenuation).
+    readout = sc.volumes[0].readout_type
+    cstar = args.cstar if args.cstar is not None else (2.5 if readout == 'pixel' else 1.0)
+    divisor = (args.divisor if args.divisor is not None
+               else (1.0 if readout == 'pixel' else 3.79))
+    charge_model = build_charge_model(_yaml.safe_load(open(args.config)))
+    value_tables = {}
+    for v, vol_geom in enumerate(sc.volumes):
+        if vol_geom.readout_type == 'pixel':
+            value_tables[v] = build_pixel_value_table(sc, vol_geom)
+        else:
+            value_tables[v] = build_wire_value_table(vol_geom.diffusion)
+    key_thresh = cstar * 1.0  # c* x box inter_thresh (production inter_thresh=1.0)
+    print(f'  max_keys: charge-aware ({readout}), c*={cstar}, divisor={divisor} '
+          f'(threshold={key_thresh})')
 
-    counts_array = np.array(all_counts)
-    max_per_event = counts_array.max(axis=1)
-    pcts = np.percentile(max_per_event, [50, 99.9, 100])
+    maxg, maxg_info = find_optimal_maxg(
+        h5_files, args.config, group_size=args.group_size,
+        events_per_file=args.events_pad, n_workers=args.workers,
+        dim_files=args.maxg_dim_files, element_tables=element_tables,
+        value_tables=value_tables, charge_model=charge_model,
+        key_thresh=key_thresh)
 
-    print(f'  Scanned {total_scanned} events across {len(h5_files)} file(s)')
-    print(f'  Max-across-volumes: P50={int(pcts[0]):,}, P99.9={int(pcts[1]):,}, Max={int(pcts[2]):,}')
+    total_scanned = maxg_info['n_events']
+    dep = maxg_info['deposits']
+    ng = maxg_info['n_groups']
+    keys = maxg_info['keys']
 
-    raw_pad = int(pcts[1]) if args.use_p999 else int(pcts[2])
+    print(f'  Scanned {total_scanned} events across {maxg_info["n_files"]} file(s) '
+          f'in {maxg_info["elapsed_s"]:.0f}s')
+
+    # Deposit distribution → total_pad
+    dep_pcts = np.percentile(dep, [50, 99.9, 100])
+    print(f'\n  Deposits per volume: P50={int(dep_pcts[0]):,}, '
+          f'P99.9={int(dep_pcts[1]):,}, Max={int(dep_pcts[2]):,}')
+
+    raw_pad = int(dep_pcts[1]) if args.use_p999 else int(dep_pcts[2])
     total_pad_10k = round_up_to_multiple(raw_pad, 10_000)
     label = 'p99.9' if args.use_p999 else 'max'
     print(f'  Using {label}: {raw_pad:,} → rounded to 10k: {total_pad_10k:,}')
@@ -166,103 +374,22 @@ def main():
     else:
         total_pad = total_pad_10k
 
-    from profiler.plots import plot_deposit_distribution
-    plot_deposit_distribution(counts_array, total_pad, tag=tag)
+    # MAXG distribution
+    print(f'\n  MAXG (group count, readout-independent):')
+    for p in [50, 90, 99, 99.9, 99.95, 100]:
+        print(f'    p{p:<6}= {int(np.percentile(ng, p)):>9,}')
+    print(f'  Suggested MAXG = {maxg:,}')
 
-    # ── Step 2: Estimate max_keys ────────────────────────────────────────
+    # max_keys from combined scan (apply the per-readout overlap divisor)
+    est_max = int(keys.max()) if len(keys) > 0 else 0
+    max_observed_keys = int(est_max / divisor)
+    max_keys = int(math.ceil(max_observed_keys * args.headroom / 100_000) * 100_000)
+    print(f'\n  max_keys: est max = {est_max:,} / divisor {divisor} = '
+          f'{max_observed_keys:,}, x {args.headroom} headroom → {max_keys:,}')
 
-    print('\n' + '─' * 70)
-    print(' Step 2: Estimating max_keys from deposit geometry (all files)')
-    print('─' * 70)
-
-    from profiler.estimate_max_keys import estimate_max_keys
-
-    max_keys, keys_info = estimate_max_keys(
-        h5_files, args.config,
-        events_per_file=args.events_pad,
-        total_pad=total_pad,
-        group_size=args.group_size,
-        gap_threshold=args.gap_threshold)
-
-    print(f'  {keys_info["n_events"]} events across {keys_info["n_files"]} file(s)')
-    print(f'  Max observed keys:     {keys_info["max_observed_keys"]:,}')
-    print(f'  Upper-half max ratio:  {keys_info["upper_max_ratio"]:.3f}')
-    print(f'  Extrapolated to {total_pad:,}: {keys_info["extrapolated"]:,}')
-    print(f'  Rounded:               {max_keys:,}')
-
-    from profiler.plots import (plot_keys_vs_deposits, plot_keys_ratio,
-                                plot_keys_distribution)
-    plot_keys_vs_deposits(keys_info['all_deps'], keys_info['all_keys'],
-                          total_pad, max_keys, keys_info['upper_max_ratio'], tag=tag)
-    plot_keys_ratio(keys_info['all_deps'], keys_info['all_keys'], tag=tag)
-    plot_keys_distribution(keys_info['all_event_maxes'], max_keys, tag=tag)
-
-    # ── Step 3: Probe max_buckets (if bucketed) ─────────────────────────
-
-    readout_type = detector_config['volumes'][0].get('readout', {}).get('type', 'wire')
-    needs_bucketed = args.bucketed or readout_type == 'pixel'
     max_buckets = 1000
 
-    if needs_bucketed:
-        print('\n' + '─' * 70)
-        print(' Step 3: Probing max_buckets for bucketed accumulation')
-        print('─' * 70)
-
-        import gc
-        from tools.simulation import DetectorSimulator
-        from tools.loader import load_event
-        from profiler.timing import sync_result
-
-        jax.clear_caches()
-        gc.collect()
-
-        temp_response_chunk = candidates[len(candidates) // 2] if candidates else 50_000
-
-        probe_bucket_sim = DetectorSimulator(
-            detector_config,
-            total_pad=total_pad,
-            response_chunk_size=temp_response_chunk,
-            use_bucketed=True,
-            max_active_buckets=args.probe_max_buckets,
-            include_track_hits=False,
-        )
-        probe_bucket_sim.warm_up()
-
-        max_active = 0
-        key = jax.random.PRNGKey(42)
-        bench_file = h5_files[0]
-        n_probe = min(args.probe_events, total_scanned)
-        for i in range(n_probe):
-            key, subkey = jax.random.split(key)
-            deposits = load_event(bench_file, probe_bucket_sim.config, event_idx=i)
-            n_deps = sum(v.n_actual for v in deposits.volumes)
-
-            response_signals, _, _ = probe_bucket_sim.process_event(deposits, key=subkey)
-            sync_result(response_signals)
-
-            event_max = 0
-            for (v, p), sig in response_signals.items():
-                if isinstance(sig, tuple) and len(sig) >= 3:
-                    na = int(sig[1])
-                    event_max = max(event_max, na)
-
-            max_active = max(max_active, event_max)
-            overflow = event_max >= args.probe_max_buckets
-            warn = ' *** OVERFLOW ***' if overflow else ''
-            print(f'  Event {i}: {n_deps:,} deps, max active tiles = {event_max:,}{warn}')
-
-        del probe_bucket_sim
-
-        raw_max_buckets = int(max_active * args.headroom)
-        max_buckets = round_up_to_multiple(raw_max_buckets, 5_000)
-
-        print(f'\n  Observed max: {max_active:,}')
-        print(f'  × {args.headroom} headroom, rounded: {max_buckets:,}')
-
-        if max_active >= args.probe_max_buckets:
-            print(f'  WARNING: Hit probe limit! Re-run with larger --probe-max-buckets')
-
-    # ── Step 4: Find optimal chunks ─────────────────────────────────────
+    # ── Step 2: Find optimal chunks ─────────────────────────────────────
 
     if args.skip_chunks:
         best_response = args.default_chunk
@@ -279,9 +406,9 @@ def main():
     else:
 
         print('\n' + '─' * 70)
-        print(' Step 4: Finding optimal chunk sizes')
+        print(' Step 2: Finding optimal chunk sizes')
         print('─' * 70)
-        print(f'  total_pad: {total_pad:,}, max_keys: {max_keys:,}')
+        print(f'  total_pad: {total_pad:,}, max_keys: {max_keys:,}, maxg: {maxg:,}')
 
         from profiler.find_optimal_chunks import auto_search
         from profiler.plots import plot_chunk_timing
@@ -300,7 +427,8 @@ def main():
             'response_chunk', args.lo, args.hi,
             include_track_hits=False, fixed_response_chunk=50_000,
             max_keys=max_keys, bucketed=args.bucketed,
-            n_coarse=args.n_coarse, n_fine=args.n_fine)
+            n_coarse=args.n_coarse, n_fine=args.n_fine,
+            group_size=args.group_size, gap_threshold_mm=args.gap_threshold)
 
         if not best_response:
             best_response = 50_000
@@ -318,7 +446,7 @@ def main():
             total_pad = round_up_to_multiple(total_pad, best_response)
             print(f'  Re-aligned total_pad to {total_pad:,}')
 
-        # Phase 2: hits_chunk (track_hits ON, uses real max_keys)
+        # Phase 2: hits_chunk (track_hits ON, uses maxg_high)
         hits_divs = divisors_in_range(total_pad, 1000, 25_000)
         best_hits = hits_divs[-1] if hits_divs else best_response
         if not args.skip_hits:
@@ -328,7 +456,8 @@ def main():
                 'hits_chunk', args.lo, args.hi,
                 include_track_hits=True, fixed_response_chunk=best_response,
                 max_keys=max_keys, bucketed=args.bucketed,
-                n_coarse=args.n_coarse, n_fine=args.n_fine)
+                n_coarse=args.n_coarse, n_fine=args.n_fine,
+                group_size=args.group_size, gap_threshold_mm=args.gap_threshold)
             if found:
                 best_hits = found
                 print(f'  Best hits_chunk: {best_hits:,}')
@@ -337,14 +466,111 @@ def main():
                 plot_chunk_timing(vals, [(hits_coarse[v], 0) for v in vals],
                                   'hits_chunk_size', best_hits, tag=tag)
 
-    # ── Step 5: Threshold analysis (optional) ─────────────────────────
+    # ── Step 3: Benchmark time(maxg) → maxg_medium ───────────────────
+    # Sweep several maxg values, measure sim time for each, then combine with
+    # the n_groups CDF for the optimal tiered split (see benchmark_maxg_medium).
+
+    print('\n' + '─' * 70)
+    print(' Step 3: Benchmarking time(maxg) → maxg_medium')
+    print('─' * 70)
+
+    maxg_medium, mg_arr, t_arr, time_high = benchmark_maxg_medium(
+        detector_config, h5_files[0], total_pad=total_pad, max_keys=max_keys,
+        maxg=maxg, response_chunk=best_response,
+        hits_chunk=best_hits, inter_thresh=1.0, ng=ng,
+        group_size=args.group_size, gap_threshold_mm=args.gap_threshold)
+
+    # ── Plots for Step 1 + Step 3 ──────────────────────────────────────
+    try:
+        import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
+        fig_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                               'profiler', 'figures')
+        os.makedirs(fig_dir, exist_ok=True)
+
+        # 1) n_groups distribution + maxg lines
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.hist(ng, bins=80, color='steelblue', alpha=0.8, label='n_groups')
+        ax.axvline(maxg, color='red', ls='--', lw=1.5, label=f'maxg={maxg:,}')
+        if maxg_medium is not None:
+            ax.axvline(maxg_medium, color='orange', ls='--', lw=1.5,
+                       label=f'maxg_medium={maxg_medium:,}')
+        ax.set_xlabel('n_groups per event-volume')
+        ax.set_ylabel('count')
+        ax.set_title(f'n_groups distribution ({maxg_info["readout"]}, {len(ng):,} event-volumes)')
+        ax.legend()
+        fig.tight_layout()
+        p1 = os.path.join(fig_dir, f'maxg_distribution_{tag}.png')
+        fig.savefig(p1, dpi=120); plt.close(fig)
+        print(f'  Saved: {p1}')
+
+        # 2) time(maxg) cost curve
+        if len(mg_arr) >= 2:
+            fig, ax = plt.subplots(figsize=(7, 4))
+            ax.plot(mg_arr / 1e3, t_arr, 'o-', color='steelblue', markersize=8)
+            if maxg_medium is not None:
+                t_med_interp = float(np.interp(maxg_medium, mg_arr, t_arr))
+                ax.axvline(maxg_medium / 1e3, color='orange', ls='--', lw=1.5,
+                           label=f'medium={maxg_medium:,}')
+                ax.plot(maxg_medium / 1e3, t_med_interp, 's', color='orange',
+                        markersize=10, zorder=5)
+            ax.set_xlabel('maxg (thousands)')
+            ax.set_ylabel('sim time (s)')
+            ax.set_title(f'Sim time vs maxg ({maxg_info["readout"]})')
+            ax.legend()
+            fig.tight_layout()
+            p2 = os.path.join(fig_dir, f'maxg_cost_{tag}.png')
+            fig.savefig(p2, dpi=120); plt.close(fig)
+            print(f'  Saved: {p2}')
+
+        # 3) amortized cost vs maxg_medium candidate
+        if len(mg_arr) >= 2:
+            m_sweep = np.arange(mg_arr[0], maxg, 5_000)
+            amort_sweep = []
+            for mc in m_sweep:
+                t_mc = float(np.interp(mc, mg_arr, t_arr))
+                frac = float(np.mean(ng < mc))
+                amort_sweep.append(frac * t_mc + (1 - frac) * time_high)
+            fig, ax = plt.subplots(figsize=(7, 4))
+            ax.plot(m_sweep / 1e3, amort_sweep, '-', color='steelblue', lw=2)
+            ax.axhline(time_high, color='gray', ls=':', lw=1,
+                       label=f'single-tier ({time_high:.3f}s)')
+            if maxg_medium is not None:
+                ax.axvline(maxg_medium / 1e3, color='orange', ls='--', lw=1.5,
+                           label=f'optimal={maxg_medium:,}')
+            ax.set_xlabel('maxg_medium (thousands)')
+            ax.set_ylabel('amortized sim time (s)')
+            ax.set_title(f'Tiered routing optimization ({maxg_info["readout"]})')
+            ax.legend()
+            fig.tight_layout()
+            p3 = os.path.join(fig_dir, f'maxg_medium_opt_{tag}.png')
+            fig.savefig(p3, dpi=120); plt.close(fig)
+            print(f'  Saved: {p3}')
+
+        # 4) deposits distribution
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.hist(dep, bins=80, color='steelblue', alpha=0.8)
+        ax.axvline(total_pad, color='red', ls='--', lw=1.5,
+                   label=f'total_pad={total_pad:,}')
+        ax.set_xlabel('deposits per volume')
+        ax.set_ylabel('count')
+        ax.set_title(f'Deposit distribution ({len(dep):,} event-volumes)')
+        ax.legend()
+        fig.tight_layout()
+        p4 = os.path.join(fig_dir, f'deposit_distribution_{tag}.png')
+        fig.savefig(p4, dpi=120); plt.close(fig)
+        print(f'  Saved: {p4}')
+
+    except Exception as e:
+        print(f'  (plots skipped: {e})')
+
+    # ── Step 4: Threshold analysis (optional) ─────────────────────────
 
     chosen_corr = 25.0
     chosen_adc = 2.0
 
     if args.run_thresholds:
         print('\n' + '─' * 70)
-        print(' Step 5: Threshold analysis')
+        print(' Step 4: Threshold analysis')
         print('─' * 70)
 
         import gc
@@ -362,14 +588,20 @@ def main():
         jax.clear_caches()
         gc.collect()
 
+        # Box dims are derived analytically by the simulator from the group
+        # definition (group_size/gap_threshold) — same as production — so the
+        # thresholds are calibrated on the exact distribution production produces.
         track_config = create_track_hits_config(
-            max_keys=max_keys, hits_chunk_size=best_hits)
+            max_keys=max_keys, hits_chunk_size=best_hits,
+            inter_thresh=1.0, box_enabled=True, maxg=maxg)
         thresh_sim = DetectorSimulator(
             detector_config,
             total_pad=total_pad,
             response_chunk_size=best_response,
             include_track_hits=True,
             track_config=track_config,
+            group_size=args.group_size,
+            gap_threshold_mm=args.gap_threshold,
         )
         thresh_sim.warm_up()
 
@@ -476,11 +708,17 @@ def main():
         'response_chunk': best_response,
         'hits_chunk': best_hits,
         'max_keys': max_keys,
+        'maxg': maxg,
         'inter_thresh': 1.0,
         'threshold_adc': chosen_adc,
         'corr_threshold': chosen_corr,
         'max_buckets': max_buckets,
     }
+    if maxg_medium is not None:
+        config_values['maxg_medium'] = maxg_medium
+    # Box (group-as-bucket) per-group dims are NOT stored: the simulator derives
+    # them analytically from the group definition + geometry at construction
+    # (tools.track_hits.compute_box_dims), including for the timing sims above.
 
     save_config(args.output, config_values, detector_config_path=args.config)
 
