@@ -67,7 +67,7 @@ Edge Cases
 import jax.numpy as jnp
 
 # Valid recombination model names
-RECOMB_MODELS = ('modified_box', 'emb')
+RECOMB_MODELS = ('modified_box', 'emb', 'passthrough')
 
 
 def _xi_modified_box(de_dx, field_kVcm, phi_drift, params):

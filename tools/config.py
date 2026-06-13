@@ -679,7 +679,9 @@ def create_sim_params(detector_config, recombination_model='modified_box',
                 f"Required for model='{recombination_model}'.")
         return jnp.array(float(params_cfg[key]))
 
-    if recombination_model == 'modified_box':
+    if recombination_model in ('modified_box', 'passthrough'):
+        # 'passthrough' (Q-input reconstruction) ignores recomb params but still
+        # needs a valid ModifiedBoxParams bundle (w_value/field used elsewhere).
         recomb = ModifiedBoxParams(
             density=jnp.array(density),
             w_value=jnp.array(w_value),

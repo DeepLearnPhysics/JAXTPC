@@ -477,9 +477,16 @@ class DetectorSimulator:
                 return response_fn
 
         # ── Recombination ──
-        _xi_fn = XI_FN[self.recomb_model]
-        def _recomb_fn(de, dx, phi_drift, e_field_Vcm, params):
-            return compute_quanta(de, dx, phi_drift, e_field_Vcm, params, _xi_fn)
+        if self.recomb_model == 'passthrough':
+            # Reconstruction mode: the input channel carries Q (electrons)
+            # directly — no recombination, no Q(dE), no inverse. The signal is
+            # exactly linear in this Q. (See Q-degeneracy: reconstruct Q, not dE.)
+            def _recomb_fn(de, dx, phi_drift, e_field_Vcm, params):
+                return jnp.maximum(de, 0.0), jnp.zeros_like(de)
+        else:
+            _xi_fn = XI_FN[self.recomb_model]
+            def _recomb_fn(de, dx, phi_drift, e_field_Vcm, params):
+                return compute_quanta(de, dx, phi_drift, e_field_Vcm, params, _xi_fn)
 
         return sce_factory, _build_response_fn, _build_response_fn_diff, _recomb_fn
 
