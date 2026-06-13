@@ -57,7 +57,7 @@ set -euo pipefail
 MODE="${1:-run}"            # "run" (default) | "status"
 
 # ============================= CONFIG (edit me) ==============================
-WORKDIR=/sdf/group/neutrino/omara/JAXTPC
+WORKDIR=${WORKDIR:-/sdf/group/neutrino/omara/JAXTPC}  # env-overridable: point at a branch checkout/worktree
 IMAGE=/sdf/group/neutrino/images/develop.sif
 export TMPDIR=/sdf/data/neutrino/omara/tmp
 
