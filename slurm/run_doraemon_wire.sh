@@ -103,13 +103,17 @@ STOP=${STOP:-0}                      # exclusive; 0 => auto = total files found
 BATCH_SIZE=${BATCH_SIZE:-40}         # input files per array task (~1.3 h wire, ~1.5 h worst-case)
 MAX_CONCURRENT=${MAX_CONCURRENT:-3}  # max array tasks (= GPUs) running at once (env-overridable)
 SKIP_EXISTING=${SKIP_EXISTING:-1}    # 1=skip files already done; 0=force redo
-# SLURM account selector ("mode"): cider -> mli:cider-ml (our allocation);
-# default -> mli:default (shared queue); any other value is passed verbatim.
-MODE=${MODE:-cider}
+# SLURM account selector ("mode"), mirroring ~/gpu-setup.sh aliases:
+#   nu -> mli:nu-ml-dev (default) ; cider-ml -> mli:cider-ml ;
+#   cider-nu -> neutrino:cider-nu ; default -> mli:default ;
+#   any other value is passed verbatim as the --account string.
+MODE=${MODE:-nu}
 case "$MODE" in
-  cider)   ACCOUNT=mli:cider-ml ;;
-  default) ACCOUNT=mli:default ;;
-  *)       ACCOUNT=$MODE ;;
+  nu)       ACCOUNT=mli:nu-ml-dev ;;
+  cider-ml) ACCOUNT=mli:cider-ml ;;
+  cider-nu) ACCOUNT=neutrino:cider-nu ;;
+  default)  ACCOUNT=mli:default ;;
+  *)        ACCOUNT=$MODE ;;
 esac
 # =============================================================================
 
