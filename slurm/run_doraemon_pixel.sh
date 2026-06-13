@@ -102,17 +102,18 @@ STOP=${STOP:-0}                      # exclusive; 0 => auto = total files found
 BATCH_SIZE=${BATCH_SIZE:-20}         # input files per array task (~1.3 h pixel, ~1.5 h worst-case)
 MAX_CONCURRENT=${MAX_CONCURRENT:-3}  # max array tasks (= GPUs) running at once (env-overridable)
 SKIP_EXISTING=${SKIP_EXISTING:-1}    # 1=skip files already done; 0=force redo
-# SLURM account selector ("mode"), mirroring ~/gpu-setup.sh aliases:
+# SLURM account selector, mirroring ~/gpu-setup.sh aliases (env var ACCT;
+# NOT 'MODE' — that's the run/status operation selector above):
 #   nu -> mli:nu-ml-dev (default) ; cider-ml -> mli:cider-ml ;
 #   cider-nu -> neutrino:cider-nu ; default -> mli:default ;
 #   any other value is passed verbatim as the --account string.
-MODE=${MODE:-nu}
-case "$MODE" in
+ACCT=${ACCT:-nu}
+case "$ACCT" in
   nu)       ACCOUNT=mli:nu-ml-dev ;;
   cider-ml) ACCOUNT=mli:cider-ml ;;
   cider-nu) ACCOUNT=neutrino:cider-nu ;;
   default)  ACCOUNT=mli:default ;;
-  *)        ACCOUNT=$MODE ;;
+  *)        ACCOUNT=$ACCT ;;
 esac
 # =============================================================================
 
@@ -170,7 +171,7 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     echo "Run folders : $NRUNS of $NRUNS_ALL used (drop_last=$DROP_LAST_RUNS, glob=$RUN_GLOB)"
     echo "Files found : $NFILES   range $START:$STOP  ->  $NBATCH task(s) of <=$BATCH_SIZE files"
     echo "Workers     : $WORKERS (per_worker=$PER_WORKER)   skip_existing=$SKIP_EXISTING"
-    echo "Account     : $ACCOUNT (mode=$MODE)"
+    echo "Account     : $ACCOUNT (acct=$ACCT)"
     echo "Concurrency : <=$MAX_CONCURRENT GPU(s) at once   2h ceiling/task"
     for ((b=0; b<NBATCH; b++)); do
         s=$(( START + b*BATCH_SIZE ))
