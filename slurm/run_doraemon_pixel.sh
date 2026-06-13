@@ -100,7 +100,7 @@ CODEC=blosc-lz4
 START=${START:-0}                    # first global file index (inclusive)
 STOP=${STOP:-0}                      # exclusive; 0 => auto = total files found
 BATCH_SIZE=${BATCH_SIZE:-20}         # input files per array task (~1.3 h pixel, ~1.5 h worst-case)
-MAX_CONCURRENT=${MAX_CONCURRENT:-5}  # max array tasks (= GPUs) running at once
+MAX_CONCURRENT=${MAX_CONCURRENT:-3}  # max array tasks (= GPUs) running at once (env-overridable)
 SKIP_EXISTING=${SKIP_EXISTING:-1}    # 1=skip files already done; 0=force redo
 # SLURM account selector ("mode"): cider -> mli:cider-ml (our allocation);
 # default -> mli:default (shared queue); any other value is passed verbatim.
