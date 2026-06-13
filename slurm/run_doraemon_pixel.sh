@@ -104,17 +104,20 @@ MAX_CONCURRENT=${MAX_CONCURRENT:-3}  # max array tasks (= GPUs) running at once 
 SKIP_EXISTING=${SKIP_EXISTING:-1}    # 1=skip files already done; 0=force redo
 # SLURM account selector, mirroring ~/gpu-setup.sh aliases (env var ACCT;
 # NOT 'MODE' — that's the run/status operation selector above):
-#   nu -> mli:nu-ml-dev (default) ; cider-ml -> mli:cider-ml ;
+#   cider-ml -> mli:cider-ml (default) ; nu -> mli:nu-ml-dev ;
 #   cider-nu -> neutrino:cider-nu ; default -> mli:default ;
 #   any other value is passed verbatim as the --account string.
-ACCT=${ACCT:-nu}
+# QOS: mli:default only offers the 'preemptable' qos, so it's auto-selected
+# for that account; override for any account with QOS=<name>.
+ACCT=${ACCT:-cider-ml}
 case "$ACCT" in
-  nu)       ACCOUNT=mli:nu-ml-dev ;;
-  cider-ml) ACCOUNT=mli:cider-ml ;;
-  cider-nu) ACCOUNT=neutrino:cider-nu ;;
-  default)  ACCOUNT=mli:default ;;
-  *)        ACCOUNT=$ACCT ;;
+  nu)       ACCOUNT=mli:nu-ml-dev;      ACCT_QOS= ;;
+  cider-ml) ACCOUNT=mli:cider-ml;       ACCT_QOS= ;;
+  cider-nu) ACCOUNT=neutrino:cider-nu;  ACCT_QOS= ;;
+  default)  ACCOUNT=mli:default;        ACCT_QOS=preemptable ;;
+  *)        ACCOUNT=$ACCT;              ACCT_QOS= ;;
 esac
+QOS=${QOS:-$ACCT_QOS}    # env QOS wins; else per-account default
 # =============================================================================
 
 # Enumerate the combined file list exactly as run_batch will (per-dir sorted
@@ -171,7 +174,7 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     echo "Run folders : $NRUNS of $NRUNS_ALL used (drop_last=$DROP_LAST_RUNS, glob=$RUN_GLOB)"
     echo "Files found : $NFILES   range $START:$STOP  ->  $NBATCH task(s) of <=$BATCH_SIZE files"
     echo "Workers     : $WORKERS (per_worker=$PER_WORKER)   skip_existing=$SKIP_EXISTING"
-    echo "Account     : $ACCOUNT (acct=$ACCT)"
+    echo "Account     : $ACCOUNT (acct=$ACCT)   qos=${QOS:-<scheduler default>}"
     echo "Concurrency : <=$MAX_CONCURRENT GPU(s) at once   2h ceiling/task"
     for ((b=0; b<NBATCH; b++)); do
         s=$(( START + b*BATCH_SIZE ))
@@ -184,8 +187,11 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     # file list (RUN_GLOB holds a '*', so quote the whole --export value).
     EXPORT="ALL,VOXEL=$VOXEL,RUN_GLOB=$RUN_GLOB,DROP_LAST_RUNS=$DROP_LAST_RUNS,PROD_CONFIG=$PROD_CONFIG"
     EXPORT="$EXPORT,START=$START,STOP=$STOP,BATCH_SIZE=$BATCH_SIZE,SKIP_EXISTING=$SKIP_EXISTING"
+    QOS_ARG=()
+    [ -n "$QOS" ] && QOS_ARG=(--qos="$QOS")
     exec sbatch \
         --account="$ACCOUNT" \
+        ${QOS_ARG[@]+"${QOS_ARG[@]}"} \
         --export="$EXPORT" \
         --output="$OUTDIR/logs/slurm_%x_%A_%a.out" \
         --error="$OUTDIR/logs/slurm_%x_%A_%a.err" \
