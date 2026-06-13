@@ -3,8 +3,8 @@
 # run_doraemon_wire.sh — SLURM array driver for WIRE production (run_batch.py)
 #
 # Splits a file-range into BATCH_SIZE-file chunks and runs each chunk as one
-# task of a SLURM job array on `ampere` (1 A100 / task). A task asks for 4h but
-# RELEASES THE NODE the instant run_batch.py returns, so 4h is just a ceiling.
+# task of a SLURM job array on `ampere` (1 A100 / task). A task asks for 2h but
+# RELEASES THE NODE the instant run_batch.py returns, so 2h is just a ceiling.
 #
 # SELF-SUBMITTING — run it directly on a login node (do NOT `sbatch` it).
 #
@@ -49,7 +49,7 @@
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=28
 #SBATCH --mem=230016M
-#SBATCH --time=04:00:00
+#SBATCH --time=02:00:00
 # NOTE: --output/--error/--array/--export are supplied on the sbatch command line
 #       by the submit section (so logs follow $OUTDIR). Do not set them here.
 
@@ -100,9 +100,17 @@ CODEC=blosc-lz4
 # --- file-range / batching / concurrency / resume (env-overridable) ---------
 START=${START:-0}                    # first global file index (inclusive)
 STOP=${STOP:-0}                      # exclusive; 0 => auto = total files found
-BATCH_SIZE=${BATCH_SIZE:-100}        # input files per array task (~2.4 h wire)
+BATCH_SIZE=${BATCH_SIZE:-40}         # input files per array task (~1.3 h wire, ~1.5 h worst-case)
 MAX_CONCURRENT=${MAX_CONCURRENT:-5}  # max array tasks (= GPUs) running at once
 SKIP_EXISTING=${SKIP_EXISTING:-1}    # 1=skip files already done; 0=force redo
+# SLURM account selector ("mode"): cider -> mli:cider-ml (our allocation);
+# default -> mli:default (shared queue); any other value is passed verbatim.
+MODE=${MODE:-cider}
+case "$MODE" in
+  cider)   ACCOUNT=mli:cider-ml ;;
+  default) ACCOUNT=mli:default ;;
+  *)       ACCOUNT=$MODE ;;
+esac
 # =============================================================================
 
 # Enumerate the combined file list exactly as run_batch will (per-dir sorted
@@ -159,7 +167,8 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     echo "Run folders : $NRUNS of $NRUNS_ALL used (drop_last=$DROP_LAST_RUNS, glob=$RUN_GLOB)"
     echo "Files found : $NFILES   range $START:$STOP  ->  $NBATCH task(s) of <=$BATCH_SIZE files"
     echo "Workers     : $WORKERS (per_worker=$PER_WORKER)   skip_existing=$SKIP_EXISTING"
-    echo "Concurrency : <=$MAX_CONCURRENT GPU(s) at once   4h ceiling/task"
+    echo "Account     : $ACCOUNT (mode=$MODE)"
+    echo "Concurrency : <=$MAX_CONCURRENT GPU(s) at once   2h ceiling/task"
     for ((b=0; b<NBATCH; b++)); do
         s=$(( START + b*BATCH_SIZE ))
         e=$(( s + BATCH_SIZE )); (( e > STOP )) && e=$STOP
@@ -172,6 +181,7 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     EXPORT="ALL,VOXEL=$VOXEL,RUN_GLOB=$RUN_GLOB,DROP_LAST_RUNS=$DROP_LAST_RUNS,PROD_CONFIG=$PROD_CONFIG"
     EXPORT="$EXPORT,START=$START,STOP=$STOP,BATCH_SIZE=$BATCH_SIZE,SKIP_EXISTING=$SKIP_EXISTING"
     exec sbatch \
+        --account="$ACCOUNT" \
         --export="$EXPORT" \
         --output="$OUTDIR/logs/slurm_%x_%A_%a.out" \
         --error="$OUTDIR/logs/slurm_%x_%A_%a.err" \
@@ -210,5 +220,5 @@ singularity exec --nv -B /sdf,/fs,/sdf/scratch,/lscratch "$IMAGE" \
       ${SK_FLAG}" || rc=$?
 
 echo "array task $b finished at $(date) with exit code $rc"
-# Returning here ends the step -> SLURM frees the node now, not at the 4h mark.
+# Returning here ends the step -> SLURM frees the node now, not at the 2h mark.
 exit $rc
