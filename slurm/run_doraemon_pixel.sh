@@ -84,7 +84,7 @@ CONFIG=config/cubic_pixel_config.yaml
 #   RUN_GLOB='run_0027658640' SKIP_EXISTING=0 \
 #     PROD_CONFIG=config/production_cubic_pixel_doraemon_300micro_bigkeys.yaml ./...
 PROD_CONFIG=${PROD_CONFIG:-config/production_cubic_pixel_doraemon_300micro.yaml}
-OUTDIR=/sdf/data/neutrino/omara/JAXTPC_Pixel/${VOXEL}
+OUTDIR=/sdf/data/neutrino/doraemon/pixel_${VOXEL}
 DATASET=sim_pixel
 WORKERS=12          # save workers. Pixel uses bucketed (sparse) accumulation so
                     # queued results are small; 12 is safe + plenty.

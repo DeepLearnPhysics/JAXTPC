@@ -84,7 +84,7 @@ CONFIG=config/cubic_wireplane_config.yaml
 #   RUN_GLOB='run_0027658640' SKIP_EXISTING=0 \
 #     PROD_CONFIG=config/production_cubic_wireplane_doraemon_300micro_bigkeys.yaml ./...
 PROD_CONFIG=${PROD_CONFIG:-config/production_cubic_wireplane_doraemon_300micro.yaml}
-OUTDIR=/sdf/data/neutrino/omara/JAXTPC_Wire/${VOXEL}
+OUTDIR=/sdf/data/neutrino/doraemon/wire_${VOXEL}
 DATASET=sim_wire
 WORKERS=12          # save workers. <=12 on a 40GB GPU (24 OOMs the card —
                     # queued dense responses pin GPU memory; see
