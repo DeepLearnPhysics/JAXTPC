@@ -1,0 +1,14 @@
+# JAXTPC runtime dependencies.
+# For GPU, install JAX per https://docs.jax.dev/en/latest/installation.html
+# (e.g. `pip install -U "jax[cuda12]"`) instead of the plain `jax` below.
+jax
+numpy
+scipy
+matplotlib
+h5py
+hdf5plugin          # required to READ production output (default blosc-zstd codec)
+pyyaml
+pillow              # viewer GIF/MP4 export
+
+# Tests
+pytest

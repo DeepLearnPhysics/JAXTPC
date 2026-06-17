@@ -26,14 +26,21 @@ JAXTPC/
 │   ├── visualization.py          # Wire signal / track label / diffused charge plotting
 │   ├── particle_generator.py     # Differentiable muon track generation
 │   ├── losses.py                 # Sobolev / spectral loss functions
+│   ├── coherent_noise.py         # Tagged coherent (per-wire-group) noise model
+│   ├── pointcloud.py             # Signal → weighted point cloud (OT losses)
+│   ├── space_points.py           # Rough 3D reconstruction from wire crossings
+│   ├── nn_utils.py               # NN inference utilities
+│   ├── sparse_utils.py           # Dense ↔ truly-sparse format conversion
+│   ├── utils.py                  # Misc shared helpers
 │   └── responses/                # Pre-computed wire response kernels (U/V/Y NPZ)
 ├── production/                   # Batch production pipeline
 │   ├── run_batch.py              # Batch simulation with threaded save workers
-│   ├── save.py                   # HDF5 save functions (resp/seg/corr)
-│   ├── load.py                   # HDF5 load/decode functions
+│   ├── save.py                   # HDF5 writers (sensor/step/hits, delta + CSR encoding)
+│   ├── load.py                   # HDF5 readers + minimal viz config builder
+│   ├── make_labl.py              # Per-track label writer (labl files)
 │   ├── view_production.ipynb     # Visualize production output
 │   ├── README.md                 # Pipeline docs, CLI flags, output schema
-│   └── DATA_FORMAT.md            # Output file schema documentation
+│   └── RUN_PRODUCTION.md         # End-to-end production run guide
 ├── profiler/                     # Production parameter optimization
 │   ├── setup_production.py       # Auto-tune total_pad, chunks, max_keys
 │   ├── find_optimal_pad.py       # Scan data for max deposits per volume
@@ -53,9 +60,14 @@ JAXTPC/
 │   ├── icarus_config.yaml            # ICARUS (4 volumes)
 │   ├── dune_ndlar_config.yaml        # DUNE ND-LAr (70 volumes)
 │   ├── dune_fd1_config.yaml          # DUNE Far Detector
-│   ├── pixel_cube_config.yaml        # Pixel readout test config
+│   ├── cubic_pixel_config.yaml       # Pixel readout test config
+│   ├── production_*.yaml             # Profiler-tuned production configs (incl. doraemon)
 │   ├── noise_spectrum.npz            # Empirical noise spectral shape
 │   └── sce_jaxtpc.h5                 # Space charge effect correction maps
+├── viewer/                       # Interactive 3D/2D HTML viewer + GIF/MP4 export
+├── scripts/                      # Standalone utilities (e.g. wire-geometry export)
+├── slurm/                        # SLURM array drivers for batch production
+├── closure/                      # Differentiable reconstruction / closure studies
 └── run_simulation.ipynb          # Interactive single-event simulation notebook
 ```
 
@@ -64,16 +76,18 @@ JAXTPC/
 ### Dependencies
 
 - JAX (with GPU support recommended)
-- NumPy
+- NumPy, SciPy
 - Matplotlib
 - H5py
+- **hdf5plugin** — required to *read* production output (default `blosc-zstd` codec)
 - PyYAML
+- Pillow (viewer GIF/MP4 export)
 
 ```bash
-pip install jax[cuda] numpy matplotlib h5py pyyaml
+pip install -r requirements.txt
 ```
 
-For GPU support, follow the [JAX installation guide](https://github.com/google/jax#installation).
+For GPU support, install JAX per the [JAX installation guide](https://docs.jax.dev/en/latest/installation.html) (e.g. `pip install -U "jax[cuda12]"`).
 
 **Note:** Use `python3` (not `python`).
 
@@ -98,7 +112,6 @@ import jax
 detector_config = generate_detector('config/cubic_wireplane_config.yaml')
 simulator = DetectorSimulator(
     detector_config,
-    use_bucketed=True,
     include_track_hits=True,
     include_digitize=True,
 )
@@ -203,7 +216,9 @@ The simulator returns `(response_signals, track_hits_raw, deposits)`:
 | `icarus_config.yaml` | 4 | Wire | ICARUS |
 | `dune_ndlar_config.yaml` | 70 | Wire | DUNE ND-LAr (5x7 module grid) |
 | `dune_fd1_config.yaml` | 2 | Wire | DUNE Far Detector |
-| `pixel_cube_config.yaml` | 1 | Pixel | Pixel readout test |
+| `cubic_pixel_config.yaml` | 2 | Pixel | Pixel readout (cubic geometry) |
+
+Profiler-tuned `production_*.yaml` variants (including the doraemon wire/pixel configs) are also under `config/`.
 
 ## Simulation Parameters
 
@@ -212,7 +227,7 @@ The simulator returns `(response_signals, track_hits_raw, deposits)`:
 | `total_pad` | 200,000 | Padded array size per volume (sets JIT shape) |
 | `response_chunk_size` | 50,000 | Deposits per fori_loop iteration |
 | `iterate_mode` | `'scan'` | Volume iteration: `'scan'` or `'vmap'` |
-| `use_bucketed` | False | Sparse bucket accumulation (required for pixel) |
+| `use_bucketed` | False | Optional wire-only sparse bucket accumulation (memory saver; not required for pixel) |
 | `max_active_buckets` | 1,000 | Max buckets per plane (bucketed mode) |
 | `include_noise` | False | Enable intrinsic noise |
 | `include_electronics` | False | Enable RC-RC electronics response |
