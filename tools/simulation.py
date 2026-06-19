@@ -750,6 +750,16 @@ class DetectorSimulator:
                     'time': tks[mask].astype(np_host.int32),
                     'values': chs[mask].astype(np_host.float32),
                 }
+        elif cfg.output_format == 'wire_sparse':
+            # Bucketed + electronics: the electronics step converts each plane's
+            # buckets into a wire_sparse 3-tuple (active_signals, wire_indices,
+            # n_active), so stacked_signal carries those three arrays — not the
+            # raw bucket triple handled below.
+            out_active, out_wire_idx, out_n_active = stacked_signal
+            for v in range(n_volumes):
+                for p in range(n_readouts):
+                    response_signals[(v, p)] = (
+                        out_active[v, p], out_wire_idx[v, p], out_n_active[v, p])
         elif cfg.use_bucketed:
             out_buckets, out_num_active, out_ctk = stacked_signal
             pk = self.response_kernels[cfg.plane_names[0][0]]
