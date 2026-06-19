@@ -58,7 +58,7 @@ JAXTPC/
 │   ├── cubic_wireplane_config.yaml  # Default: dual-TPC, SBND-scale, U/V/Y planes
 │   ├── sbnd_config.yaml, microboone_config.yaml, icarus_config.yaml,
 │   │   dune_ndlar_config.yaml (70 volumes), dune_fd1_config.yaml,
-│   │   pixel_cube_config.yaml (pixel readout test)
+│   │   cubic_pixel_config.yaml (pixel readout: same geometry as cubic_wireplane, 1000×1000 pixels/volume)
 │   ├── noise_spectrum.npz     # Empirical noise spectral shape
 │   └── sce_jaxtpc.h5          # Space charge effect correction maps
 ├── run_simulation.ipynb       # Interactive single-event simulation notebook
