@@ -10,5 +10,8 @@ hdf5plugin          # required to READ production output (default blosc-zstd cod
 pyyaml
 pillow              # viewer GIF/MP4 export
 
+# Dev tooling
+nbstripout           # clears notebook outputs on commit; run `nbstripout --install --attributes .gitattributes` once per clone
+
 # Tests
 pytest

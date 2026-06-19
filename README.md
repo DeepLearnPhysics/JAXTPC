@@ -91,6 +91,17 @@ For GPU support, install JAX per the [JAX installation guide](https://docs.jax.d
 
 **Note:** Use `python3` (not `python`).
 
+### Notebook output stripping (one-time, per clone)
+
+Notebook outputs are kept out of git via an [`nbstripout`](https://github.com/kynan/nbstripout) clean filter (`.gitattributes` is committed). The filter itself lives in each clone's `.git/config`, so after cloning run once:
+
+```bash
+pip install nbstripout
+nbstripout --install --attributes .gitattributes
+```
+
+Committed/pushed copies of `*.ipynb` are then automatically stripped of outputs and execution counts, while your local working copies keep their outputs. Without this step your notebook commits will *not* be stripped.
+
 ## Quick Start
 
 ### Interactive notebook
