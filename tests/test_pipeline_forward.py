@@ -225,13 +225,30 @@ class TestFiniteDifferenceGradients:
     """
 
     @pytest.fixture(scope="class")
-    def fd_sim(self):
+    def _x64(self):
+        """Run these gradient checks in float64.
+
+        Comparing an AD gradient to a CENTRAL finite difference of a float32
+        loss suffers catastrophic cancellation: e.g. lifetime ~10000 us with a
+        small eps makes loss(+eps) and loss(-eps) agree to within float32
+        rounding, so the FD value is platform/JAX-version-dependent noise (it
+        passed on jax 0.5.3 / py3.10 but produced a garbage FD=1000.0 on the
+        CI py3.11 runner). In float64 the FD converges to the true gradient
+        (rel_err ~ 0) regardless of platform, so the comparison is sound.
+        """
+        was_enabled = jax.config.jax_enable_x64
+        jax.config.update("jax_enable_x64", True)
+        yield
+        jax.config.update("jax_enable_x64", was_enabled)
+
+    @pytest.fixture(scope="class")
+    def fd_sim(self, _x64):
         det = generate_detector(CONFIG_PATH)
         return DetectorSimulator(
             det, differentiable=True, n_segments=50)
 
     @pytest.fixture(scope="class")
-    def fd_track(self):
+    def fd_track(self, _x64):
         """Straight track at x=-500mm, spanning y/z = [-50, 50]mm."""
         N = 50
         t = jnp.linspace(0, 1, N)

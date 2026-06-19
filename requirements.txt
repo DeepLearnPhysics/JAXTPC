@@ -1,7 +1,9 @@
 # JAXTPC runtime dependencies.
 # For GPU, install JAX per https://docs.jax.dev/en/latest/installation.html
 # (e.g. `pip install -U "jax[cuda12]"`) instead of the plain `jax` below.
-jax
+# Upper bound: JAX makes frequent breaking API changes; bound it so an unpinned
+# CI/install can't silently pull an incompatible release (tested on 0.5.x-0.6.x).
+jax>=0.4,<0.7
 numpy
 scipy
 matplotlib
