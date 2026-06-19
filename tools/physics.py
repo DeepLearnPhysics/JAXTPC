@@ -43,7 +43,7 @@ def compute_phi_drift(efield_correction, theta, phi, field_strength_Vcm):
     Returns
     -------
     phi_drift : (N,) angle between track and E-field in radians
-    E_mag : (N,) or scalar, local E-field magnitude in V/cm
+    E_mag : (N,) local E-field magnitude in V/cm
     """
     correction_mag = jnp.sqrt(jnp.sum(efield_correction ** 2, axis=-1))
     E_mag = field_strength_Vcm * correction_mag

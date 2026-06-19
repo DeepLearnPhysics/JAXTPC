@@ -410,7 +410,10 @@ class ParticleStepExtractor:
 
 def load_particle_step_data(file_path, event_idx=0, verbose=False):
     """
-    Load particle step data from an HDF5 file and return as DepositData.
+    Load raw particle step data from an HDF5 file as flat numpy arrays.
+
+    This is the low-level reader; ``load_event`` / ``build_deposit_data`` turn
+    the result into volume-split, padded ``DepositData``.
 
     Parameters
     ----------
@@ -423,11 +426,11 @@ def load_particle_step_data(file_path, event_idx=0, verbose=False):
 
     Returns
     -------
-    deposit_data : DepositData
-        Namedtuple with positions_mm, de, dx, valid_mask, theta, phi,
-        track_ids, group_ids.
-    group_to_track : np.ndarray
-        Lookup array: group_to_track[group_id] = track_id.
+    dict
+        Flat per-step numpy arrays (length N) with keys: ``positions_mm`` (N,3),
+        ``de``, ``dx``, ``theta``, ``phi``, ``track_ids``, ``t0_us``,
+        ``interaction_ids``, ``root_track_ids``, ``pdg``. No grouping, padding,
+        or volume splitting is applied here.
     """
     with ParticleStepExtractor(file_path, verbose=verbose) as extractor:
         step_data = extractor.extract_step_arrays(event_idx)

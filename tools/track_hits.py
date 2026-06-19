@@ -1,13 +1,20 @@
 """
 Track hit labeling module for LArTPC simulation.
 
-This module provides functions to track which particles (tracks) contribute
-to each wire signal in the detector simulation. It uses a K_wire x K_time
-neighbor system to aggregate charge deposits and determine the dominant
-contributor at each (wire, time) location.
+Tracks which particles contribute to each readout (wire/pixel) signal so the
+simulation can emit per-particle truth alongside the response.
 
-The track labeling runs in parallel with the main simulation to provide
-particle attribution data for physics analysis.
+The production default is the **group-as-bucket ("box") path**: deposits are
+grouped into short per-track runs (see loader.compute_group_ids) and each
+group's charge is accumulated into a small fixed box, giving both the
+group-collapsed signal and the per-group truth in a single pass
+(``create_track_hits_fn`` -> ``merge_chunk_sensor_hits`` / ``label_from_groups``).
+A legacy standalone path (``group_hits_by_track`` / ``label_hits`` /
+``sparse_hits_to_dense``, using a K_wire x K_time neighbor system) is kept for
+out-of-pipeline use and tests; it is NOT used by the simulator.
+
+The track labeling runs alongside the main simulation to provide particle
+attribution data for physics analysis.
 """
 
 import math

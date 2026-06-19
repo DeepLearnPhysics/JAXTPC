@@ -602,8 +602,8 @@ class VolumeGeometry(NamedTuple):
 
 class VolumeIntermediates(NamedTuple):
     """Output of compute_volume_physics, input to compute_plane_physics."""
-    charges: jnp.ndarray            # (N,) zeroed for invalid deposits (valid_mask applied)
-    photons: jnp.ndarray            # (N,) scintillation photons (valid_mask applied)
+    charges: jnp.ndarray            # (N,) zeroed for padding entries (n_actual mask applied)
+    photons: jnp.ndarray            # (N,) scintillation photons (zeroed for padding)
     drift_distance_cm: jnp.ndarray  # (N,)
     drift_time_us: jnp.ndarray     # (N,)
     positions_cm: jnp.ndarray      # (N, 3) original positions (for NN response)

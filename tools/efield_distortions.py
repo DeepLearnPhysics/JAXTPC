@@ -11,7 +11,8 @@ Main components
   Returns **separate maps per TPC side** to avoid cathode discontinuity.
 - ``compute_drift_corrections`` : Numerical Euler integration of electron
   drift paths through a single-side E-field map, producing per-grid-point
-  (Δx, Δy, Δz) corrections.
+  corrections (channel 0 = drift-TIME delta in μs, channels 1-2 = transverse
+  Δy, Δz in cm).
 - ``interpolate_map_3d`` : JIT-compatible trilinear interpolation for
   querying a 3D vector field at arbitrary deposit positions.
 - ``create_single_interpolation_fn`` : Builds a JIT-compatible interpolation
@@ -21,7 +22,9 @@ Main components
 Data layout
 -----------
 E-field maps : (Nx, Ny, Nz, 3) float32, channels [Ex, Ey, Ez] in V/cm
-Drift corrections : (Nx, Ny, Nz, 3) float32, channels [Δx, Δy, Δz] in cm
+Drift corrections : (Nx, Ny, Nz, 3) float32, channels [Δt (μs), Δy (cm), Δz (cm)]
+  — NOTE channel 0 is a drift-TIME correction in μs (not a distance); the SCE
+  consumer reads it as t_drift (see SCEOutputs.drift_time_corr_us, simulation.py).
 Grid metadata : origin_cm (3,), spacing_cm (3,)
 
 Each map covers a single volume (e.g., volume 0: x ∈ [-L, 0], volume 1: x ∈ [0, +L]).
@@ -242,7 +245,10 @@ def compute_drift_corrections(
     Returns
     -------
     corrections : np.ndarray, shape (Nx, Ny, Nz, 3)
-        Drift corrections [Δx, Δy, Δz] in cm.
+        Per-grid-point drift corrections. Channel 0 is the drift-TIME delta
+        (total_time - nominal_time) in μs; channels 1-2 are the transverse
+        spatial displacements [Δy, Δz] in cm. (Channel 0 is a time, not a
+        distance — it is consumed as t_drift by the SCE factory.)
     """
     from scipy.interpolate import RegularGridInterpolator
 

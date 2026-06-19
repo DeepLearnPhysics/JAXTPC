@@ -15,7 +15,37 @@ from tools.wires import (
     build_bucket_mapping,
     scatter_contributions_to_buckets,
     sparse_buckets_to_dense,
+    digitize_pixel_positions,
 )
+
+
+class TestDigitizePixelPositions:
+    """digitize_pixel_positions must return center = floor and offset in
+    [-0.5, 0.5) for ALL inputs (the docstring contract), including positions
+    below the pixel grid origin. In-range deposits give d_yz >= 0, but the
+    invariant must not depend on that (floor, not truncation-toward-zero)."""
+
+    def test_in_range_positions(self):
+        # origin at -10 cm, 1 cm pitch: position 2.3 cm -> d=12.3 px -> cell 12, off -0.2
+        py, pz, oy, oz = digitize_pixel_positions(
+            jnp.array([[2.3, -7.6]]), 1.0, jnp.array([-10.0, -10.0]))
+        assert int(py[0]) == 12 and abs(float(oy[0]) - (-0.2)) < 1e-5
+        assert int(pz[0]) == 2 and abs(float(oz[0]) - (-0.1)) < 1e-5
+
+    def test_offsets_always_in_range(self):
+        # sweep positions including BELOW the origin (negative d_yz)
+        yz = jnp.stack([jnp.linspace(-15.0, 15.0, 401)] * 2, axis=-1)
+        py, pz, oy, oz = digitize_pixel_positions(yz, 0.43, jnp.array([-10.0, -10.0]))
+        for off in (oy, oz):
+            assert bool(jnp.all((off >= -0.5) & (off < 0.5))), "offset out of [-0.5, 0.5)"
+
+    def test_center_is_floor(self):
+        # a position below the origin must map to a floor (negative) cell, not trunc
+        py, pz, oy, oz = digitize_pixel_positions(
+            jnp.array([[-10.3, -12.3]]), 1.0, jnp.array([-10.0, -10.0]))
+        # d_yz = -0.3 and -2.3 px -> floor cells -1 and -3, offsets +0.2 each
+        assert int(py[0]) == -1 and abs(float(oy[0]) - 0.2) < 1e-5
+        assert int(pz[0]) == -3 and abs(float(oz[0]) - 0.2) < 1e-5
 
 
 class TestComputeWireDistances:

@@ -206,9 +206,12 @@ def create_diffusion_kernel_array(planes=['U', 'V', 'Y'], num_s=16, kernel_dir=N
     time_spacing : float
         Time spacing in us.
     max_sigma_trans_unitless : float, optional
-        Maximum transverse diffusion sigma in unitless grid coordinates.
+        Maximum transverse diffusion sigma in WIRE-PITCH units (same units as
+        the kernel's wire-axis spacing dx). (Name kept for back-compat; not a
+        dimensionless quantity.)
     max_sigma_long_unitless : float, optional
-        Maximum longitudinal diffusion sigma in unitless grid coordinates.
+        Maximum longitudinal diffusion sigma in TIME-BIN units; multiplied by
+        ``time_spacing`` to get μs (the kernel's time-axis units).
 
     Returns
     -------
@@ -410,9 +413,12 @@ def load_response_kernels(response_path=None, num_s=16,
     time_spacing : float
         Simulation time spacing in microseconds.
     max_sigma_trans_unitless : float, optional
-        Maximum transverse diffusion sigma in unitless grid coordinates.
+        Maximum transverse diffusion sigma in WIRE-PITCH units (same units as
+        the kernel's wire-axis spacing dx). (Name kept for back-compat; not a
+        dimensionless quantity.)
     max_sigma_long_unitless : float, optional
-        Maximum longitudinal diffusion sigma in unitless grid coordinates.
+        Maximum longitudinal diffusion sigma in TIME-BIN units; multiplied by
+        ``time_spacing`` to get μs (the kernel's time-axis units).
 
     Returns
     -------

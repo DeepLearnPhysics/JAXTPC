@@ -707,11 +707,10 @@ def build_bucket_mapping(wire_indices, time_indices,
     # Floor division causes collisions when dimensions don't divide evenly
     NUM_BUCKETS_T = (num_time_steps + B2 - 1) // B2
 
-    # Use explicit center bins (passed as parameters)
-    # This makes the calculation consistent with scatter_contributions_to_buckets
-    # FIX: Previously home_bt did not use time offset, causing wrong bucket selection
+    # Home bucket uses the same (idx - zero_bin) // B convention as the scatter
+    # step, so a deposit's home bucket matches where its kernel is scattered.
     home_bw = (wire_indices - wire_zero_bin) // B1  # (N,)
-    home_bt = (time_indices - time_zero_bin) // B2  # (N,)  # FIXED: Now uses time offset
+    home_bt = (time_indices - time_zero_bin) // B2  # (N,)
 
     # 4 potential buckets per segment (quadrants)
     # Quadrant layout:
@@ -1163,9 +1162,17 @@ def digitize_pixel_positions(positions_yz_cm, pixel_pitch_cm, pixel_origins_cm):
     pixel_z_offset : jnp.ndarray, shape (N,), float32
         Sub-pixel z offset in [-0.5, 0.5).
     """
-    d_yz = positions_yz_cm - pixel_origins_cm
-    offsets, centers = jnp.modf(d_yz / pixel_pitch_cm)
-    offsets = offsets - 0.5
+    # Use floor (not jnp.modf, which truncates toward zero) so that
+    # center = floor and offset in [-0.5, 0.5) hold for ALL inputs. For
+    # in-range deposits d_yz >= 0 (floor == trunc) this is identical to the
+    # previous modf form; it only differs for negative d_yz, where modf would
+    # otherwise return a wrong cell and an out-of-range offset. Negative d_yz is
+    # currently unreachable (symmetric pixel volumes -> y_local + half_extent >= 0,
+    # and SCE displacement pushes inward), but floor keeps this correct if an
+    # asymmetric pixel volume is ever added.
+    scaled = (positions_yz_cm - pixel_origins_cm) / pixel_pitch_cm
+    centers = jnp.floor(scaled)
+    offsets = (scaled - centers) - 0.5
     pixel_indices = centers.astype(jnp.int32)
     return pixel_indices[:, 0], pixel_indices[:, 1], offsets[:, 0], offsets[:, 1]
 
