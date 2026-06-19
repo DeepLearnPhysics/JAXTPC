@@ -1,0 +1,49 @@
+name: notebook-output-check
+
+# Hard gate: fail if any committed notebook still contains outputs or
+# execution counts. Contributors strip locally via the nbstripout clean
+# filter (see README "Notebook output stripping"); this verifies it.
+
+on:
+  push:
+    paths:
+      - '**.ipynb'
+      - '.github/workflows/nbstripout-check.yml'
+  pull_request:
+    paths:
+      - '**.ipynb'
+      - '.github/workflows/nbstripout-check.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install nbstripout
+        run: pip install nbstripout
+
+      - name: Verify notebooks are stripped
+        run: |
+          set -euo pipefail
+          mapfile -t nbs < <(git ls-files '*.ipynb')
+          if [ "${#nbs[@]}" -eq 0 ]; then
+            echo "No tracked notebooks; nothing to check."
+            exit 0
+          fi
+          failed=0
+          for nb in "${nbs[@]}"; do
+            if ! nbstripout --verify "$nb"; then
+              echo "::error file=$nb::Notebook contains outputs/execution counts. Run: nbstripout \"$nb\" (or install the clean filter: nbstripout --install --attributes .gitattributes)"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "One or more notebooks are not stripped. See errors above."
+            exit 1
+          fi
+          echo "All ${#nbs[@]} notebook(s) are clean."
