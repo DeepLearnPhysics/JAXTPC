@@ -10,7 +10,7 @@ import pytest
 
 from tools.geometry import generate_detector
 from tools.config import create_sim_config, DepositData, VolumeDeposits
-from tools.loader import build_deposit_data, load_particle_step_data
+from tools.loader import build_deposit_data
 
 
 CONFIG_PATH = 'config/cubic_wireplane_config.yaml'
@@ -24,7 +24,42 @@ def full_config():
 
 @pytest.fixture(scope="module")
 def raw_data():
-    return load_particle_step_data('out.h5', event_idx=2)
+    """Synthetic edepsim-style step data (self-contained, no external HDF5).
+
+    Each track is a contiguous run of deposits spanning x = -180 -> +180 cm, so
+    every track crosses the x=0 volume boundary: this populates BOTH volumes and
+    keeps per-track deposits contiguous (needed for group-id computation). Mirrors
+    what load_particle_step_data('out.h5') used to provide.
+    """
+    rng = np.random.RandomState(1234)
+    n_tracks = 8
+    step_cm = 0.4
+    P, DE, DX, TH, PH, TID = [], [], [], [], [], []
+    for t in range(n_tracks):
+        x0, x1 = -180.0, 180.0
+        start = np.array([x0, rng.uniform(-150, 150), rng.uniform(-150, 150)])
+        end = np.array([x1, rng.uniform(-150, 150), rng.uniform(-150, 150)])
+        seg = end - start
+        length = np.linalg.norm(seg)
+        d = seg / length
+        n = int(length / step_cm)
+        s = np.arange(n) * step_cm
+        pts = start[None, :] + s[:, None] * d[None, :]
+        dedx = rng.uniform(1.8, 2.6)
+        P.append(pts)
+        DE.append(np.full(n, dedx * step_cm, np.float32))
+        DX.append(np.full(n, step_cm, np.float32))
+        TH.append(np.full(n, np.arccos(np.clip(d[0], -1, 1)), np.float32))
+        PH.append(np.full(n, np.arctan2(d[2], d[1]), np.float32))
+        TID.append(np.full(n, t, np.int32))
+    return {
+        'positions_mm': (np.concatenate(P) * 10.0).astype(np.float32),
+        'de': np.concatenate(DE),
+        'dx': np.concatenate(DX),
+        'theta': np.concatenate(TH),
+        'phi': np.concatenate(PH),
+        'track_ids': np.concatenate(TID),
+    }
 
 
 class TestBuildFromFile:
@@ -62,14 +97,20 @@ class TestBuildFromFile:
             assert float(jnp.sum(v.de[n:])) == 0.0
 
     def test_x_ranges(self, raw_data, full_config):
+        """Stored positions are in the volume-LOCAL frame: x_local in
+        [0, drift_length] (x_local = drift_dir * (x_anode - x_global) >= 0)."""
         deposits = build_deposit_data(
             raw_data['positions_mm'], raw_data['de'], raw_data['dx'], full_config)
         for vi, vol in enumerate(deposits.volumes):
             n = vol.n_actual
             if n > 0:
-                x_cm = np.asarray(vol.positions_mm[:n, 0]) / 10.0
+                x_local_cm = np.asarray(vol.positions_mm[:n, 0]) / 10.0
                 x_min, x_max = full_config.volumes[vi].ranges_cm[0]
-                assert np.all(x_cm >= x_min) and np.all(x_cm < x_max)
+                drift_length_cm = abs(x_max - x_min)
+                assert np.all(x_local_cm >= -1e-3), \
+                    f"vol {vi}: negative local x ({x_local_cm.min():.3f} cm)"
+                assert np.all(x_local_cm <= drift_length_cm + 1e-3), \
+                    f"vol {vi}: local x {x_local_cm.max():.3f} cm exceeds drift length {drift_length_cm} cm"
 
 
 class TestGroupIds:

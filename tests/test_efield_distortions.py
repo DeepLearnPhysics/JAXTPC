@@ -326,12 +326,29 @@ class TestComputeDriftCorrections:
                                        err_msg=f"Dy antisymmetry violated at dy={dy}")
 
     def test_corrections_bounded_by_detector_size(self, east_corrections):
-        """All corrections should be much smaller than the detector half-width."""
+        """Corrections must stay within physical limits.
+
+        Note the units: channel 0 is a drift-TIME correction (μs), channels
+        1-2 are transverse spatial displacements (cm) — the SCE-rework
+        convention (see SCEOutputs.drift_time_corr_us / drift_yz_corr_cm and
+        the consumer at tools/simulation.py). So bound each in its own units:
+        the time excess cannot exceed the nominal full-drift time, and a
+        transverse displacement cannot exceed the detector half-width.
+        """
         corr, _, _ = east_corrections
-        max_corr = np.max(np.abs(corr))
-        bound = HALF_X * EPS_MAX * 2  # generous upper bound
-        assert max_corr < bound, (
-            f"Max correction {max_corr:.2f} cm exceeds expected bound {bound:.2f} cm"
+        dt_corr_us = np.abs(corr[..., 0])
+        yz_corr_cm = np.abs(corr[..., 1:])
+
+        drift_velocity_cm_us = 0.11  # matches the east_corrections fixture
+        nominal_full_drift_time_us = HALF_X / drift_velocity_cm_us
+
+        assert dt_corr_us.max() < nominal_full_drift_time_us, (
+            f"Max time correction {dt_corr_us.max():.2f} us exceeds nominal "
+            f"full-drift time {nominal_full_drift_time_us:.2f} us"
+        )
+        assert yz_corr_cm.max() < HALF_X, (
+            f"Max transverse correction {yz_corr_cm.max():.2f} cm exceeds "
+            f"detector half-width {HALF_X:.2f} cm"
         )
 
     def test_cathode_has_largest_transverse_correction(self, east_corrections):

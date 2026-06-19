@@ -16,28 +16,57 @@ import gc
 
 from tools.simulation import DetectorSimulator
 from tools.geometry import generate_detector
-from tools.loader import load_event
+from tools.loader import build_deposit_data
 from tools.config import create_track_hits_config
-from tools.output import to_sparse, to_dense, _detect_format
+from tools.output import to_sparse, _detect_format
 from tools.track_hits import finalize_track_hits
 
 
+# Heavy integration test: runs a full native-resolution (1000x1000) pixel
+# simulation. The pixel response kernel is calibrated for the native pitch, so
+# the grid must NOT be downsampled (changing the pitch zeroes the rebinned
+# kernel). Marked slow so it stays out of the fast CI gate; needs the pixel
+# response NPZ.
+pytestmark = [pytest.mark.slow, pytest.mark.requires_kernels]
+
 CONFIG_PATH = "config/cubic_pixel_config.yaml"
-DATA_PATH = "out.h5"
-EVENT_IDX = 7
-TOTAL_PAD = 200_000
-RESPONSE_CHUNK_SIZE = 50_000
+TOTAL_PAD = 50_000
+RESPONSE_CHUNK_SIZE = 10_000
+
+
+def _make_synthetic_event(seed=0, n_tracks=4, step_cm=0.4):
+    """Self-contained edepsim stand-in: a few straight MIP-like tracks crossing
+    the dual-TPC detector. Returns global-frame
+    (positions_mm, de, dx, theta, phi, track_ids)."""
+    rng = np.random.RandomState(seed)
+    P, DE, DX, TH, PH, TID = [], [], [], [], [], []
+    for t in range(n_tracks):
+        start = rng.uniform(-180, 180, size=3)
+        d = rng.normal(size=3); d /= np.linalg.norm(d)
+        n_seg = int(rng.uniform(80, 200) / step_cm)
+        s = np.arange(n_seg) * step_cm
+        pts = np.clip(start[None, :] + s[:, None] * d[None, :], -215.9, 215.9)
+        dedx = rng.uniform(1.8, 2.6)
+        P.append(pts)
+        DE.append(np.full(n_seg, dedx * step_cm, np.float32))
+        DX.append(np.full(n_seg, step_cm, np.float32))
+        TH.append(np.full(n_seg, np.arccos(np.clip(d[0], -1, 1)), np.float32))
+        PH.append(np.full(n_seg, np.arctan2(d[2], d[1]), np.float32))
+        TID.append(np.full(n_seg, t, np.int32))
+    return ((np.concatenate(P) * 10.0).astype(np.float32),
+            np.concatenate(DE), np.concatenate(DX),
+            np.concatenate(TH), np.concatenate(PH), np.concatenate(TID))
 
 
 @pytest.fixture(scope="module")
 def simulation_result():
-    """Run one pixel simulation and cache the result for all tests."""
+    """Run one pixel simulation on a synthetic event; cache for all tests."""
     detector_config = generate_detector(CONFIG_PATH)
     jax.clear_caches()
     gc.collect()
 
     # box_enabled now defaults to True; this test pins the merge path it was written for.
-    track_config = create_track_hits_config(box_enabled=False)
+    track_config = create_track_hits_config(box_enabled=False, max_keys=500_000)
     simulator = DetectorSimulator(
         detector_config,
         include_track_hits=True,
@@ -47,7 +76,9 @@ def simulation_result():
     )
     cfg = simulator.config
 
-    deposits = load_event(DATA_PATH, cfg, event_idx=EVENT_IDX)
+    pos_mm, de, dx, theta, phi, track_ids = _make_synthetic_event()
+    deposits = build_deposit_data(
+        pos_mm, de, dx, cfg, theta=theta, phi=phi, track_ids=track_ids)
     simulator.warm_up()
 
     response_signals, track_hits_raw, deposits = simulator.process_event(
@@ -235,21 +266,10 @@ class TestOutputConversions:
         for key, sp in sparse.items():
             assert np.all(np.abs(sp["values"]) >= threshold)
 
-    def test_to_dense_roundtrip(self, simulation_result):
-        """sparse → dense → sparse should preserve nonzero entries."""
-        cfg = simulation_result["cfg"]
-        response_signals = simulation_result["response_signals"]
-        dense = to_dense(response_signals, cfg)
-
-        for (v, p), d in dense.items():
-            vol = cfg.volumes[v]
-            num_py, num_pz = vol.pixel_shape
-            assert d.shape == (num_py, num_pz, cfg.num_time_steps)
-            assert d.dtype == np.float32
-            n_nonzero = np.count_nonzero(d)
-            n_sparse = len(response_signals[(v, p)]["values"])
-            assert n_nonzero == n_sparse, \
-                f"({v},{p}): dense has {n_nonzero} nonzero, sparse has {n_sparse}"
+    # Note: to_dense on a native-resolution pixel grid is intentionally not
+    # tested here — pixel output is sparse by design and never densified in the
+    # sim/production path (1000x1000x2701 ≈ 10.8 GB/volume; to_dense only warns).
+    # The to_dense conversion is covered for tractable cases in test_output.py.
 
 
 class TestDepositsOutput:

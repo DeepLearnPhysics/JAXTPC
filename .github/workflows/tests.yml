@@ -1,0 +1,58 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # CPU-only: JAX installs as CPU by default on the runner, and the test
+      # suite forces JAX_PLATFORM_NAME=cpu (tests/conftest.py).
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Fast gate: the not-slow suite must pass. Slow tests (kernel-dependent
+      # integration, full pixel sim) are exercised in the separate job below.
+      - name: Run fast tests
+        run: pytest tests/ -m "not slow" -q
+
+  pytest-slow:
+    runs-on: ubuntu-latest
+    # Advisory: the slow tier includes a full-resolution pixel simulation that
+    # is memory/time-heavy. Don't block merges if a hosted runner can't handle
+    # it; the not-slow job above is the gate.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Slow / integration tier (single Python version). Non-blocking guidance:
+      # if the runner lacks RAM for the full 1000x1000 pixel sim, mark this job
+      # continue-on-error or move that test behind a dedicated marker.
+      - name: Run slow tests
+        run: pytest tests/ -m "slow" -q

@@ -148,60 +148,64 @@ class TestCorrectDriftForPlane:
 class TestApplyDriftCorrections:
     """Test space charge effect corrections."""
 
+    # New (SCE-rework) API: apply_drift_corrections(drift_time_us,
+    # positions_yz_cm, delta_t_us, delta_yz_cm, velocity_cm_us) ->
+    # (corrected_distance_cm, corrected_time_us, corrected_yz_cm).
+    # Time is primary; distance is derived as corrected_time * velocity.
+
     def test_zero_deltas_identity(self):
-        """Zero SCE deltas should return inputs unchanged."""
+        """Zero SCE deltas leave time/yz unchanged; distance = time * velocity."""
         N = 10
-        dist = jnp.ones(N) * 5.0
         time = jnp.ones(N) * 3.125
         yz = jnp.stack([jnp.linspace(-5, 5, N), jnp.linspace(-5, 5, N)], axis=-1)
-        zeros = jnp.zeros(N)
+        zeros_t = jnp.zeros(N)
+        zeros_yz = jnp.zeros((N, 2))
+        velocity = 1.6
 
         c_dist, c_time, c_yz = apply_drift_corrections(
-            dist, time, yz, zeros, zeros, zeros, 1.6)
+            time, yz, zeros_t, zeros_yz, velocity)
 
-        np.testing.assert_allclose(c_dist, dist)
         np.testing.assert_allclose(c_time, time)
         np.testing.assert_allclose(c_yz, yz)
+        np.testing.assert_allclose(c_dist, time * velocity, rtol=1e-6)
 
-    def test_positive_delta_x_increases_distance(self):
-        """Positive delta_x should increase drift distance."""
-        dist = jnp.array([5.0], dtype=jnp.float32)
+    def test_positive_delta_t_increases_distance(self):
+        """Positive delta_t should increase drift time and derived distance."""
         time = jnp.array([3.125], dtype=jnp.float32)
         yz = jnp.array([[0.0, 0.0]], dtype=jnp.float32)
-        delta_x = jnp.array([2.0], dtype=jnp.float32)
-        zeros = jnp.array([0.0])
+        delta_t = jnp.array([1.0], dtype=jnp.float32)
+        zeros_yz = jnp.zeros((1, 2))
+        velocity = 1.6
 
         c_dist, c_time, _ = apply_drift_corrections(
-            dist, time, yz, delta_x, zeros, zeros, 1.6)
+            time, yz, delta_t, zeros_yz, velocity)
 
-        assert float(c_dist[0]) == pytest.approx(7.0, abs=1e-5)
+        assert float(c_time[0]) == pytest.approx(4.125, abs=1e-5)
+        assert float(c_dist[0]) == pytest.approx(4.125 * velocity, abs=1e-4)
         assert float(c_time[0]) > float(time[0])
 
     def test_negative_delta_clamps_to_zero(self):
-        """Large negative delta_x should clamp distance to zero."""
-        dist = jnp.array([2.0], dtype=jnp.float32)
+        """Large negative delta_t should clamp time (and distance) to zero."""
         time = jnp.array([1.25], dtype=jnp.float32)
         yz = jnp.array([[0.0, 0.0]], dtype=jnp.float32)
-        delta_x = jnp.array([-5.0], dtype=jnp.float32)
-        zeros = jnp.array([0.0])
+        delta_t = jnp.array([-5.0], dtype=jnp.float32)
+        zeros_yz = jnp.zeros((1, 2))
 
         c_dist, c_time, _ = apply_drift_corrections(
-            dist, time, yz, delta_x, zeros, zeros, 1.6)
+            time, yz, delta_t, zeros_yz, 1.6)
 
-        assert float(c_dist[0]) == 0.0
         assert float(c_time[0]) == 0.0
+        assert float(c_dist[0]) == 0.0
 
     def test_yz_corrections_applied(self):
-        """delta_y and delta_z should shift yz positions."""
-        dist = jnp.array([5.0], dtype=jnp.float32)
+        """delta_yz should shift the transverse positions."""
         time = jnp.array([3.125], dtype=jnp.float32)
         yz = jnp.array([[1.0, 2.0]], dtype=jnp.float32)
-        zeros = jnp.array([0.0])
-        dy = jnp.array([0.5])
-        dz = jnp.array([-0.3])
+        zeros_t = jnp.array([0.0])
+        delta_yz = jnp.array([[0.5, -0.3]], dtype=jnp.float32)
 
         _, _, c_yz = apply_drift_corrections(
-            dist, time, yz, zeros, dy, dz, 1.6)
+            time, yz, zeros_t, delta_yz, 1.6)
 
         np.testing.assert_allclose(c_yz[0], [1.5, 1.7], atol=1e-5)
 
