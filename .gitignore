@@ -8,6 +8,8 @@ __pycache__/
 # Generated / transient outputs
 logs/
 profiler/figures/
+/plots/
+/tools/responses/gifs/
 
 # Local scratch: profiling experiments + production run logs/artifacts
 experiments/
