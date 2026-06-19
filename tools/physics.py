@@ -56,7 +56,11 @@ def compute_phi_drift(efield_correction, theta, phi, field_strength_Vcm):
 
     cos_phi = jnp.abs(
         track_x * E_hat[:, 0] + track_y * E_hat[:, 1] + track_z * E_hat[:, 2])
-    phi_drift = jnp.arccos(jnp.clip(cos_phi, 0.0, 1.0))
+    # Clip strictly below 1: d/dx arccos(x) = -1/sqrt(1-x^2) diverges at x=1,
+    # so a drift-aligned track (cos_phi -> 1, the common cosmic case) would
+    # otherwise NaN-poison the reverse pass. 1e-7 keeps the forward angle
+    # within ~5e-4 rad of 0 while making the gradient finite.
+    phi_drift = jnp.arccos(jnp.clip(cos_phi, 0.0, 1.0 - 1e-7))
     return phi_drift, E_mag
 
 
@@ -277,7 +281,8 @@ def compute_chunk_response(plane_int, response_fn, start, chunk_size,
 # ============================================================================
 
 def compute_plane_signal(plane_int, response_fn, n_actual, chunk_size,
-                         cfg, vol_geom, plane_idx, plane_kernel):
+                         cfg, vol_geom, plane_idx, plane_kernel,
+                         remat_body=False):
     """Dense accumulation: fori_loop(compute_chunk_response → accumulate).
 
     Parameters
@@ -297,6 +302,14 @@ def compute_plane_signal(plane_int, response_fn, n_actual, chunk_size,
         Plane index (0, 1, or 2).
     plane_kernel : dict
         Response kernel metadata for this plane.
+    remat_body : bool
+        Checkpoint the per-chunk loop body (differentiable path). The reverse
+        pass of the accumulation scan otherwise stores every chunk's per-deposit
+        contributions (chunk_size x kernel) for ALL chunks at once -> backward
+        memory grows with n_segments and OOMs at large N. Rematerializing the
+        body frees those activations and recomputes them in the backward, so
+        peak gradient memory is bounded by ONE chunk. No effect on the forward
+        value; harmless (slight recompute) in the no-grad production path.
     """
     max_safe_batches = plane_int.charges.shape[0] // chunk_size
     # Use Python min() for static values (diff path — supports reverse-mode grad)
@@ -322,6 +335,8 @@ def compute_plane_signal(plane_int, response_fn, n_actual, chunk_size,
             plane_kernel.wire_zero_bin, plane_kernel.time_zero_bin)
         return signal_accum + batch
 
+    if remat_body:
+        body = jax.checkpoint(body)
     return jax.lax.fori_loop(0, n_batches, body,
                               jnp.zeros((num_wires, num_time_steps)))
 

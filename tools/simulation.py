@@ -97,10 +97,13 @@ class DetectorSimulator:
         recombination_model=None,
         include_electric_dist=False,
         electric_dist_path=None,
+        electric_dist_siren_path=None,
         include_digitize=False,
         digitization_config=None,
         differentiable=False,
         n_segments=None,
+        diff_chunk_size=None,
+        diff_remat=True,
         iterate_mode='scan',
         group_size=5,
         gap_threshold_mm=5.0,
@@ -117,6 +120,12 @@ class DetectorSimulator:
         if n_segments is not None and not differentiable:
             print("   WARNING: n_segments ignored without differentiable=True")
         self.n_segments = n_segments if differentiable else None
+        # remat (gradient checkpointing) recomputes the forward during backward to save
+        # memory. Modes: True/'full' = both outer+inner remat (lowest memory);
+        # 'inner' = only the memory-heavy plane-response remat (drops the redundant outer
+        # recompute -> faster backward, still bounded memory); False/'none' = neither
+        # (fastest but OOMs at our plane sizes). 'inner' is the speed/memory sweet spot.
+        self._diff_remat = diff_remat
         if differentiable:
             if _readout == 'pixel':
                 raise ValueError(
@@ -126,7 +135,18 @@ class DetectorSimulator:
             if total_pad != 200_000:
                 print(f"   NOTE: differentiable=True overrides total_pad={total_pad:,} → {n_segments:,}")
             total_pad = n_segments
-            response_chunk_size = n_segments
+            # Chunk the differentiable accumulation just like the production
+            # path: a fixed optimal chunk bounds peak (and backward, via remat)
+            # memory so the diff path scales to large n_segments. Default
+            # (None) keeps the historical single-chunk behaviour.
+            if diff_chunk_size is not None:
+                if n_segments % diff_chunk_size != 0:
+                    raise ValueError(
+                        f"n_segments ({n_segments:,}) must be divisible by "
+                        f"diff_chunk_size ({diff_chunk_size:,}).")
+                response_chunk_size = diff_chunk_size
+            else:
+                response_chunk_size = n_segments
             use_bucketed = False
             include_intrinsic_noise = False
             include_electronics = False
@@ -205,9 +225,16 @@ class DetectorSimulator:
             recombination_model=self.recomb_model,
         )
 
-        # Load SCE maps (per-volume, converted to local frame)
-        sce_per_volume = self._load_sce(include_electric_dist, electric_dist_path)
-        self._include_sce = sce_per_volume is not None
+        # Load SCE. A trained SIREN distortion field (differentiable, E derived
+        # by autodiff) takes precedence over stored interpolation maps.
+        self._sce_siren = self._load_sce_siren(
+            include_electric_dist, electric_dist_siren_path)
+        if self._sce_siren is not None:
+            sce_per_volume = None
+            self._include_sce = True
+        else:
+            sce_per_volume = self._load_sce(include_electric_dist, electric_dist_path)
+            self._include_sce = sce_per_volume is not None
 
         # Volume iteration mode
         self._iterate = scan_over if iterate_mode == 'scan' else vmap_over
@@ -334,6 +361,40 @@ class DetectorSimulator:
         print(f"   Loading SCE maps from {electric_dist_path}...")
         return load_sce_per_volume(electric_dist_path, volumes=self._sim_config.volumes)
 
+    def _load_sce_siren(self, include_electric_dist, siren_path):
+        """Load a trained SIREN distortion field (differentiable SCE).
+
+        Returns a bundle dict consumed by the SIREN sce_factory, or None.
+
+        The SIREN is trained in the generator frame (anode at x=0, x∈[0,Lx]
+        toward the cathode, transverse y∈[0,Ly], z∈[0,Lz]). JAXTPC's canonical
+        local frame has the anode at x=0 with x the drift distance and y,z
+        *centered* on the volume. Since local x already equals the generator's
+        drift coordinate and local (y,z) = generator (y,z) − (Ly/2, Lz/2), we
+        fold the transverse shift into the normalisation offsets so the SIREN
+        can be evaluated directly on local-frame positions:
+
+            coords_norm = (xyz_local − [Lx/2, 0, 0]) / [Lx/2, Ly/2, Lz/2]
+
+        One SIREN is shared across all volumes (volumes already share the
+        canonical local frame), matching the stored-map path's simplification.
+        """
+        if not include_electric_dist or siren_path is None:
+            return None
+        from tools.sce_siren import (
+            load_siren_npz, build_vinv_table, drift_velocity_jax)
+        print(f"   Loading SCE SIREN from {siren_path}...")
+        params, meta = load_siren_npz(siren_path)
+        ns = meta['norm_scales']                       # [Lx/2, Ly/2, Lz/2]
+        local_offsets = jnp.array([ns[0], 0.0, 0.0], dtype=jnp.float32)
+        v_table, E_table = build_vinv_table(meta['T'])
+        v0 = float(drift_velocity_jax(meta['E0'], meta['T']))
+        return dict(
+            params=params, E0=float(meta['E0']), v0=v0,
+            v_table=v_table, E_table=E_table,
+            norm_offsets=local_offsets, norm_scales=ns,
+            omega_0=float(meta['omega_0']))
+
     def _print_summary(self):
         """Print configuration summary after initialization."""
         cfg = self._sim_config
@@ -370,7 +431,38 @@ class DetectorSimulator:
         _nominal_field = float(self._default_sim_params.recomb_params.field_strength_Vcm)
 
         # ── SCE factory (local frame) ──
-        if sce_per_volume is not None:
+        if self._sce_siren is not None:
+            # Differentiable SIREN distortion field. The E-field is *derived*
+            # from the distortion Δ(r) by autodiff (∂Δ/∂x via jvp) + Walkowiak
+            # v(E) inversion — Δ is the single source of truth, so E and the
+            # drift corrections are guaranteed self-consistent.
+            from tools.sce_siren import recover_efield, siren_delta
+            sb = self._sce_siren
+
+            def sce_factory(sb=sb, nf=_nominal_field):
+                def _sce(positions_cm, velocity_cm_us):
+                    # E (V/cm) from gradients of the SIREN distortion field.
+                    E = recover_efield(
+                        sb['params'], positions_cm, sb['E0'], sb['v0'],
+                        sb['v_table'], sb['E_table'],
+                        sb['norm_offsets'], sb['norm_scales'], sb['omega_0'])
+                    E_normalized = E / nf  # dimensionless correction vector
+
+                    delta = siren_delta(
+                        sb['params'], positions_cm,
+                        sb['norm_offsets'], sb['norm_scales'], sb['omega_0'])
+                    # Δx ≡ v0·t_drift − x0  ⟹  t_drift = (x0 + Δx)/v0.
+                    # delta_t = t_drift − x0/velocity (matches the map path so
+                    # apply_drift_corrections recovers corrected_time = t_drift).
+                    x0 = positions_cm[:, 0]
+                    t_drift = (x0 + delta[:, 0]) / sb['v0']
+                    delta_t = t_drift - x0 / velocity_cm_us
+                    return SCEOutputs(
+                        efield_correction=E_normalized,
+                        drift_time_corr_us=delta_t,
+                        drift_yz_corr_cm=delta[:, 1:3])
+                return _sce
+        elif sce_per_volume is not None:
             # Real SCE — maps already in local frame from load_sce_per_volume.
             # For scan, all volumes must share one factory. Use volume 0's maps.
             # (Different per-volume SCE requires stacking maps — future work.)
@@ -647,6 +739,54 @@ class DetectorSimulator:
 
         self._light_calculator_jit = _light_calculator_jit
 
+        # ── Signal-only pixel path (no track hits / no truth matching) ──
+        # The default pixel branch fuses signal generation into the track-hits
+        # merge (one pass -> signal + per-group truth). This builds the
+        # *signal-only* pixel forward from the standalone bucketed accumulation
+        # in tools.physics (compute_pixel_bucket_maps + compute_pixel_signal_
+        # bucketed), the pixel analogue of the wire bucketed path. It is purely
+        # additive: it does not touch the fused path above, change any default,
+        # or require include_track_hits=False. Compiled lazily on first call.
+        # Used to measure pixel "forward without truth matching".
+        if self._readout_type == 'pixel':
+            from tools.physics import (
+                compute_pixel_bucket_maps, compute_pixel_signal_bucketed)
+            pk_sig = kernels  # PixelResponseKernel
+            sig_max_buckets = cfg.max_active_buckets
+
+            def pixel_signal_one_volume(vol_deps, sim_params):
+                sce_fn = sce_factory()
+                vol_int = compute_volume_physics(
+                    vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
+                readout_window_us = cfg.num_time_steps * cfg.time_step_us
+                response_fn = _build_response_fn(sim_params)
+                pixel_int = compute_pixel_physics(
+                    vol_int, sim_params, vol_geom,
+                    cfg.pre_window_us, readout_window_us,
+                    vol_geom.pixel_pitch_cm,
+                    jnp.array(vol_geom.pixel_origins_cm),
+                    vol_geom.pixel_shape[0], vol_geom.pixel_shape[1])
+                num_py, num_pz = vol_geom.pixel_shape
+                p2c, num_active, ctk, B1, B2, B3 = compute_pixel_bucket_maps(
+                    pixel_int, num_py, num_pz, cfg.num_time_steps,
+                    cfg.time_step_us, sig_max_buckets,
+                    pk_sig.kernel_py, pk_sig.kernel_pz, pk_sig.kernel_time,
+                    pk_sig.py_zero_bin, pk_sig.pz_zero_bin, pk_sig.time_zero_bin)
+                buckets = compute_pixel_signal_bucketed(
+                    pixel_int, response_fn, vol_deps.n_actual,
+                    cfg.response_chunk_size, p2c, sig_max_buckets, B1, B2, B3,
+                    cfg.time_step_us, num_py, num_pz, cfg.num_time_steps,
+                    pk_sig.kernel_py, pk_sig.kernel_pz, pk_sig.kernel_time,
+                    pk_sig.py_zero_bin, pk_sig.pz_zero_bin, pk_sig.time_zero_bin)
+                return buckets, num_active
+
+            @jax.jit
+            def _pixel_signal_jit(sim_params, stacked_deps):
+                fn = lambda deps: pixel_signal_one_volume(deps, sim_params)
+                return iterate(fn, (stacked_deps,))
+
+            self._pixel_signal_jit = _pixel_signal_jit
+
         # ── Differentiable path ──
         if self.n_segments is not None and self._readout_type == 'wire':
             n_segments = self.n_segments
@@ -666,18 +806,28 @@ class DetectorSimulator:
                     response_fn = _build_response_fn_diff(sim_params, plane_type)
                     plane_kernel = kernels[plane_type]
 
-                    @jax.remat
+                    # 'inner'/'full'/True checkpoint the per-chunk accumulation
+                    # body so backward memory is bounded by ONE chunk (the fix
+                    # that lets the gradient scale past ~500k segments). 'full'/
+                    # True additionally remat the whole plane response (lower
+                    # memory, more recompute); 'inner' is the speed/memory sweet
+                    # spot.
+                    _remat_body = self._diff_remat in (True, 'full', 'inner')
+                    _outer = jax.remat if self._diff_remat in (True, 'full') else (lambda f: f)
+
+                    @_outer
                     def _plane_response(pi):
                         return compute_plane_signal(
                             pi, response_fn, n_segments,
                             cfg.response_chunk_size,
-                            cfg, vol_geom, plane_idx, plane_kernel)
+                            cfg, vol_geom, plane_idx, plane_kernel,
+                            remat_body=_remat_body)
 
                     signal = _plane_response(plane_int)
                     plane_signals.append(signal)
                 return tuple(plane_signals)
 
-            @jax.remat
+            @(jax.remat if self._diff_remat in (True, 'full') else (lambda f: f))
             def _forward_diff(params, stacked_deps):
                 fn = lambda deps: diff_one_volume(deps, params)
                 return iterate(fn, (stacked_deps,))
@@ -867,6 +1017,27 @@ class DetectorSimulator:
             for v, vol in enumerate(deposits.volumes)
         )
         return deposits._replace(volumes=filled_volumes)
+
+    def forward_pixel_signal(self, deposits: DepositData, sim_params=None):
+        """Pixel signal-only forward (no track hits / no truth matching).
+
+        Runs the standalone bucketed pixel accumulation path, bypassing the
+        fused track-hits merge that the production pixel path uses. Returns
+        device-side bucketed signal (one entry per volume) — intended for
+        timing/benchmarks of the pixel forward *without* truth matching.
+
+        Returns
+        -------
+        (buckets, num_active) : stacked over volumes
+            buckets : (n_volumes, max_buckets, B1, B2, B3) float32
+            num_active : (n_volumes,) int32
+        """
+        if self._readout_type != 'pixel':
+            raise ValueError("forward_pixel_signal is pixel-only")
+        if sim_params is None:
+            sim_params = self._default_sim_params
+        stacked_deps = jax.tree.map(lambda *xs: jnp.stack(xs), *deposits.volumes)
+        return self._pixel_signal_jit(sim_params, stacked_deps)
 
     def finalize_track_hits(self, track_hits):
         """Derive track labels from raw group merge state."""
