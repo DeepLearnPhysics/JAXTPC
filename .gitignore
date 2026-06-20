@@ -17,3 +17,8 @@ tests/golden/data/
 # Harness / editor
 .claude/
 .DS_Store
+
+# closure/cosmic experiment outputs (regeneratable: scans, figures, trained fields)
+closure/cosmic/scan*/
+closure/cosmic/*.png
+closure/cosmic/*.npz
