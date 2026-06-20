@@ -173,6 +173,47 @@ class TestGroupIds:
                 break
 
 
+class TestPixelOriginLocalFrame:
+    """Pixel grid origin must be in the volume-LOCAL frame.
+
+    Deposits are transformed to local/centered coords (y_local = y_global -
+    y_center) before digitization, so pixel_origins_cm must be local too
+    (= range_min - center = -half_extent). Otherwise an off-center pixel volume
+    digitizes against the wrong frame and silently mis-attributes / drops charge.
+    Regression test for the global-origin-vs-local-positions bug.
+    """
+
+    def _pixel_cfg(self, yz_range):
+        cfg = generate_detector('config/cubic_pixel_config.yaml')
+        cfg['volumes'] = [cfg['volumes'][0]]
+        cfg['volumes'][0]['geometry']['ranges'] = [
+            [-216.0, 0.0], list(yz_range), list(yz_range)]
+        return create_sim_config(cfg, total_pad=100, include_track_hits=False)
+
+    def test_origin_is_local_half_extent(self):
+        for yz in [(-216.0, 216.0), (0.0, 432.0), (1000.0, 1432.0)]:
+            sc = self._pixel_cfg(yz)
+            half = (yz[1] - yz[0]) / 2.0
+            oy, oz = sc.volumes[0].pixel_origins_cm
+            assert oy == pytest.approx(-half) and oz == pytest.approx(-half), \
+                f"range {yz}: origin ({oy}, {oz}) != local -half_extent {-half}"
+
+    def test_center_deposit_maps_to_grid_center(self):
+        """A deposit at the volume's physical center (local origin) maps to the
+        middle of the pixel grid, regardless of where the volume sits globally."""
+        from tools.wires import digitize_pixel_positions
+        for yz in [(-216.0, 216.0), (0.0, 432.0), (1000.0, 1432.0)]:
+            sc = self._pixel_cfg(yz)
+            vol = sc.volumes[0]
+            # deposit at volume center -> local (0, 0)
+            py, pz, _, _ = digitize_pixel_positions(
+                jnp.array([[0.0, 0.0]]), vol.pixel_pitch_cm,
+                jnp.array(vol.pixel_origins_cm))
+            mid = vol.pixel_shape[0] // 2
+            assert abs(int(py[0]) - mid) <= 1 and abs(int(pz[0]) - mid) <= 1, \
+                f"range {yz}: center deposit -> pixel ({int(py[0])},{int(pz[0])}), expected ~{mid}"
+
+
 class TestEdgeCases:
     """Edge cases for build_deposit_data."""
 

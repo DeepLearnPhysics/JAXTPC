@@ -338,9 +338,15 @@ def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50
             pixel_pitch = float(readout_cfg['pixel_pitch'])
             pixel_shape_cfg = readout_cfg['pixel_shape']
             num_py, num_pz = int(pixel_shape_cfg[0]), int(pixel_shape_cfg[1])
-            # Pixel grid origin = (y_min, z_min) of volume
-            y_origin = float(ranges[1][0])
-            z_origin = float(ranges[2][0])
+            # Pixel grid origin in the volume-LOCAL frame. Deposits are
+            # transformed to local/centered coords (y_local = y_global - y_center)
+            # before digitization, so the origin must be local too: origin =
+            # range_min - center = -half_extent. (Using the global range_min
+            # here is only correct when the volume is centered at 0.)
+            y_center_cm = (ranges[1][0] + ranges[1][1]) / 2.0
+            z_center_cm = (ranges[2][0] + ranges[2][1]) / 2.0
+            y_origin = float(ranges[1][0]) - y_center_cm
+            z_origin = float(ranges[2][0]) - z_center_cm
 
             # DiffusionConfig for pixels — use pixel_pitch as the spatial reference
             if include_diffusion:
