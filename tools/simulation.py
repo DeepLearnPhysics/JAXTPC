@@ -226,12 +226,17 @@ class DetectorSimulator:
         )
 
         # Load SCE. A trained SIREN distortion field (differentiable, E derived
-        # by autodiff) takes precedence over stored interpolation maps.
-        self._sce_siren = self._load_sce_siren(
+        # by autodiff) takes precedence over stored interpolation maps. The SIREN
+        # path carries a *per-volume stacked* field in sim_params.sce_models, so
+        # each module can use a different field with no recompilation and no
+        # per-module code branch (see _load_sce_siren / _build_jit).
+        self._sce_siren, sce_stacked = self._load_sce_siren(
             include_electric_dist, electric_dist_siren_path)
         if self._sce_siren is not None:
             sce_per_volume = None
             self._include_sce = True
+            self._default_sim_params = self._default_sim_params._replace(
+                sce_models=sce_stacked)
         else:
             sce_per_volume = self._load_sce(include_electric_dist, electric_dist_path)
             self._include_sce = sce_per_volume is not None
@@ -307,7 +312,8 @@ class DetectorSimulator:
                 print(f"   Box dims (analytic): {updates}")
 
         # Build shared factories
-        sce_factory, _build_response_fn, _build_response_fn_diff, _recomb_fn = \
+        (sce_factory, _sce_apply, _siren_mode, _build_response_fn,
+         _build_response_fn_diff, _recomb_fn) = \
             self._setup_shared_factories(sce_per_volume)
 
         # Build post-processing factories (once, shared)
@@ -344,7 +350,8 @@ class DetectorSimulator:
 
         # Build JIT-compiled calculators
         self._build_jit(
-            _recomb_fn, sce_factory, _build_response_fn, _build_response_fn_diff,
+            _recomb_fn, sce_factory, _sce_apply, _siren_mode,
+            _build_response_fn, _build_response_fn_diff,
             e_fn, noise_fn, d_fn, th_fn,
         )
 
@@ -362,38 +369,80 @@ class DetectorSimulator:
         return load_sce_per_volume(electric_dist_path, volumes=self._sim_config.volumes)
 
     def _load_sce_siren(self, include_electric_dist, siren_path):
-        """Load a trained SIREN distortion field (differentiable SCE).
+        """Load trained SIREN distortion field(s) for per-volume SCE.
 
-        Returns a bundle dict consumed by the SIREN sce_factory, or None.
+        Returns ``(shared, stacked)`` or ``(None, None)``.
 
-        The SIREN is trained in the generator frame (anode at x=0, x∈[0,Lx]
-        toward the cathode, transverse y∈[0,Ly], z∈[0,Lz]). JAXTPC's canonical
-        local frame has the anode at x=0 with x the drift distance and y,z
-        *centered* on the volume. Since local x already equals the generator's
-        drift coordinate and local (y,z) = generator (y,z) − (Ly/2, Lz/2), we
-        fold the transverse shift into the normalisation offsets so the SIREN
-        can be evaluated directly on local-frame positions:
+        ``shared`` holds the volume-independent constants captured by
+        ``_sce_apply`` (the v→E inversion table, omega_0, nominal field).
+        ``stacked`` is a pytree whose every leaf has a **leading volume axis**
+        (length n_volumes): the per-module SIREN ``weights``/``biases`` plus
+        per-module ``norm_offsets``/``norm_scales``/``E0``/``v0`` and the
+        geometry-derived ``drift_direction``. It is injected into
+        ``sim_params.sce_models`` and sliced per volume inside the scan/vmap, so
+        **different modules carry different fields with no recompile and no
+        per-module branch** — only the stacked values differ; the body is one
+        uniform traced function. Swapping fields between calls (same shapes)
+        never recompiles; it is also differentiable w.r.t. the field.
 
-            coords_norm = (xyz_local − [Lx/2, 0, 0]) / [Lx/2, Ly/2, Lz/2]
+        ``siren_path`` may be a single path (the same field broadcast to every
+        volume) or a list of n_volumes paths (one trained field per module).
+        Per-module SIRENs must share architecture (layer sizes), omega_0, and
+        temperature T so their parameters stack and share one inversion table.
 
-        One SIREN is shared across all volumes (volumes already share the
-        canonical local frame), matching the stored-map path's simplification.
+        Frame: each SIREN is trained in the generator frame (anode at x=0,
+        x∈[0,Lx] toward the cathode, transverse y∈[0,Ly]); JAXTPC's local frame
+        has the anode at x=0 with y,z centered, so we fold the transverse shift
+        into the offsets: ``coords_norm = (xyz_local − [Lx/2,0,0]) / norm_scales``.
+        The per-volume ``drift_direction`` comes from detector geometry and is
+        applied in ``_sce_apply`` to express the recovered E in the global frame
+        the track angles live in.
         """
         if not include_electric_dist or siren_path is None:
-            return None
+            return None, None
         from tools.sce_siren import (
             load_siren_npz, build_vinv_table, drift_velocity_jax)
-        print(f"   Loading SCE SIREN from {siren_path}...")
-        params, meta = load_siren_npz(siren_path)
-        ns = meta['norm_scales']                       # [Lx/2, Ly/2, Lz/2]
-        local_offsets = jnp.array([ns[0], 0.0, 0.0], dtype=jnp.float32)
-        v_table, E_table = build_vinv_table(meta['T'])
-        v0 = float(drift_velocity_jax(meta['E0'], meta['T']))
-        return dict(
-            params=params, E0=float(meta['E0']), v0=v0,
-            v_table=v_table, E_table=E_table,
-            norm_offsets=local_offsets, norm_scales=ns,
-            omega_0=float(meta['omega_0']))
+        cfg = self._sim_config
+        n_vol = cfg.n_volumes
+        paths = list(siren_path) if isinstance(siren_path, (list, tuple)) \
+            else [siren_path] * n_vol
+        if len(paths) != n_vol:
+            raise ValueError(
+                f"electric_dist_siren_path: {len(paths)} SIREN path(s) given for "
+                f"{n_vol} volume(s); pass one path (broadcast) or exactly n_volumes.")
+        print(f"   Loading SCE SIREN field(s) for {n_vol} volume(s) "
+              f"({'shared' if len(set(paths)) == 1 else 'per-module'})...")
+
+        per_vol, T_ref, omega_ref = [], None, None
+        for p in paths:
+            params, meta = load_siren_npz(p)
+            ns = jnp.asarray(meta['norm_scales'], jnp.float32)
+            E0, T, omega = float(meta['E0']), float(meta['T']), float(meta['omega_0'])
+            if T_ref is None:
+                T_ref, omega_ref = T, omega
+            elif abs(T - T_ref) > 1e-6 or abs(omega - omega_ref) > 1e-9:
+                raise ValueError(
+                    "Per-volume SIRENs must share T and omega_0 (one shared "
+                    "v→E table and architecture).")
+            per_vol.append(dict(
+                weights=[jnp.asarray(w) for w in params['weights']],
+                biases=[jnp.asarray(b) for b in params['biases']],
+                norm_offsets=jnp.array([ns[0], 0.0, 0.0], jnp.float32),
+                norm_scales=ns,
+                E0=jnp.float32(E0),
+                v0=jnp.float32(float(drift_velocity_jax(E0, T))),
+            ))
+        # Stack per-volume dicts along a new leading axis (uniform structure).
+        stacked = jax.tree.map(lambda *xs: jnp.stack(xs), *per_vol)
+        # Per-volume frame sign comes from detector geometry, not the field file.
+        stacked['drift_direction'] = jnp.array(
+            [float(v.drift_direction) for v in cfg.volumes], jnp.float32)
+
+        v_table, E_table = build_vinv_table(T_ref)
+        shared = dict(
+            v_table=v_table, E_table=E_table, omega_0=omega_ref,
+            nominal_field=float(self._default_sim_params.recomb_params.field_strength_Vcm))
+        return shared, stacked
 
     def _print_summary(self):
         """Print configuration summary after initialization."""
@@ -430,42 +479,16 @@ class DetectorSimulator:
         cfg = self._sim_config
         _nominal_field = float(self._default_sim_params.recomb_params.field_strength_Vcm)
 
-        # ── SCE factory (local frame) ──
-        if self._sce_siren is not None:
-            # Differentiable SIREN distortion field. The E-field is *derived*
-            # from the distortion Δ(r) by autodiff (∂Δ/∂x via jvp) + Walkowiak
-            # v(E) inversion — Δ is the single source of truth, so E and the
-            # drift corrections are guaranteed self-consistent.
-            from tools.sce_siren import recover_efield, siren_delta
-            sb = self._sce_siren
+        # ── SCE: map/nominal share a closure `sce_factory`; SIREN uses a
+        # per-volume `_sce_apply(sce_p, ...)` evaluated on a sliced pytree of
+        # per-module fields (threaded through the scan in _build_jit). The body
+        # is uniform: per-module variation is data, not branches, so different
+        # modules need no recompile and no special-casing. ──
+        _siren_mode = self._sce_siren is not None
 
-            def sce_factory(sb=sb, nf=_nominal_field):
-                def _sce(positions_cm, velocity_cm_us):
-                    # E (V/cm) from gradients of the SIREN distortion field.
-                    E = recover_efield(
-                        sb['params'], positions_cm, sb['E0'], sb['v0'],
-                        sb['v_table'], sb['E_table'],
-                        sb['norm_offsets'], sb['norm_scales'], sb['omega_0'])
-                    E_normalized = E / nf  # dimensionless correction vector
-
-                    delta = siren_delta(
-                        sb['params'], positions_cm,
-                        sb['norm_offsets'], sb['norm_scales'], sb['omega_0'])
-                    # Δx ≡ v0·t_drift − x0  ⟹  t_drift = (x0 + Δx)/v0.
-                    # delta_t = t_drift − x0/velocity (matches the map path so
-                    # apply_drift_corrections recovers corrected_time = t_drift).
-                    x0 = positions_cm[:, 0]
-                    t_drift = (x0 + delta[:, 0]) / sb['v0']
-                    delta_t = t_drift - x0 / velocity_cm_us
-                    return SCEOutputs(
-                        efield_correction=E_normalized,
-                        drift_time_corr_us=delta_t,
-                        drift_yz_corr_cm=delta[:, 1:3])
-                return _sce
-        elif sce_per_volume is not None:
-            # Real SCE — maps already in local frame from load_sce_per_volume.
-            # For scan, all volumes must share one factory. Use volume 0's maps.
-            # (Different per-volume SCE requires stacking maps — future work.)
+        if sce_per_volume is not None:
+            # Stored maps in local frame from load_sce_per_volume (volume 0's
+            # maps shared across volumes — the map path's simplification).
             efield_fn, corr_fn = sce_per_volume[0]
             def sce_factory(ef=efield_fn, cf=corr_fn, nf=_nominal_field):
                 def _sce(positions_cm, velocity_cm_us):
@@ -473,9 +496,6 @@ class DetectorSimulator:
                     E_normalized = E_local / nf
                     corr = cf(positions_cm)
                     # Channel 0 = t_drift (absolute, from path integration).
-                    # Compute delta_t relative to the runtime velocity so
-                    # corrected_time = t_nominal + delta_t = t_drift exactly,
-                    # regardless of what velocity is used.
                     t_drift = corr[:, 0]
                     delta_t = t_drift - positions_cm[:, 0] / velocity_cm_us
                     return SCEOutputs(
@@ -484,7 +504,8 @@ class DetectorSimulator:
                         drift_yz_corr_cm=corr[:, 1:3])
                 return _sce
         else:
-            # Nominal SCE — no distortions, delta_t = 0
+            # Nominal SCE — no distortions (also the unused fallback in SIREN
+            # mode, where every volume is handled by _sce_apply instead).
             def sce_factory():
                 def _sce(pos, velocity_cm_us):
                     N = pos.shape[0]
@@ -495,6 +516,41 @@ class DetectorSimulator:
                         drift_time_corr_us=jnp.zeros(N),
                         drift_yz_corr_cm=jnp.zeros((N, 2)))
                 return _sce
+
+        _sce_apply = None
+        if _siren_mode:
+            # Differentiable SIREN distortion field, evaluated per volume on its
+            # own sliced params `sce_p`. E is *derived* from Δ(r) by autodiff
+            # (∂Δ/∂x via jvp) + Walkowiak v(E) inversion, so Δ is the single
+            # source of truth and E / drift corrections stay self-consistent.
+            from tools.sce_siren import recover_efield, siren_delta
+            sb = self._sce_siren
+            _vt, _et, _om, _nf2 = (sb['v_table'], sb['E_table'],
+                                   sb['omega_0'], sb['nominal_field'])
+
+            def _sce_apply(sce_p, positions_cm, velocity_cm_us):
+                params = {'weights': sce_p['weights'], 'biases': sce_p['biases']}
+                E = recover_efield(
+                    params, positions_cm, sce_p['E0'], sce_p['v0'], _vt, _et,
+                    sce_p['norm_offsets'], sce_p['norm_scales'], _om)
+                # Local +x is anti-parallel to global x for drift_direction=+1
+                # volumes (x_local = dd·(x_anode − x_global)). Track angles
+                # (theta/phi) are global, so express E_x in the global frame:
+                # E_x_global = −dd · E_x_local. |E| (recombination) is unchanged.
+                E = E.at[:, 0].multiply(-sce_p['drift_direction'])
+                E_normalized = E / _nf2
+
+                delta = siren_delta(
+                    params, positions_cm,
+                    sce_p['norm_offsets'], sce_p['norm_scales'], _om)
+                # Δx ≡ v0·t_drift − x0  ⟹  t_drift = (x0 + Δx)/v0.
+                x0 = positions_cm[:, 0]
+                t_drift = (x0 + delta[:, 0]) / sce_p['v0']
+                delta_t = t_drift - x0 / velocity_cm_us
+                return SCEOutputs(
+                    efield_correction=E_normalized,
+                    drift_time_corr_us=delta_t,
+                    drift_yz_corr_cm=delta[:, 1:3])
 
         # ── Response factories ──
         kernels = self.response_kernels
@@ -580,10 +636,11 @@ class DetectorSimulator:
             def _recomb_fn(de, dx, phi_drift, e_field_Vcm, params):
                 return compute_quanta(de, dx, phi_drift, e_field_Vcm, params, _xi_fn)
 
-        return sce_factory, _build_response_fn, _build_response_fn_diff, _recomb_fn
+        return (sce_factory, _sce_apply, _siren_mode,
+                _build_response_fn, _build_response_fn_diff, _recomb_fn)
 
-    def _build_jit(self, _recomb_fn, sce_factory, _build_response_fn,
-                   _build_response_fn_diff,
+    def _build_jit(self, _recomb_fn, sce_factory, _sce_apply, _siren_mode,
+                   _build_response_fn, _build_response_fn_diff,
                    electronics_fn, noise_fn, digitize_fn, track_hits_fn):
         """Build all JIT-compiled calculators using scan/vmap."""
         from tools.physics import (
@@ -601,12 +658,21 @@ class DetectorSimulator:
         iterate = self._iterate
         include_track_hits = cfg.include_track_hits
 
+        # Per-volume SCE eval. In SIREN mode each volume receives its own sliced
+        # params `sce_p` (threaded through the scan/vmap below); map/nominal
+        # share one closure and ignore sce_p. `_siren_mode` is resolved at trace
+        # time, so this is a static choice, not a runtime branch.
+        def make_sce_fn(sce_p):
+            if _siren_mode:
+                return lambda pos, vel: _sce_apply(sce_p, pos, vel)
+            return sce_factory()
+
         # ── Build process_one_volume body ──
         if self._readout_type == 'pixel':
             pk = kernels  # PixelResponseKernel
 
-            def process_one_volume(vol_deps, vol_key, sim_params):
-                sce_fn = sce_factory()
+            def process_one_volume(vol_deps, vol_key, sim_params, sce_p):
+                sce_fn = make_sce_fn(sce_p)
                 vol_int = compute_volume_physics(
                     vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
 
@@ -637,8 +703,8 @@ class DetectorSimulator:
             n_planes = vol_geom.n_planes
             _PLANE_LABELS = tuple(cfg.plane_names[0])
 
-            def process_one_volume(vol_deps, vol_key, sim_params):
-                sce_fn = sce_factory()
+            def process_one_volume(vol_deps, vol_key, sim_params, sce_p):
+                sce_fn = make_sce_fn(sce_p)
                 vol_int = compute_volume_physics(
                     vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
 
@@ -719,14 +785,18 @@ class DetectorSimulator:
         @jax.jit
         def _calculator_jit(sim_params, stacked_deps, noise_key):
             vol_keys = jax.random.split(noise_key, n_volumes)
-            fn = lambda deps, key: process_one_volume(deps, key, sim_params)
+            if _siren_mode:
+                fn = lambda deps, key, sce_p: process_one_volume(
+                    deps, key, sim_params, sce_p)
+                return iterate(fn, (stacked_deps, vol_keys, sim_params.sce_models))
+            fn = lambda deps, key: process_one_volume(deps, key, sim_params, None)
             return iterate(fn, (stacked_deps, vol_keys))
 
         self._calculator_jit = _calculator_jit
 
         # ── Light-only JIT ──
-        def light_one_volume(vol_deps, sim_params):
-            sce_fn = sce_factory()
+        def light_one_volume(vol_deps, sim_params, sce_p):
+            sce_fn = make_sce_fn(sce_p)
             vol_int = compute_volume_physics(
                 vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
             return (vol_int.charges, vol_int.photons, vol_int.positions_cm,
@@ -734,7 +804,10 @@ class DetectorSimulator:
 
         @jax.jit
         def _light_calculator_jit(sim_params, stacked_deps):
-            fn = lambda deps: light_one_volume(deps, sim_params)
+            if _siren_mode:
+                fn = lambda deps, sce_p: light_one_volume(deps, sim_params, sce_p)
+                return iterate(fn, (stacked_deps, sim_params.sce_models))
+            fn = lambda deps: light_one_volume(deps, sim_params, None)
             return iterate(fn, (stacked_deps,))
 
         self._light_calculator_jit = _light_calculator_jit
@@ -754,8 +827,8 @@ class DetectorSimulator:
             pk_sig = kernels  # PixelResponseKernel
             sig_max_buckets = cfg.max_active_buckets
 
-            def pixel_signal_one_volume(vol_deps, sim_params):
-                sce_fn = sce_factory()
+            def pixel_signal_one_volume(vol_deps, sim_params, sce_p):
+                sce_fn = make_sce_fn(sce_p)
                 vol_int = compute_volume_physics(
                     vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
                 readout_window_us = cfg.num_time_steps * cfg.time_step_us
@@ -782,7 +855,11 @@ class DetectorSimulator:
 
             @jax.jit
             def _pixel_signal_jit(sim_params, stacked_deps):
-                fn = lambda deps: pixel_signal_one_volume(deps, sim_params)
+                if _siren_mode:
+                    fn = lambda deps, sce_p: pixel_signal_one_volume(
+                        deps, sim_params, sce_p)
+                    return iterate(fn, (stacked_deps, sim_params.sce_models))
+                fn = lambda deps: pixel_signal_one_volume(deps, sim_params, None)
                 return iterate(fn, (stacked_deps,))
 
             self._pixel_signal_jit = _pixel_signal_jit
@@ -791,8 +868,8 @@ class DetectorSimulator:
         if self.n_segments is not None and self._readout_type == 'wire':
             n_segments = self.n_segments
 
-            def diff_one_volume(vol_deps, sim_params):
-                sce_fn = sce_factory()
+            def diff_one_volume(vol_deps, sim_params, sce_p):
+                sce_fn = make_sce_fn(sce_p)
                 vol_int = compute_volume_physics(
                     vol_deps, sim_params, vol_geom, sce_fn, _recomb_fn)
 
@@ -829,7 +906,10 @@ class DetectorSimulator:
 
             @(jax.remat if self._diff_remat in (True, 'full') else (lambda f: f))
             def _forward_diff(params, stacked_deps):
-                fn = lambda deps: diff_one_volume(deps, params)
+                if _siren_mode:
+                    fn = lambda deps, sce_p: diff_one_volume(deps, params, sce_p)
+                    return iterate(fn, (stacked_deps, params.sce_models))
+                fn = lambda deps: diff_one_volume(deps, params, None)
                 return iterate(fn, (stacked_deps,))
 
             self._forward_diff = _forward_diff

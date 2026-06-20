@@ -246,3 +246,95 @@ def test_siren_wires_into_simulator(tmp_path):
         assert bool(jnp.all(jnp.isfinite(sce[k]))), f"non-finite signal in {k}"
     total_diff = sum(float(jnp.sum(jnp.abs(sce[k] - base[k]))) for k in base)
     assert total_diff > 0.0, "SCE-SIREN did not perturb the readout"
+
+
+@pytest.mark.slow
+@pytest.mark.requires_kernels
+def test_per_module_different_fields_no_recompile(tmp_path):
+    """Two modules (dd=-1 and dd=+1) carry DIFFERENT SCE fields through one
+    compiled body. Swapping each module's field (same shapes) must not
+    recompile — per-module variation is data in sim_params.sce_models, not a
+    code branch. Also exercises the dd=+1 frame path."""
+    import jax
+    from tools.simulation import DetectorSimulator
+    from tools.config import create_sim_config
+    from tools.loader import build_deposit_data
+
+    def vol(vid, xr, dd):
+        return {'id': vid,
+                'geometry': {'ranges': [xr, [-20.0, 20.0], [-20.0, 20.0]],
+                             'drift_direction': dd},
+                'planes': [
+                    {'plane_id': vid * 3 + 0, 'type': 'first_induction', 'angle': 60.0,
+                     'wire_spacing': 0.3, 'distance_from_anode': 0.6, 'bias_voltage': -200.0},
+                    {'plane_id': vid * 3 + 1, 'type': 'second_induction', 'angle': -60.0,
+                     'wire_spacing': 0.3, 'distance_from_anode': 0.3, 'bias_voltage': -200.0},
+                    {'plane_id': vid * 3 + 2, 'type': 'collection', 'angle': 0.0,
+                     'wire_spacing': 0.3, 'distance_from_anode': 0.0, 'bias_voltage': 500.0}]}
+
+    wire_config = {
+        'volumes': [vol(0, [-20.0, 0.0], -1), vol(1, [0.0, 20.0], 1)],
+        'readout': {'sampling_rate': 2.0, 'electrons_per_adc': 182},
+        'simulation': {
+            'drift': {'velocity': 1.6, 'longitudinal_diffusion': 6.2,
+                      'transverse_diffusion': 16.3, 'electron_lifetime': 10.0},
+            'charge_recombination': {'model': 'emb',  # EMB so the dd angle matters
+                                     'recomb_parameters': {
+                                         'alpha': 0.93, 'beta': 0.212,
+                                         'alpha_emb': 0.904, 'beta_90': 0.204,
+                                         'R_anisotropy': 1.25}}},
+        'medium': {'type': 'liquid_argon',
+                   'properties': {'density': 1.396, 'ionization_energy': 23.6,
+                                  'excitation_ratio': 0.21},
+                   'temperature': 87.0, 'pressure': 1.0},
+        'electric_field': {'field_strength': 500.0},
+    }
+
+    # Two DIFFERENT module fields (distinct random SIRENs), saved separately.
+    Lx, Ly, Lz = 20.0, 40.0, 40.0
+    norm = np.array([Lx / 2, Ly / 2, Lz / 2])
+    paths = []
+    for seed in (10, 11):
+        p = S.init_siren(jax.random.PRNGKey(seed))
+        p['weights'][-1] = p['weights'][-1] * 25.0
+        fp = str(tmp_path / f'siren_mod{seed}.npz')
+        S.save_siren_npz(fp, p, 5.0, norm, norm, 500.0, 89.0)
+        paths.append(fp)
+
+    TOTAL_PAD, RESP_CHUNK = 2000, 1000
+    rng = np.random.RandomState(7)
+    # deposits in both volumes (x<0 → vol0, x>0 → vol1)
+    pts = rng.uniform([-18, -18, -18], [18, 18, 18], size=(300, 3))
+    pos = (pts * 10.0).astype(np.float32)
+    de = rng.uniform(0.5, 3.0, 300).astype(np.float32)
+    dx = rng.uniform(0.05, 0.4, 300).astype(np.float32)
+    sc = create_sim_config(wire_config, total_pad=TOTAL_PAD, include_track_hits=False)
+    dep = build_deposit_data(pos, de, dx, sc, track_ids=np.zeros(300, np.int32),
+                             group_size=5, gap_threshold_mm=5.0)
+
+    # per-module fields: vol0 ← paths[0], vol1 ← paths[1]
+    sim = DetectorSimulator(wire_config, total_pad=TOTAL_PAD,
+                            response_chunk_size=RESP_CHUNK, include_track_hits=False,
+                            recombination_model='emb',
+                            include_electric_dist=True,
+                            electric_dist_siren_path=paths)
+    from tools.output import to_dense
+    sig0, _, _ = sim.process_event(dep, key=jax.random.PRNGKey(0))
+    out0 = to_dense(sig0, sim.config)
+    for k in out0:
+        assert bool(jnp.all(jnp.isfinite(out0[k])))
+
+    # Swap the per-module fields by overriding sim_params.sce_models with a
+    # new stacked pytree of the SAME shapes → must NOT recompile.
+    n_before = sim._calculator_jit._cache_size()
+    sp = sim._default_sim_params
+    swapped = jax.tree.map(lambda x: x[::-1], sp.sce_models)  # reverse volume axis
+    sig1, _, _ = sim.process_event(dep, sim_params=sp._replace(sce_models=swapped),
+                                   key=jax.random.PRNGKey(0))
+    out1 = to_dense(sig1, sim.config)
+    n_after = sim._calculator_jit._cache_size()
+
+    assert n_after == n_before, "swapping per-module fields triggered a recompile"
+    # different fields per module ⇒ different readout
+    diff = sum(float(jnp.sum(jnp.abs(out1[k] - out0[k]))) for k in out0)
+    assert diff > 0.0, "swapping per-module fields did not change the readout"
