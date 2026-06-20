@@ -203,7 +203,7 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
                   curl_weight=0.0, curl_grid_n=10,
                   noise_sigma=0.0, noise_seed=0, zero_suppress=0.0, val_frac=0.0,
                   real_noise=False, weight_decay=0.0, whitened=False,
-                  extra_metric=None):
+                  extra_metric=None, pos_model=None, de_model=None, step_model=None):
     """Per-EVENT accumulation: each muon is its own forward/image; the loss
     averages per-event Sobolev losses over a mini-batch of muons each step.
 
@@ -230,6 +230,15 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
     # up to ~1.6x), so the recombination dE/dx must use the per-muon step, not a
     # single mean (which mis-scales charge for most tracks). Accept scalar or (M,).
     step_arr = jnp.broadcast_to(jnp.asarray(step, jnp.float32), (M,))
+
+    # Optional track-reconstruction mismatch: the OBS uses the true tracks
+    # (pos_all/de_all); the recovery MODEL uses pos_model/de_model (perturbed
+    # entrance/exit -> position+angle+direction errors). Defaults to the true
+    # tracks (no mismatch). This tests robustness to cosmic-reco uncertainty.
+    pm_all = pos_all if pos_model is None else pos_model
+    dm_all = de_all if de_model is None else de_model
+    sm_arr = step_arr if step_model is None else jnp.broadcast_to(
+        jnp.asarray(step_model, jnp.float32), (M,))
 
     def fwd1(stk, p, d, s):
         return sim.forward_segments(base._replace(sce_models=stk), p, d, dx=s)
@@ -356,8 +365,10 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
         return jnp.mean(cx ** 2 + cy ** 2 + cz ** 2)
 
     def data_loss_idx(par, idx):
+        # MODEL forward uses the (possibly perturbed) recovery tracks; obs_for
+        # uses the true tracks. Equal by default (pm_all is pos_all).
         sg = jax.vmap(lambda p, d, s: fwd1(full(par), p, d, s))(
-            pos_all[idx], de_all[idx], step_arr[idx])
+            pm_all[idx], dm_all[idx], sm_arr[idx])
         ob = obs_for(idx)
         tot = 0.0
         for pl in range(nplanes):
