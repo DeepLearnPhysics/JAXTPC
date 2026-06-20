@@ -20,9 +20,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
 
 from closure.cosmic.recover_field import build, recover_full
 from tools.particle_generator import (
-    load_dedx_table_jax, generate_cosmic_chord, sample_surface_endpoints)
+    load_dedx_table_jax, generate_cosmic_chord, sample_box_endpoints)
 
 HALF = (200.0, 200.0, 200.0)
+LO, HI = (-200.0, -200.0, -200.0), (0.0, 200.0, 200.0)   # actual drift box (no clip)
 
 
 def dense_obs(g):
@@ -36,8 +37,7 @@ def cosmic_obs(k, seg=16):
     logT, dedx = load_dedx_table_jax(); rng = np.random.RandomState(0)
     P, D = [], []
     for _ in range(k):
-        a, b = sample_surface_endpoints(rng, HALF)
-        a[0] = np.clip(a[0], -200, 0); b[0] = np.clip(b[0], -200, 0)
+        a, b = sample_box_endpoints(rng, LO, HI)
         p, d, _, _, _ = generate_cosmic_chord(jnp.array(a), jnp.array(b), 4000., seg,
                                               logT, dedx, half_extents_mm=HALF)
         P.append(p); D.append(d)

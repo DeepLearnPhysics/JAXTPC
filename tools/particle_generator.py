@@ -590,6 +590,42 @@ def sample_surface_endpoints(rng, half_extents_mm):
     return a, b
 
 
+def sample_box_endpoints(rng, lo_mm, hi_mm):
+    """Sample an entrance/exit pair on the surface of an ARBITRARY axis-aligned
+    box [lo, hi] (per-axis, in GLOBAL mm), area-weighted, rejecting too-short and
+    same-face pairs.
+
+    Unlike ``sample_surface_endpoints`` (symmetric ±h centred at origin), this
+    samples the *actual* detector box — e.g. a drift volume x∈[-200,0] — so the
+    endpoints lie on the real faces (anode/cathode/walls). Clipping a symmetric
+    cube onto a drift box instead collapses every x>0 endpoint onto the anode
+    plane, producing degenerate flat-at-anode tracks with zero drift extent.
+    """
+    lo = np.asarray(lo_mm, np.float64); hi = np.asarray(hi_mm, np.float64)
+    size = hi - lo
+    areas = np.array([size[1]*size[2], size[1]*size[2],
+                      size[0]*size[2], size[0]*size[2],
+                      size[0]*size[1], size[0]*size[1]])
+    probs = areas / areas.sum()
+
+    def _pt():
+        face = rng.choice(6, p=probs)
+        u = rng.uniform(lo, hi)                       # interior coords per axis
+        c = u.copy()
+        if face == 0:   c[0] = lo[0]
+        elif face == 1: c[0] = hi[0]
+        elif face == 2: c[1] = lo[1]
+        elif face == 3: c[1] = hi[1]
+        elif face == 4: c[2] = lo[2]
+        else:           c[2] = hi[2]
+        return c.astype(np.float32), face
+
+    a, fa = _pt(); b, fb = _pt()
+    while np.linalg.norm(b - a) < size.min() or fb == fa:
+        b, fb = _pt()
+    return a, b
+
+
 def build_muon_forward(simulator, n_segments, step_size_mm):
     """Build a forward closure for muon optimization.
 

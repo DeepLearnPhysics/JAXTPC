@@ -16,9 +16,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
 
 from closure.cosmic.recover_field import build, recover_accum
 from tools.particle_generator import (
-    load_dedx_table_jax, generate_cosmic_chord, sample_surface_endpoints)
+    load_dedx_table_jax, generate_cosmic_chord, sample_box_endpoints)
 
 HALF = (200.0, 200.0, 200.0)
+# actual drift box (mm): x in [-200,0] (anode at 0). Sample its real faces — do
+# NOT clip a symmetric cube (that collapses x>0 endpoints onto the anode plane,
+# making ~25% of tracks degenerate flat-at-anode with zero drift extent).
+LO, HI = (-200.0, -200.0, -200.0), (0.0, 200.0, 200.0)
 
 
 def main():
@@ -48,8 +52,7 @@ def main():
     smm = args.step_mm if args.step_mm > 0 else None   # small fixed dx, or chord/seg
     P, D, steps_mm = [], [], []
     for _ in range(args.n_muons):
-        a, b = sample_surface_endpoints(rng, HALF)
-        a[0] = np.clip(a[0], -200, 0); b[0] = np.clip(b[0], -200, 0)
+        a, b = sample_box_endpoints(rng, LO, HI)
         p, d, _, _, s = generate_cosmic_chord(jnp.array(a), jnp.array(b), 4000., args.seg,
                                               logT, dedx, half_extents_mm=HALF, step_mm=smm)
         P.append(p); D.append(d); steps_mm.append(float(s))
