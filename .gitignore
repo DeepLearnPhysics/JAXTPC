@@ -9,7 +9,8 @@ __pycache__/
 logs/
 profiler/figures/
 /plots/
-/tools/responses/gifs/
+gifs/
+notebooks/**/plots/
 
 # Local scratch: profiling experiments + production run logs/artifacts
 experiments/

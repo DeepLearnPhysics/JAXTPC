@@ -68,7 +68,7 @@ JAXTPC/
 ├── scripts/                      # Standalone utilities (e.g. wire-geometry export)
 ├── slurm/                        # SLURM array drivers for batch production
 ├── closure/                      # Differentiable reconstruction / closure studies
-└── run_simulation.ipynb          # Interactive single-event simulation notebook
+└── notebooks/                    # Themed example notebooks (getting_started, physics, readout, gradients, reco, calibration, production)
 ```
 
 ## Installation
@@ -107,7 +107,7 @@ Committed/pushed copies of `*.ipynb` are then automatically stripped of outputs 
 ### Interactive notebook
 
 ```bash
-jupyter notebook run_simulation.ipynb
+jupyter notebook notebooks/getting_started/wire_simulation.ipynb
 ```
 
 ### Python API

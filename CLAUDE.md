@@ -61,8 +61,12 @@ JAXTPC/
 │   │   cubic_pixel_config.yaml (pixel readout: same geometry as cubic_wireplane, 1000×1000 pixels/volume)
 │   ├── noise_spectrum.npz     # Empirical noise spectral shape
 │   └── sce_jaxtpc.h5          # Space charge effect correction maps
-├── run_simulation.ipynb       # Interactive single-event simulation notebook
-└── run_pixel_simulation.ipynb # Pixel-readout single-event notebook
+├── notebooks/                 # Themed example notebooks (see notebooks/README.md)
+│   ├── getting_started/       # quickstart + wire_simulation
+│   ├── physics/               # response_kernels (+ planned recombination/diffusion/SCE)
+│   ├── readout/               # pixel_simulation, wire-vs-pixel/units
+│   ├── gradients/ reco/ calibration/   # differentiable, reconstruction, calibration
+│   └── production/            # view_production (+ planned batch/profiler)
 ```
 
 ## Core Architecture
@@ -187,7 +191,7 @@ Downstream: `to_dense()` and `to_sparse()` convert any format. Sparse = `{(vol, 
 ## Running Simulations
 
 ### Interactive (single event)
-Main entry point: `run_simulation.ipynb`
+Main entry point: `notebooks/getting_started/wire_simulation.ipynb`
 
 ```python
 from tools.simulation import DetectorSimulator
