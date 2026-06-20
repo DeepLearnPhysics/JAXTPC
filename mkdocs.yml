@@ -1,0 +1,45 @@
+site_name: JAXTPC
+site_description: GPU-accelerated, differentiable liquid-argon TPC detector simulation in JAX
+repo_url: https://github.com/DeepLearnPhysics/JAXTPC
+repo_name: DeepLearnPhysics/JAXTPC
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - content.code.copy
+    - search.suggest
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle: { icon: material/weather-night, name: Dark mode }
+    - scheme: slate
+      primary: indigo
+      toggle: { icon: material/weather-sunny, name: Light mode }
+
+# Build with the docs extra:  pip install -e ".[docs]" && mkdocs serve
+plugins:
+  - search
+  # - mkdocstrings:        # auto API reference from docstrings (enable once docs/reference/api/* added)
+  #     handlers: { python: { paths: ["."] } }
+  # - mkdocs-jupyter:      # render notebooks/ as pages
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc: { permalink: true }
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Install: install.md
+  - Quickstart: quickstart.md
+  - Concepts:
+    - Coordinates & frames: concepts/coordinates.md
+  - Physics:
+    - Units (ENC vs ADC): physics/units.md
+  - Roadmap: PLAN.md
