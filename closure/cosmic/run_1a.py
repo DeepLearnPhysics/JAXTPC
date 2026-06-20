@@ -72,7 +72,9 @@ def main():
         E = np.array(S.recover_efield({'weights': wb['weights'], 'biases': wb['biases']},
                      jnp.array(gp), E0, v0, vt, et, gnorm, gnorm, om))
         return np.sqrt((E ** 2).sum(-1))
-    rwb = {'weights': learned['weights'], 'biases': learned['biases']}
+    # recover_accum returns the per-volume STACKED field (leading volume axis); take vol 0
+    rwb = {'weights': [w[0] for w in learned['weights']],
+           'biases': [b[0] for b in learned['biases']]}
     Er, Etru = Emag(rwb), Emag(twb)
     Efp = np.sqrt((firstprinciples_E(gp) ** 2).sum(-1))
     res = dict(truth=args.truth, omega=om, n_muons=args.n_muons, steps=args.steps,
