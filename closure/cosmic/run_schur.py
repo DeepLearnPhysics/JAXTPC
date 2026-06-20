@@ -30,6 +30,7 @@ def main():
     ap.add_argument('--ep-sigma', type=float, default=10.0)
     ap.add_argument('--iters', type=int, default=30)
     ap.add_argument('--ep-prior', type=float, default=0.03)
+    ap.add_argument('--fix-tracks', action='store_true', help='do not update tracks (pure field-in-subspace test)')
     ap.add_argument('--truth', default=os.path.join(HERE, 'truth_40cm.npz'))
     ap.add_argument('--out', default=os.path.join(HERE, 'schur.json'))
     args = ap.parse_args()
@@ -131,8 +132,9 @@ def main():
         V = evecs[:, keep]
         da = -step * (V @ ((V.T @ gs) / evals[keep]))
         TH_new = np.asarray(TH).copy()
-        for gi in range(M):
-            TH_new[gi] += -step * (Ftt_l[gi] @ (gt_l[gi] + Fat_l[gi].T @ da))
+        if not args.fix_tracks:
+            for gi in range(M):
+                TH_new[gi] += -step * (Ftt_l[gi] @ (gt_l[gi] + Fat_l[gi].T @ da))
         a_new = a + jnp.asarray(da); TH_new = jnp.asarray(TH_new)
         L_old = hist[-1][2]; L_new = total_loss(a_new, TH_new)
         if L_new < L_old:
