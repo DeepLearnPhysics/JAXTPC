@@ -500,7 +500,7 @@ def generate_muon_segments_trig(
 
 def generate_cosmic_chord(entrance_mm, exit_mm, kinetic_energy_mev, n_segments,
                           log_T_table, dedx_table, half_extents_mm=None,
-                          relax_steps=2.0):
+                          relax_steps=2.0, step_mm=None):
     """Cosmic-ray-like muon as a straight chord between KNOWN entrance and exit.
 
     A cosmic muon crosses the detector in a straight line from an entrance point
@@ -544,7 +544,10 @@ def generate_cosmic_chord(entrance_mm, exit_mm, kinetic_energy_mev, n_segments,
     L = jnp.linalg.norm(chord)
     theta = jnp.arccos(jnp.clip(chord[2] / L, -1.0, 1.0))
     phi = jnp.arctan2(chord[1], chord[0])
-    step_mm = L / n_segments
+    # dx = a small FIXED physical step (mm) when given, so the track is finely
+    # sampled like a real cosmic (segments beyond the exit overshoot and are
+    # zeroed by mask_outside_volume). Otherwise fall back to chord/n_segments.
+    step_mm = (L / n_segments) if step_mm is None else jnp.asarray(step_mm, jnp.float32)
     positions, de = generate_muon_segments(
         kinetic_energy_mev, entrance, theta, phi, step_mm, n_segments,
         log_T_table, dedx_table, relax_steps)
