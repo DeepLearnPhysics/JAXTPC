@@ -233,63 +233,75 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
     def fwd1(stk, p, d, s):
         return sim.forward_segments(base._replace(sce_models=stk), p, d, dx=s)
 
-    # truth image per muon (vmap over the muon axis)
-    obs = jax.vmap(lambda p, d, s: fwd1(truth, p, d, s))(pos_all, de_all, step_arr)
-    # Intrinsic noise is added ONCE to the OBSERVED data (the real readout),
-    # independently per event and per readout bin — NOT to the model forward
-    # used during optimisation (that predicts the noiseless mean; the loss
-    # accounts for noise). Each event is an independent noisy constraint on the
-    # static field, so more events should reduce the field-estimate variance —
-    # BUT plain SGD on the Sobolev loss overfits the noise instead (the loss is
-    # dominated by the noise over the mostly-empty image). Realistic noise
-    # handling needs whitening / held-out early stopping, not just more events.
+    # Plane shapes from a single-muon forward (for spec / noise-PSD sizing).
+    obs0 = fwd1(truth, pos_all[0], de_all[0], step_arr[0])
+    nplanes = len(obs0)
+    plane_shapes = [tuple(o.shape) for o in obs0]              # (num_wires, num_time) per plane
+
+    # STREAMING observations: we do NOT materialise all M noisy images (that OOMs
+    # at M~thousands). Instead obs_for(idx) recomputes the truth forward + a
+    # DETERMINISTIC per-event noise realisation for each mini-batch — keyed by the
+    # GLOBAL event index, so the realisation is fixed across steps (identical to
+    # adding noise once). Memory then scales with the batch, not with M ("batch
+    # and accumulate"). The model forward is the only graph that carries gradient.
     noise_psd = None
+    series_list = white = spectrum = nt = None
     if real_noise:
         # The ACTUAL simulator intrinsic noise: MicroBooNE model (arXiv:1705.07341)
         # — per-wire ENC = sqrt(x^2 + (y + z*L)^2) with the empirical spectral
-        # shape, L = wire length (so noise varies per wire). Generated per event
-        # in ENC (the diff path's units; ADC params * electrons_per_adc).
+        # shape, L = wire length. Intrinsic-only => per-wire-independent => the
+        # noise covariance is diagonal, so whitening is a per-(wire,freq) reweight.
         from tools.noise import (load_noise_params, _get_noise_spectrum_shape,
                                   _generate_noise_for_plane)
         cfg = sim.config; epa = float(cfg.electrons_per_adc); nt = cfg.num_time_steps
         nx, ny, nz, ef, es = load_noise_params(cfg.noise_spectrum_path)
         spectrum = jnp.array(_get_noise_spectrum_shape(nt, ef, es))
         white = float(nx) * epa
-        knz = jax.random.PRNGKey(noise_seed); new = []; noise_psd = []
-        for pl, o in enumerate(obs):
-            nw = o.shape[1]
+        knz = jax.random.PRNGKey(noise_seed); series_list = []; noise_psd = []
+        for pl in range(nplanes):
+            nw = plane_shapes[pl][0]
             L = jnp.asarray(cfg.volumes[0].wire_lengths_m[pl], jnp.float32)
             series = (ny + nz * L) * epa                       # (num_wires,) ENC
-            keys = jax.random.split(jax.random.fold_in(knz, pl), o.shape[0])
-            gen = lambda k: _generate_noise_for_plane(k, nw, nt, spectrum, series, white)
-            noise = jax.vmap(gen)(keys)
-            new.append(o + noise)
-            # Noise PSD per (wire, freq) for whitening: estimated from the SAME
-            # model. Diagonal in wire-space (intrinsic noise is per-wire
-            # independent); time-correlated via the MicroBooNE spectrum.
+            series_list.append(series)
             pk = jax.random.split(jax.random.fold_in(knz, 1000 + pl), 256)
-            ns = jax.vmap(gen)(pk)
+            ns = jax.vmap(lambda k: _generate_noise_for_plane(
+                k, nw, nt, spectrum, series, white))(pk)
             noise_psd.append(jnp.maximum(
                 jnp.mean(jnp.abs(jnp.fft.rfft(ns, axis=2)) ** 2, axis=0), 1e-3))
-        obs = tuple(new)
-    elif noise_sigma > 0:
-        knz = jax.random.PRNGKey(noise_seed)
-        obs = tuple(o + noise_sigma * jax.random.normal(jax.random.fold_in(knz, pl), o.shape)
-                    for pl, o in enumerate(obs))
-    # Zero-suppression = realistic readout: only bins above threshold are kept,
-    # so the mostly-empty image isn't dominated by per-bin noise (a 3-5σ cut
-    # removes the empty-bin noise while keeping the track, where signal≫noise).
-    if zero_suppress > 0:
-        obs = tuple(jnp.where(jnp.abs(o) > zero_suppress, o, 0.0) for o in obs)
-    obs = tuple(jax.lax.stop_gradient(o) for o in obs)
-    nplanes = len(obs)
+
+    knoise = jax.random.PRNGKey(noise_seed)
+
+    def obs_for(idx):
+        """Observed images for events ``idx`` (global indices), on the fly:
+        truth forward + deterministic per-event noise (+ zero-suppression),
+        stop_gradient. Recomputed each step so nothing M-sized is stored."""
+        sg = jax.vmap(lambda p, d, s: fwd1(truth, p, d, s))(
+            pos_all[idx], de_all[idx], step_arr[idx])
+        out = []
+        for pl in range(nplanes):
+            o = sg[pl]
+            if real_noise or noise_sigma > 0:
+                ek = jax.vmap(lambda e: jax.random.fold_in(
+                    jax.random.fold_in(knoise, pl), e))(idx)
+                if real_noise:
+                    nw = plane_shapes[pl][0]; series = series_list[pl]
+                    noise = jax.vmap(lambda k: _generate_noise_for_plane(
+                        k, nw, nt, spectrum, series, white))(ek)
+                else:
+                    noise = jax.vmap(lambda k: noise_sigma * jax.random.normal(
+                        k, plane_shapes[pl]))(ek)
+                o = o + noise
+            if zero_suppress > 0:
+                o = jnp.where(jnp.abs(o) > zero_suppress, o, 0.0)
+            out.append(jax.lax.stop_gradient(o))
+        return out
 
     # Held-out validation muons for HONEST early stopping (the loss keeps falling
     # by fitting noise; the val loss on unseen events turns up when the field
     # starts overfitting — stop there, no peeking at truth).
     n_val = int(val_frac * M)
     n_train = M - n_val
-    spec = [make_sobolev_weight(*obs[pl].shape[1:], max_pad=128, s=1.5)
+    spec = [make_sobolev_weight(*plane_shapes[pl], max_pad=128, s=1.5)
             for pl in range(nplanes)]
 
     # Per-plane, per-event loss term. Two choices:
@@ -341,9 +353,10 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
     def data_loss_idx(par, idx):
         sg = jax.vmap(lambda p, d, s: fwd1(full(par), p, d, s))(
             pos_all[idx], de_all[idx], step_arr[idx])
+        ob = obs_for(idx)
         tot = 0.0
         for pl in range(nplanes):
-            per = jax.vmap(lambda a, b: lterm(a, b, pl))(sg[pl], obs[pl][idx])
+            per = jax.vmap(lambda a, b: lterm(a, b, pl))(sg[pl], ob[pl])
             tot = tot + jnp.mean(per)
         return tot / nplanes
 
@@ -351,7 +364,8 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
         data = data_loss_idx(par, idx)
         return data + curl_weight * curl_penalty(par) if curl_weight > 0 else data
 
-    _val_idx = jnp.arange(n_train, M)
+    # cap the val set so the (jitted, full-batch) val forward stays cheap at large M
+    _val_idx = jnp.arange(n_train, min(M, n_train + 128))
 
     @jax.jit
     def val_loss(par):
