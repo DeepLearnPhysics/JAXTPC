@@ -47,7 +47,7 @@ def main():
                                               logT, dedx, half_extents_mm=HALF)
         P.append(p); D.append(d); steps_mm.append(float(s))
     pos_all = jnp.stack(P); de_all = jnp.stack(D)
-    step = float(np.mean(steps_mm))   # ~uniform chord segment length
+    step = np.asarray(steps_mm, np.float32)   # per-muon chord segment length (mm)
 
     hist, _ = recover_accum(sim, pos_all, de_all, step, steps=args.steps,
                             lr=args.lr, batch=args.batch, curl_weight=args.curl,

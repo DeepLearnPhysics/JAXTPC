@@ -575,12 +575,15 @@ def sample_surface_endpoints(rng, half_extents_mm):
         c = {0: [-h[0], u*h[1], v*h[2]], 1: [h[0], u*h[1], v*h[2]],
              2: [u*h[0], -h[1], v*h[2]], 3: [u*h[0], h[1], v*h[2]],
              4: [u*h[0], v*h[1], -h[2]], 5: [u*h[0], v*h[1], h[2]]}
-        return np.array(c[face], dtype=np.float32)
+        return np.array(c[face], dtype=np.float32), face
 
-    a = _pt()
-    b = _pt()
-    while np.linalg.norm(b - a) < h.min():   # reject too-short chords
-        b = _pt()
+    a, fa = _pt()
+    b, fb = _pt()
+    # Reject too-short chords AND same-face pairs: a chord with both endpoints on
+    # the same face lies entirely in that wall plane (degenerate, ~10% of naive
+    # samples) — it would be fully masked / unphysical, so resample.
+    while np.linalg.norm(b - a) < h.min() or fb == fa:
+        b, fb = _pt()
     return a, b
 
 
@@ -639,9 +642,12 @@ def mask_outside_volume(positions_mm, de, half_extents_mm):
         dE with out-of-volume segments zeroed.
     """
     hx, hy, hz = half_extents_mm
+    # Use <= (with a tiny tolerance): cosmic entrance/exit points sit EXACTLY on
+    # a face (|coord| == half-extent), and strict < would drop the near-anode
+    # entrance segment of every chord (the high-field region recovery most needs).
     in_volume = (
-        (jnp.abs(positions_mm[:, 0]) < hx) &
-        (jnp.abs(positions_mm[:, 1]) < hy) &
-        (jnp.abs(positions_mm[:, 2]) < hz)
+        (jnp.abs(positions_mm[:, 0]) <= hx + 1e-3) &
+        (jnp.abs(positions_mm[:, 1]) <= hy + 1e-3) &
+        (jnp.abs(positions_mm[:, 2]) <= hz + 1e-3)
     )
     return jnp.where(in_volume, de, 0.0)

@@ -49,17 +49,19 @@ def main():
     sim, _, _, _ = build(32, truth_scale=1.0, n_tracks=1, truth_npz=args.truth)
     logT, dedx = load_dedx_table_jax(); rng = np.random.RandomState(0)
     P, D = [], []
+    S = []
     for _ in range(args.n_muons):
         a, b = sample_surface_endpoints(rng, HALF)
         a[0] = np.clip(a[0], -200, 0); b[0] = np.clip(b[0], -200, 0)
         p, d, _, _, s = generate_cosmic_chord(jnp.array(a), jnp.array(b), 4000., 32,
                                               logT, dedx, half_extents_mm=HALF)
-        P.append(p); D.append(d)
+        P.append(p); D.append(d); S.append(float(s))
     pos_all, de_all = jnp.stack(P), jnp.stack(D)
     truth = sim._default_sim_params.sce_models
 
     print(f"recovering full field from M={args.n_muons} muons, {args.steps} steps ...")
-    hist, learned = recover_accum(sim, pos_all, de_all, 12.0, steps=args.steps, lr=3e-4)
+    hist, learned = recover_accum(sim, pos_all, de_all, np.asarray(S, np.float32),
+                                  steps=args.steps, lr=3e-4)
     print(f"  |E| MAE init {hist['emae'][0]:.2f} → {hist['emae'][-1]:.2f} V/cm")
 
     xs, ys, Et, dxt = field_slice(sim, truth)

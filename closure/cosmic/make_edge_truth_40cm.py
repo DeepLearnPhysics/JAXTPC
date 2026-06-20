@@ -40,7 +40,9 @@ def curl_rms(Ex, Ey, Ez, dx, dy, dz):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--Q', type=float, default=3e-8)
-    ap.add_argument('--ring-amp', type=float, default=1500.0, help='field-cage defect (V)')
+    ap.add_argument('--ring-amp', type=float, default=150.0,
+                    help='field-cage defect (V). Keep modest: large amps drive '
+                         'Ex<0 (field reversal) → invalid drift field.')
     ap.add_argument('--n-rings', type=int, default=3)
     ap.add_argument('--omega', type=float, default=3.0)
     ap.add_argument('--epochs', type=int, default=3000)
@@ -76,8 +78,16 @@ def main():
     bulk = Emag[5:-5, 8:-8, 8:-8]; wall = Emag[:, :3, :]
     print(f"  |E| range [{Emag.min():.1f}, {Emag.max():.1f}] V/cm  "
           f"(bulk spread ±{np.abs(bulk-E0).max():.0f}, near-wall ±{np.abs(wall-E0).max():.0f})")
-    print(f"  TRUTH curl (validity check): {cr:.4f} V/cm/cm  "
-          f"-> {'VALID (curl≈0)' if cr < 0.05*np.abs(Emag-E0).max()/Lx*10 else 'check'}")
+    # Validity needs BOTH curl≈0 AND Ex>0 everywhere: a reversed drift field
+    # (Ex<0) breaks the ray-trace (electrons never reach the anode) and the
+    # v(Ex) inversion, even though it is curl-free. Curl-free alone is NOT enough.
+    ex_ok = Ex.min() > 0
+    print(f"  TRUTH curl: {cr:.4f} V/cm/cm,  Ex range [{Ex.min():.0f}, {Ex.max():.0f}] V/cm "
+          f"-> {'VALID' if (cr < 1e-2 and ex_ok) else 'INVALID'}")
+    if not ex_ok:
+        raise ValueError(
+            f"Field-cage ripple {args.ring_amp:.0f} V reverses the drift field "
+            f"(Ex_min={Ex.min():.0f} < 0). Lower --ring-amp for a valid field.")
 
     # ray-trace -> distortions
     ox = np.linspace(0, Lx, 15); oy = np.linspace(0, Ly, 15); oz = np.linspace(0, Lz, 15)

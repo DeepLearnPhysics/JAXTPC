@@ -54,16 +54,18 @@ def test_cosmic_outside_is_zeroed_value_and_gradient():
     n = 384
     # generate WITHOUT masking to find the outside set, then WITH masking
     pos, de_raw, *_ = generate_cosmic_chord(entr, ex * 1.5, 4000.0, n, logT, dedx)
-    inside = (jnp.abs(pos[:, 0]) < HALF[0]) & (jnp.abs(pos[:, 1]) < HALF[1]) & \
-             (jnp.abs(pos[:, 2]) < HALF[2])
-    assert int((~inside).sum()) > 0                       # some really are outside
+    # "outside" = strictly beyond a wall (mask keeps on-face points via <=);
+    # those truly-outside segments must contribute zero value and gradient.
+    outside = (jnp.abs(pos[:, 0]) > HALF[0] + 0.1) | (jnp.abs(pos[:, 1]) > HALF[1] + 0.1) | \
+              (jnp.abs(pos[:, 2]) > HALF[2] + 0.1)
+    assert int(outside.sum()) > 0                          # some really are outside
     de_masked = mask_outside_volume(pos, de_raw, HALF)
-    assert float(de_masked[~inside].sum()) == 0.0
+    assert float(de_masked[outside].sum()) == 0.0
 
     def loss(d):
         return jnp.sum(mask_outside_volume(pos, d, HALF) ** 2)
     g = jax.grad(loss)(de_raw)
-    assert float(jnp.abs(g[~inside]).sum()) == 0.0        # zero gradient outside
+    assert float(jnp.abs(g[outside]).sum()) == 0.0        # zero gradient outside
 
 
 def test_sample_surface_endpoints_on_faces():

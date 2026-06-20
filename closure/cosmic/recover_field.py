@@ -224,17 +224,24 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
         return {**FIXED, 'weights': par['weights'], 'biases': par['biases']}
 
     M = pos_all.shape[0]
+    # dx per muon: each cosmic chord has its own segment length (they differ by
+    # up to ~1.6x), so the recombination dE/dx must use the per-muon step, not a
+    # single mean (which mis-scales charge for most tracks). Accept scalar or (M,).
+    step_arr = jnp.broadcast_to(jnp.asarray(step, jnp.float32), (M,))
 
-    def fwd1(stk, p, d):
-        return sim.forward_segments(base._replace(sce_models=stk), p, d, dx=step)
+    def fwd1(stk, p, d, s):
+        return sim.forward_segments(base._replace(sce_models=stk), p, d, dx=s)
 
     # truth image per muon (vmap over the muon axis)
-    obs = jax.vmap(lambda p, d: fwd1(truth, p, d))(pos_all, de_all)
+    obs = jax.vmap(lambda p, d, s: fwd1(truth, p, d, s))(pos_all, de_all, step_arr)
     # Intrinsic noise is added ONCE to the OBSERVED data (the real readout),
     # independently per event and per readout bin — NOT to the model forward
     # used during optimisation (that predicts the noiseless mean; the loss
-    # accounts for noise). With per-event noise, accumulating M events averages
-    # the noise ~1/√M, so more muons genuinely help (statistical calibration).
+    # accounts for noise). Each event is an independent noisy constraint on the
+    # static field, so more events should reduce the field-estimate variance —
+    # BUT plain SGD on the Sobolev loss overfits the noise instead (the loss is
+    # dominated by the noise over the mostly-empty image). Realistic noise
+    # handling needs whitening / held-out early stopping, not just more events.
     if noise_sigma > 0:
         knz = jax.random.PRNGKey(noise_seed)
         obs = tuple(o + noise_sigma * jax.random.normal(jax.random.fold_in(knz, pl), o.shape)
@@ -272,8 +279,8 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
         return jnp.mean(cx ** 2 + cy ** 2 + cz ** 2)
 
     def loss(par, idx):
-        P, Dd = pos_all[idx], de_all[idx]
-        sg = jax.vmap(lambda p, d: fwd1(full(par), p, d))(P, Dd)
+        P, Dd, Ss = pos_all[idx], de_all[idx], step_arr[idx]
+        sg = jax.vmap(lambda p, d, s: fwd1(full(par), p, d, s))(P, Dd, Ss)
         tot = 0.0
         for pl in range(nplanes):
             per = jax.vmap(lambda a, b: sobolev_loss_single(a, b, spec[pl]))(
@@ -325,10 +332,15 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
 
 
 def emag_grid(sim, stacked):
-    """|E| (V/cm) of a field on a probe grid, for a recovery metric."""
+    """|E| (V/cm) of a field on a probe grid, for a recovery metric.
+
+    The grid spans nearly the full volume (x in (0.5,19.5), y,z in (-19.5,19.5))
+    so edge structure is not under-weighted — important for edge fields, where a
+    truncated ±18 grid would optimistically miss the near-wall region.
+    """
     sb = sim._sce_siren
-    gx, gy, gz = np.meshgrid(np.linspace(1, 19, 8), np.linspace(-18, 18, 8),
-                             np.linspace(-18, 18, 8), indexing='ij')
+    gx, gy, gz = np.meshgrid(np.linspace(0.5, 19.5, 10), np.linspace(-19.5, 19.5, 10),
+                             np.linspace(-19.5, 19.5, 10), indexing='ij')
     grid = jnp.array(np.stack([gx.ravel(), gy.ravel(), gz.ravel()], -1), jnp.float32)
     p0 = jax.tree.map(lambda x: x[0], stacked)
     E = S.recover_efield({'weights': p0['weights'], 'biases': p0['biases']}, grid,

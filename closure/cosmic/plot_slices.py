@@ -56,16 +56,16 @@ def main():
 
     sim, _, _, _ = build(32, 1.0, n_tracks=1, truth_npz=args.truth)
     logT, dedx = load_dedx_table_jax(); rng = np.random.RandomState(0)
-    P, D = [], []
+    P, D, S = [], [], []
     for _ in range(args.n_muons):
         a, b = sample_surface_endpoints(rng, HALF)
         a[0] = np.clip(a[0], -200, 0); b[0] = np.clip(b[0], -200, 0)
         p, d, _, _, s = generate_cosmic_chord(jnp.array(a), jnp.array(b), 4000., 32,
                                               logT, dedx, half_extents_mm=HALF)
-        P.append(p); D.append(d)
+        P.append(p); D.append(d); S.append(float(s))
     truth = sim._default_sim_params.sce_models
     print(f"recovering M={args.n_muons}, {args.steps} steps ...")
-    hist, learned = recover_accum(sim, jnp.stack(P), jnp.stack(D), 12.0,
+    hist, learned = recover_accum(sim, jnp.stack(P), jnp.stack(D), np.asarray(S, np.float32),
                                   steps=args.steps, lr=3e-4, record_every=200)
     print(f"  |E| MAE → {hist['emae'][-1]:.2f} V/cm")
 
