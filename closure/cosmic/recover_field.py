@@ -202,7 +202,8 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
                   init_noise=0.5, init_out_scale=1.0, seed=7, record_every=1,
                   curl_weight=0.0, curl_grid_n=10,
                   noise_sigma=0.0, noise_seed=0, zero_suppress=0.0, val_frac=0.0,
-                  real_noise=False, weight_decay=0.0, whitened=False):
+                  real_noise=False, weight_decay=0.0, whitened=False,
+                  extra_metric=None):
     """Per-EVENT accumulation: each muon is its own forward/image; the loss
     averages per-event Sobolev losses over a mini-batch of muons each step.
 
@@ -413,9 +414,13 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
 
     B = min(batch, n_train)
     rng = np.random.RandomState(0)
+    # extra_metric(stacked_field) -> float: an INDEPENDENT score recorded each
+    # step (e.g. recovered |E| vs the first-principles field, not the SIREN).
     hist = {'loss': [float(loss(par, jnp.arange(B)))], 'emae': [e_mae(par)],
             'curl': [curl_rms(par)],
             'val': [float(val_loss(par)) if n_val else 0.0]}
+    if extra_metric is not None:
+        hist['emae_real'] = [float(extra_metric(full(par)))]
     for i in range(steps):
         idx = jnp.asarray(rng.choice(n_train, size=B, replace=False))  # train only
         par, st, l = stepf(par, st, idx)
@@ -423,6 +428,8 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
             hist['loss'].append(float(l)); hist['emae'].append(e_mae(par))
             hist['curl'].append(curl_rms(par))
             hist['val'].append(float(val_loss(par)) if n_val else 0.0)
+            if extra_metric is not None:
+                hist['emae_real'].append(float(extra_metric(full(par))))
     return hist, full(par)
 
 
