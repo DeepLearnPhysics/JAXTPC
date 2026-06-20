@@ -369,9 +369,15 @@ def estimate_keys_for_event(pstep_data, sim_config, element_tables,
 
         if vol_geom.readout_type == 'pixel':
             origins = np.array(vol_geom.pixel_origins_cm, dtype=np.float32)
+            # vol_pos_cm is GLOBAL here, but pixel_origins_cm is in the volume-LOCAL
+            # frame (= -half_extent), matching the sim. Localize the positions
+            # (subtract yz_center) before indexing, exactly like the wire branch
+            # below. Without this, off-center pixel volumes mark deposits
+            # out-of-bounds and undercount max_keys.
+            yz_center = np.array(vol_geom.yz_center_cm, dtype=np.float32)
             pitch = vol_geom.pixel_pitch_cm
-            py_idx = np.floor((vol_pos_cm[:, 1] - origins[0]) / pitch).astype(np.int32)
-            pz_idx = np.floor((vol_pos_cm[:, 2] - origins[1]) / pitch).astype(np.int32)
+            py_idx = np.floor((vol_pos_cm[:, 1] - yz_center[0] - origins[0]) / pitch).astype(np.int32)
+            pz_idx = np.floor((vol_pos_cm[:, 2] - yz_center[1] - origins[1]) / pitch).astype(np.int32)
             num_py, num_pz = vol_geom.pixel_shape
             keep &= (py_idx >= 0) & (py_idx < num_py)
             keep &= (pz_idx >= 0) & (pz_idx < num_pz)

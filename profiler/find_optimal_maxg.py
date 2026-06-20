@@ -127,8 +127,14 @@ def _scan(arg):
                     te = _grp_extents(tk_, starts).max()
                     if readout == 'pixel':
                         oy, oz = vg.pixel_origins_cm
-                        py = np.floor((pc[m][:, 1] - oy) / vg.pixel_pitch_cm).astype(np.int64)[order]
-                        pz = np.floor((pc[m][:, 2] - oz) / vg.pixel_pitch_cm).astype(np.int64)[order]
+                        # pixel_origins_cm is volume-LOCAL; localize positions
+                        # (subtract yz_center) to match the sim and the wire
+                        # branch. (Only per-group EXTENTS are used here, which are
+                        # offset-invariant, so this is for consistency — but keep
+                        # it correct.)
+                        cy, cz = vg.yz_center_cm
+                        py = np.floor((pc[m][:, 1] - cy - oy) / vg.pixel_pitch_cm).astype(np.int64)[order]
+                        pz = np.floor((pc[m][:, 2] - cz - oz) / vg.pixel_pitch_cm).astype(np.int64)[order]
                         ext_list.append([_grp_extents(py, starts).max(),
                                          _grp_extents(pz, starts).max(), te])
                     else:

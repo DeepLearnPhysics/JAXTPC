@@ -37,7 +37,7 @@ class TestNoiseGeneration:
         num_time_ticks = 500
         wire_length_m = 3.0
 
-        spectrum = _get_noise_spectrum_shape(num_time_ticks, emp_freqs, emp_shape)
+        spectrum = _get_noise_spectrum_shape(num_time_ticks, emp_freqs, emp_shape, 2e6)
         series_rms = np.full(num_wires, noise_y + noise_z * wire_length_m, dtype=np.float32)
         target_rms = np.sqrt(noise_x**2 + (noise_y + noise_z * wire_length_m)**2)
 
@@ -114,7 +114,7 @@ class TestNoiseGeneration:
         noise_x, _, _, emp_freqs, emp_shape = noise_params
         num_wires = 50
         num_time_ticks = 500
-        spectrum = jnp.array(_get_noise_spectrum_shape(num_time_ticks, emp_freqs, emp_shape))
+        spectrum = jnp.array(_get_noise_spectrum_shape(num_time_ticks, emp_freqs, emp_shape, 2e6))
         series_rms = jnp.zeros(num_wires)
 
         noise = _generate_noise_for_plane(

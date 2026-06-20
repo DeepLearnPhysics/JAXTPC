@@ -55,7 +55,8 @@ def load_noise_params(noise_spectrum_path):
     )
 
 
-def _get_noise_spectrum_shape(num_time_ticks, empirical_freqs_hz, empirical_shape):
+def _get_noise_spectrum_shape(num_time_ticks, empirical_freqs_hz, empirical_shape,
+                              sampling_rate_hz):
     """
     Interpolate empirical noise spectrum to FFT resolution.
 
@@ -67,6 +68,10 @@ def _get_noise_spectrum_shape(num_time_ticks, empirical_freqs_hz, empirical_shap
         Empirical frequency bins from noise spectrum file.
     empirical_shape : np.ndarray
         Empirical noise spectral shape from noise spectrum file.
+    sampling_rate_hz : float
+        Readout sampling rate in Hz (= 1e6 / time_step_us). Sets the FFT
+        frequency axis; must match the detector's tick spacing rather than a
+        hardcoded 2 MHz, so the empirical spectrum maps to the right frequencies.
 
     Returns
     -------
@@ -74,8 +79,7 @@ def _get_noise_spectrum_shape(num_time_ticks, empirical_freqs_hz, empirical_shap
         Normalized series noise amplitude spectrum (unit energy).
     """
     num_freq_bins = num_time_ticks // 2 + 1
-    sampling_rate = 2e6  # 2 MHz sampling (0.5 us per tick)
-    freqs = np.fft.rfftfreq(num_time_ticks, d=1 / sampling_rate)
+    freqs = np.fft.rfftfreq(num_time_ticks, d=1 / sampling_rate_hz)
 
     spectrum = np.interp(freqs, empirical_freqs_hz, empirical_shape)
 
@@ -257,7 +261,8 @@ def add_noise(response_signals, config, threshold_enc=0, key=None, *,
         noise_x, noise_y, noise_z, emp_freqs, emp_shape = load_noise_params(
             config.noise_spectrum_path)
         spectrum_jax = jnp.array(
-            _get_noise_spectrum_shape(num_time_ticks, emp_freqs, emp_shape))
+            _get_noise_spectrum_shape(num_time_ticks, emp_freqs, emp_shape,
+                                      1e6 / config.time_step_us))
 
         for (vol_idx, plane_idx), signal in list(noisy_signals.items()):
             num_wires = config.volumes[vol_idx].num_wires[plane_idx]
@@ -317,7 +322,8 @@ def generate_noise(config, key=None):
 
     num_time_ticks = config.num_time_steps
 
-    spectrum_shape = _get_noise_spectrum_shape(num_time_ticks, emp_freqs, emp_shape)
+    spectrum_shape = _get_noise_spectrum_shape(num_time_ticks, emp_freqs, emp_shape,
+                                               1e6 / config.time_step_us)
     spectrum_jax = jnp.array(spectrum_shape)
 
     noise_dict = {}
@@ -388,7 +394,8 @@ def generate_noise_bucketed(config, bucketed_signals, key=None):
         bucket_series_rms = noise_y + noise_z * all_lengths[wire_indices]
         bucket_series_rms = bucket_series_rms.astype(jnp.float32)
 
-        spectrum_shape = _get_noise_spectrum_shape(B2_int, emp_freqs, emp_shape)
+        spectrum_shape = _get_noise_spectrum_shape(B2_int, emp_freqs, emp_shape,
+                                                   1e6 / config.time_step_us)
         spectrum_jax = jnp.array(spectrum_shape)
 
         key, subkey = jax.random.split(key)
@@ -434,7 +441,8 @@ def create_noise_fn_for_volume(cfg, vol_geom, response_kernels, e_chunk=None):
         cfg.noise_spectrum_path)
 
     spectrum_dense = jnp.array(
-        _get_noise_spectrum_shape(cfg.num_time_steps, emp_freqs, emp_shape))
+        _get_noise_spectrum_shape(cfg.num_time_steps, emp_freqs, emp_shape,
+                                  1e6 / cfg.time_step_us))
     plane_names = cfg.plane_names[vol_geom.volume_id]
 
     wire_lengths_jax = [
@@ -466,7 +474,8 @@ def create_noise_fn_for_volume(cfg, vol_geom, response_kernels, e_chunk=None):
             B2 = 2 * response_kernels[pt].kernel_height
             bucket_dims[pt] = (B1, B2)
             spectrum_bucketed[pt] = jnp.array(
-                _get_noise_spectrum_shape(B2, emp_freqs, emp_shape))
+                _get_noise_spectrum_shape(B2, emp_freqs, emp_shape,
+                                          1e6 / cfg.time_step_us))
 
         def make_fn(p):
             pt = plane_names[p]
