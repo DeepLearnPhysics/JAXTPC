@@ -31,6 +31,8 @@ def main():
     ap.add_argument('--iters', type=int, default=30)
     ap.add_argument('--ep-prior', type=float, default=0.03)
     ap.add_argument('--fix-tracks', action='store_true', help='do not update tracks (pure field-in-subspace test)')
+    ap.add_argument('--subspace', choices=['random', 'svd'], default='random',
+                    help='svd = top-K right singular vecs of per-track field gradients (data-informed)')
     ap.add_argument('--truth', default=os.path.join(HERE, 'truth_40cm.npz'))
     ap.add_argument('--out', default=os.path.join(HERE, 'schur.json'))
     args = ap.parse_args()
@@ -45,11 +47,12 @@ def main():
     # cold init: truth + noise, expressed as a base weight set; a perturbs along D
     w_init = [jnp.asarray(w + 0.5 * np.abs(w) * np.random.RandomState(s).normal(size=w.shape)) for s, w in enumerate(w0)]
 
-    def field(a):
-        dw = a @ D; ws, off = [], 0
+    def field_w(dw):                 # full P-dim weight perturbation around w_init
+        ws, off = [], 0
         for sh, sz, w in zip(shapes, sizes, w_init):
             ws.append((w + dw[off:off + sz].reshape(sh))[None]); off += sz
         return {**FIXED, 'weights': ws, 'biases': b0}
+    def field(a): return field_w(a @ D)
     def fwd(stk, pos, de): return sim.forward_segments(base._replace(sce_models=stk), pos, de, dx=STEP)
 
     logT, dedx = load_dedx_table_jax(); rng = np.random.RandomState(0); jr = np.random.RandomState(123)
@@ -84,6 +87,27 @@ def main():
         keys = jax.random.split(jax.random.fold_in(knz, pl), M)
         obs.append(obs_planes[pl] + jax.vmap(lambda k: _generate_noise_for_plane(k, obs_planes[pl].shape[1], nt, spn, ny + nz * L, float(nx)))(keys))
     obs_flat = jnp.stack([jnp.concatenate([obs[pl][i].reshape(-1) for pl in range(len(obs))]) for i in range(M)])
+
+    if args.subspace == 'svd':
+        # data-informed subspace: top-K right singular vectors of per-track field
+        # gradients J_w^T r (one VJP/track) at the init -- the directions the data
+        # actually pushes the field, instead of random weight directions.
+        def model_w(dw, th, d):
+            pos = positions(th)
+            sg = fwd(field_w(dw), pos, mask_outside_volume(pos, jnp.full(NSEG, de_mip), HALF))
+            return jnp.concatenate([s.reshape(-1) for s in sg])
+        def gradw(th, d, of):
+            r0, vjpf = jax.vjp(lambda dw: model_w(dw, th, d), jnp.zeros(P))
+            return vjpf(r0 - of)[0]
+        gw_b = jax.jit(jax.vmap(gradw, in_axes=(0, 0, 0)))
+        G = []
+        for i0 in range(0, M, 16):
+            sl = slice(i0, min(i0 + 16, M))
+            G.append(np.asarray(gw_b(TH_reco[sl], De[sl], obs_flat[sl])))
+        G = np.concatenate(G, 0)                       # (M, P)
+        _, sv, Vt = np.linalg.svd(G, full_matrices=False)
+        D = jnp.asarray(Vt[:Kf])                       # (Kf, P) data-informed
+        print(f"  [svd subspace] singular spectrum top/mid/tail: {sv[0]:.2e} {sv[Kf//2]:.2e} {sv[min(Kf,len(sv)-1)]:.2e}")
 
     # per-track GN blocks, computed ON GPU (return small K/6-sized blocks, not the
     # huge Jacobians -- so the curvature accumulation batches to large M cheaply).
