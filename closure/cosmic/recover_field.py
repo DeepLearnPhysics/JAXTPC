@@ -253,15 +253,19 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
         # noise covariance is diagonal, so whitening is a per-(wire,freq) reweight.
         from tools.noise import (load_noise_params, _get_noise_spectrum_shape,
                                   _generate_noise_for_plane)
-        cfg = sim.config; epa = float(cfg.electrons_per_adc); nt = cfg.num_time_steps
+        cfg = sim.config; nt = cfg.num_time_steps
         nx, ny, nz, ef, es = load_noise_params(cfg.noise_spectrum_path)
         spectrum = jnp.array(_get_noise_spectrum_shape(nt, ef, es))
-        white = float(nx) * epa
+        # noise RMS per wire in the SIM'S OUTPUT UNITS (ADC). The sim output is
+        # already ADC, and the MicroBooNE params x,y,z are ADC — so add the noise
+        # DIRECTLY, exactly like tools.noise.add_noise. (Earlier this multiplied
+        # by electrons_per_adc, which made the noise 182x too large.)
+        white = float(nx)
         knz = jax.random.PRNGKey(noise_seed); series_list = []; noise_psd = []
         for pl in range(nplanes):
             nw = plane_shapes[pl][0]
             L = jnp.asarray(cfg.volumes[0].wire_lengths_m[pl], jnp.float32)
-            series = (ny + nz * L) * epa                       # (num_wires,) ENC
+            series = (ny + nz * L)                             # (num_wires,) ADC
             series_list.append(series)
             pk = jax.random.split(jax.random.fold_in(knz, 1000 + pl), 256)
             ns = jax.vmap(lambda k: _generate_noise_for_plane(
