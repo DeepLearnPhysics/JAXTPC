@@ -84,13 +84,13 @@ def main():
         obs.append(obs_planes[pl] + jax.vmap(lambda k: _generate_noise_for_plane(k, obs_planes[pl].shape[1], nt, spn, ny + nz * L, float(nx)))(keys))
     obs_flat = jnp.stack([jnp.concatenate([obs[pl][i].reshape(-1) for pl in range(len(obs))]) for i in range(M)])
 
-    # per-track residual + jacobians (J wrt a (S,Kf), J wrt th (S,6))
-    @jax.jit
+    # per-track GN blocks, computed ON GPU (return small K/6-sized blocks, not the
+    # huge Jacobians -- so the curvature accumulation batches to large M cheaply).
     def per_track(a, th, d, of):
-        r = model_flat(a, th, d) - of
-        Ja = jax.jacfwd(lambda aa: model_flat(aa, th, d))(a)
-        Jt = jax.jacfwd(lambda tt: model_flat(a, tt, d))(th)
-        return r, Ja, Jt
+        Ja = jax.jacfwd(lambda aa: model_flat(aa, th, d))(a)     # (S,Kf)
+        Jt = jax.jacfwd(lambda tt: model_flat(a, tt, d))(th)     # (S,6)
+        r = model_flat(a, th, d) - of                            # (S,)
+        return (Ja.T @ Ja, Ja.T @ Jt, Jt.T @ Jt, Ja.T @ r, Jt.T @ r)   # Faa,Fat,Ftt,ga,gt
     pt_batch = jax.jit(jax.vmap(per_track, in_axes=(None, 0, 0, 0)))
 
     def total_loss(a, TH):
@@ -107,22 +107,21 @@ def main():
     a = jnp.zeros(Kf); TH = TH_reco; lam = 1e-1; step = 0.5; tsvd_rel = 1e-2
     hist = [(fmae(a), float(jnp.mean(jnp.abs(TH - TH_true))), total_loss(a, TH))]
     for it in range(args.iters):
-        # accumulate Schur blocks over tracks (small batches for memory)
+        # accumulate Schur blocks over track mini-batches (bounded memory, any M)
         Faa = np.zeros((Kf, Kf)); ga = np.zeros(Kf); S = np.zeros((Kf, Kf)); gs = np.zeros(Kf)
-        Ftt_l, Fat_l, gt_l = [], [], []
+        Ftt_l, Fat_l, gt_l = [None] * M, [None] * M, [None] * M
         for i0 in range(0, M, 4):
             sl = slice(i0, min(i0 + 4, M))
-            r, Ja, Jt = pt_batch(a, TH[sl], De[sl], obs_flat[sl])   # (b,S),(b,S,Kf),(b,S,6)
-            r = np.asarray(r); Ja = np.asarray(Ja); Jt = np.asarray(Jt)
-            for j in range(r.shape[0]):
+            Faa_b, Fat_b, Ftt_b, ga_b, gt_b = pt_batch(a, TH[sl], De[sl], obs_flat[sl])
+            Faa += np.asarray(Faa_b.sum(0)); ga += np.asarray(ga_b.sum(0))
+            Fat_b = np.asarray(Fat_b); Ftt_b = np.asarray(Ftt_b); gt_b = np.asarray(gt_b)
+            for j in range(Fat_b.shape[0]):
                 gi = i0 + j
-                Faa += Ja[j].T @ Ja[j]; ga += Ja[j].T @ r[j]
-                Ftt = Jt[j].T @ Jt[j] + args.ep_prior * np.eye(6)
-                Fat = Ja[j].T @ Jt[j]
-                gt = Jt[j].T @ r[j] + args.ep_prior * (np.asarray(TH[gi]) - np.asarray(TH_reco[gi]))
+                Ftt = Ftt_b[j] + args.ep_prior * np.eye(6)
+                gt = gt_b[j] + args.ep_prior * (np.asarray(TH[gi]) - np.asarray(TH_reco[gi]))
                 Finv = np.linalg.inv(Ftt + lam * np.eye(6))
-                S += -Fat @ Finv @ Fat.T; gs += -Fat @ Finv @ gt
-                Ftt_l.append(Finv); Fat_l.append(Fat); gt_l.append(gt)
+                S += -Fat_b[j] @ Finv @ Fat_b[j].T; gs += -Fat_b[j] @ Finv @ gt
+                Ftt_l[gi] = Finv; Fat_l[gi] = Fat_b[j]; gt_l[gi] = gt
         S = Faa + S; gs = ga + gs
         # Truncated-eigenvalue GN: move the field ONLY in data-constrained directions
         # (eigenvalues of the Schur curvature above a relative threshold). The flat
