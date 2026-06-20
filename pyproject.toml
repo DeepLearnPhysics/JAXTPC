@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jaxtpc"
+version = "0.9.0"
+description = "GPU-accelerated, differentiable liquid-argon TPC detector simulation in JAX"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Omar Alterkait", email = "omar.alterkait@tufts.edu" }]
+# TODO(owner): choose and add a LICENSE file, then set this (e.g. { text = "MIT" }).
+keywords = ["neutrino", "LArTPC", "detector-simulation", "jax", "differentiable"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+# JAX makes frequent breaking API changes; bound it (tested on 0.5.x-0.6.x).
+# For GPU, install JAX per https://docs.jax.dev (e.g. the `gpu` extra below).
+dependencies = [
+    "jax>=0.4,<0.7",
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "h5py",
+    "hdf5plugin",   # read production output (blosc-zstd default codec)
+    "pyyaml",
+    "pillow",       # viewer GIF/MP4 export
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "nbstripout"]
+docs = ["mkdocs-material", "mkdocstrings[python]", "mkdocs-jupyter"]
+gpu = ["jax[cuda12]>=0.4,<0.7"]
+
+[project.scripts]
+jaxtpc-batch = "production.run_batch:main"
+jaxtpc-setup-production = "profiler.setup_production:main"
+jaxtpc-make-labl = "production.make_labl:main"
+jaxtpc-viewer = "viewer.serve_viewer:main"
+jaxtpc-export-gif = "viewer.export_gif:main"
+
+[project.urls]
+Repository = "https://github.com/DeepLearnPhysics/JAXTPC"
+
+# NOTE: this packages the existing repo-root layout (tools/, production/,
+# profiler/, viewer/) — the `src/jaxtpc/` namespace migration is deferred (see
+# docs/PLAN.md). `pip install -e .` (editable) is the supported install today;
+# it keeps the repo on sys.path so the config/ YAMLs and the runtime assets that
+# live outside the package (config/noise_spectrum.npz, config/pixel_response.npz)
+# resolve via their current relative paths. A non-editable wheel needs the asset
+# relocation/declaration described in docs/PLAN.md.
+[tool.setuptools.packages.find]
+include = ["tools*", "production*", "profiler*", "viewer*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+tools = ["responses/*.npz", "data/*"]
+
+# pytest config lives in pytest.ini (single source of truth).

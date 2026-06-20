@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use JAXTPC in your research, please cite it as below."
+title: "JAXTPC: GPU-accelerated, differentiable liquid-argon TPC detector simulation in JAX"
+abstract: >-
+  JAXTPC is a GPU-accelerated physics simulation framework for modeling liquid
+  argon Time Projection Chambers (TPCs) used in neutrino experiments. It
+  simulates the full detector response chain (charge recombination, electron
+  drift with lifetime attenuation, diffusion-convolved wire/pixel response,
+  electronics shaping, noise, and ADC digitization) for arbitrary multi-volume
+  detector geometries with wire or pixel readout, and provides a differentiable
+  forward path for gradient-based optimization and reconstruction.
+type: software
+authors:
+  - family-names: Alterkait
+    given-names: Omar
+    email: omar.alterkait@tufts.edu
+    affiliation: Tufts University
+repository-code: "https://github.com/DeepLearnPhysics/JAXTPC"
+version: "0.9.0"
+keywords:
+  - neutrino
+  - LArTPC
+  - detector simulation
+  - JAX
+  - differentiable simulation
+# TODO(owner): add `license:` once chosen, and `doi:` / `date-released:` on release.
