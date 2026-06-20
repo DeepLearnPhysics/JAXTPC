@@ -498,6 +498,92 @@ def generate_muon_segments_trig(
     return positions, de
 
 
+def generate_cosmic_chord(entrance_mm, exit_mm, kinetic_energy_mev, n_segments,
+                          log_T_table, dedx_table, half_extents_mm=None,
+                          relax_steps=2.0):
+    """Cosmic-ray-like muon as a straight chord between KNOWN entrance and exit.
+
+    A cosmic muon crosses the detector in a straight line from an entrance point
+    to an exit point (both typically on detector surfaces). At cosmic energies
+    (GeV-scale, minimum-ionising) the CSDA range ≫ detector, so the muon does
+    not stop inside and dE/dx is ~constant along the chord — exactly the regime
+    that probes the drift field uniformly.
+
+    Segments are placed to span entrance→exit (``step = |exit−entrance| /
+    n_segments``), so for a convex detector every segment lies inside. When
+    ``half_extents_mm`` is given, ``mask_outside_volume`` additionally zeros dE
+    for any segment outside the walls (value AND gradient) — the single,
+    explicit "outside is zeroed" guard. This matters because the forward path's
+    own volume gate masks only the x (drift) coordinate.
+
+    Fully differentiable w.r.t. ``entrance``, ``exit``, and energy (useful if the
+    track endpoints are later treated as unknowns). For *known* cosmics they are
+    fixed inputs; note ``theta = arccos(chord_z/|chord|)`` has a singular
+    gradient when the chord is exactly along ±z, so avoid optimising endpoints
+    through a purely vertical track.
+
+    Parameters
+    ----------
+    entrance_mm, exit_mm : (3,) arrays   Track endpoints in GLOBAL mm.
+    kinetic_energy_mev : scalar          Muon KE (MeV); use GeV-scale for cosmics.
+    n_segments : int                     Number of segments (static for JIT).
+    log_T_table, dedx_table : jnp arrays From ``load_dedx_table_jax()``.
+    half_extents_mm : tuple or None      If given, zero dE outside |pos|<half.
+    relax_steps : float                  CSDA stopping softplus width.
+
+    Returns
+    -------
+    positions_mm : (n_segments, 3)   Segment centres in GLOBAL mm.
+    de : (n_segments,)               Energy deposit per segment (MeV), masked.
+    theta, phi : scalars             Chord direction (rad).
+    step_mm : scalar                 Segment length (mm).
+    """
+    entrance = jnp.asarray(entrance_mm, dtype=jnp.float32)
+    exit_ = jnp.asarray(exit_mm, dtype=jnp.float32)
+    chord = exit_ - entrance
+    L = jnp.linalg.norm(chord)
+    theta = jnp.arccos(jnp.clip(chord[2] / L, -1.0, 1.0))
+    phi = jnp.arctan2(chord[1], chord[0])
+    step_mm = L / n_segments
+    positions, de = generate_muon_segments(
+        kinetic_energy_mev, entrance, theta, phi, step_mm, n_segments,
+        log_T_table, dedx_table, relax_steps)
+    if half_extents_mm is not None:
+        de = mask_outside_volume(positions, de, half_extents_mm)
+    return positions, de, theta, phi, step_mm
+
+
+def sample_surface_endpoints(rng, half_extents_mm):
+    """Sample one entrance/exit pair on the detector surface (area-weighted).
+
+    Mirrors the SIREN training's surface-to-surface line sampling: pick two
+    points on the box faces with probability ∝ face area, giving an isotropic-ish
+    set of crossing cosmics. ``rng`` is a numpy RandomState (host-side sampling).
+
+    Returns ``(entrance_mm, exit_mm)`` as float32 arrays in GLOBAL mm.
+    """
+    h = np.asarray(half_extents_mm, dtype=np.float64)
+    sizes = 2.0 * h
+    areas = np.array([sizes[1]*sizes[2], sizes[1]*sizes[2],
+                      sizes[0]*sizes[2], sizes[0]*sizes[2],
+                      sizes[0]*sizes[1], sizes[0]*sizes[1]])
+    probs = areas / areas.sum()
+
+    def _pt():
+        face = rng.choice(6, p=probs)
+        u, v = rng.uniform(-1, 1), rng.uniform(-1, 1)
+        c = {0: [-h[0], u*h[1], v*h[2]], 1: [h[0], u*h[1], v*h[2]],
+             2: [u*h[0], -h[1], v*h[2]], 3: [u*h[0], h[1], v*h[2]],
+             4: [u*h[0], v*h[1], -h[2]], 5: [u*h[0], v*h[1], h[2]]}
+        return np.array(c[face], dtype=np.float32)
+
+    a = _pt()
+    b = _pt()
+    while np.linalg.norm(b - a) < h.min():   # reject too-short chords
+        b = _pt()
+    return a, b
+
+
 def build_muon_forward(simulator, n_segments, step_size_mm):
     """Build a forward closure for muon optimization.
 
