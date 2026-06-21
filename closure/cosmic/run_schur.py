@@ -129,8 +129,26 @@ def main():
     Et = emag_grid(sim, truth)
     def fmae(a): return float(jnp.mean(jnp.abs(emag_grid(sim, field(a)) - Et)))
 
+    # Delta-space metric: the data integrates Delta along tracks; |E| ~ d(Delta)/dx.
+    # Report Delta-MAE alongside |E|-MAE to see if a "floor" is a derivative artifact.
+    from tools.sce_siren import siren_delta
+    _sb = sim._sce_siren
+    _gx, _gy, _gz = np.meshgrid(np.linspace(0.5, 19.5, 10), np.linspace(-19.5, 19.5, 10),
+                                np.linspace(-19.5, 19.5, 10), indexing='ij')
+    _gd = jnp.array(np.stack([_gx.ravel(), _gy.ravel(), _gz.ravel()], -1), jnp.float32)
+    _tp0 = jax.tree.map(lambda x: x[0], truth)
+    _Dt = siren_delta({'weights': _tp0['weights'], 'biases': _tp0['biases']}, _gd,
+                      _tp0['norm_offsets'], _tp0['norm_scales'], _sb['omega_0'])
+    _Dtmag = float(jnp.mean(jnp.abs(_Dt)))
+    def dmae(a):
+        p0 = jax.tree.map(lambda x: x[0], field(a))
+        Dr = siren_delta({'weights': p0['weights'], 'biases': p0['biases']}, _gd,
+                         p0['norm_offsets'], p0['norm_scales'], _sb['omega_0'])
+        return float(jnp.mean(jnp.abs(Dr - _Dt)))
+    print(f"  [Delta-space] truth |Delta| mean = {_Dtmag*1e4:.1f} um;  init Delta-MAE = {dmae(jnp.zeros(Kf))*1e4:.1f} um")
+
     a = jnp.zeros(Kf); TH = TH_reco; lam = 1e-1; step = 0.5; tsvd_rel = 1e-2
-    hist = [(fmae(a), float(jnp.mean(jnp.abs(TH - TH_true))), total_loss(a, TH))]
+    hist = [(fmae(a), float(jnp.mean(jnp.abs(TH - TH_true))), total_loss(a, TH), dmae(a))]
     for it in range(args.iters):
         # accumulate Schur blocks over track mini-batches (bounded memory, any M)
         Faa = np.zeros((Kf, Kf)); ga = np.zeros(Kf); S = np.zeros((Kf, Kf)); gs = np.zeros(Kf)
@@ -165,10 +183,12 @@ def main():
             a, TH = a_new, TH_new; step = min(step * 1.2, 1.0)
         else:
             step = max(step * 0.5, 0.05)
-        hist.append((fmae(a), float(jnp.mean(jnp.abs(TH - TH_true))), total_loss(a, TH)))
-        print(f"  iter {it+1}: field_mae={hist[-1][0]:.2f}  track_err={hist[-1][1]:.2f}mm  L={hist[-1][2]:.3f}  rank={int(keep.sum())} step={step:.2f}")
+        dm = dmae(a)
+        hist.append((fmae(a), float(jnp.mean(jnp.abs(TH - TH_true))), total_loss(a, TH), dm))
+        print(f"  iter {it+1}: |E|_mae={hist[-1][0]:.2f}  Delta_mae={dm*1e4:.2f}um ({100*dm/_Dtmag:.1f}%truthDelta)  track_err={hist[-1][1]:.2f}mm  rank={int(keep.sum())}")
     res = dict(n_muons=M, k_field=Kf, ep_sigma=args.ep_sigma, field_mae=[h[0] for h in hist],
-               track_err=[h[1] for h in hist], loss=[h[2] for h in hist])
+               track_err=[h[1] for h in hist], loss=[h[2] for h in hist], delta_mae_um=[h[3] * 1e4 for h in hist],
+               truth_delta_um=_Dtmag * 1e4)
     json.dump(res, open(args.out, 'w'))
     print(f"[SCHUR M={M} K={Kf}] field_mae {hist[0][0]:.1f}->{hist[-1][0]:.2f}  track_err {hist[0][1]:.1f}->{hist[-1][1]:.2f}mm")
 

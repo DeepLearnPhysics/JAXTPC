@@ -86,6 +86,20 @@ def main():
     def Lfull(fp, TH): return float(jax.jit(lambda f, T: data_loss(f, T, allidx))(fp, TH))
     Et = emag_grid(sim, truth)
     def fmae(fp): return float(jnp.mean(jnp.abs(emag_grid(sim, full(fp)) - Et)))
+    # Delta-space metric (what the data integrates; |E| is its x-derivative)
+    from tools.sce_siren import siren_delta
+    _sb = sim._sce_siren
+    _gx, _gy, _gz = np.meshgrid(np.linspace(0.5, 19.5, 10), np.linspace(-19.5, 19.5, 10),
+                                np.linspace(-19.5, 19.5, 10), indexing='ij')
+    _gd = jnp.array(np.stack([_gx.ravel(), _gy.ravel(), _gz.ravel()], -1), jnp.float32)
+    _tp0 = jax.tree.map(lambda x: x[0], truth)
+    _Dt = siren_delta({'weights': _tp0['weights'], 'biases': _tp0['biases']}, _gd,
+                      _tp0['norm_offsets'], _tp0['norm_scales'], _sb['omega_0'])
+    _Dtmag = float(jnp.mean(jnp.abs(_Dt)))
+    def dmae(fp):
+        Dr = siren_delta({'weights': fp['weights'], 'biases': fp['biases']}, _gd,
+                         _tp0['norm_offsets'], _tp0['norm_scales'], _sb['omega_0'])
+        return float(jnp.mean(jnp.abs(Dr - _Dt)))
 
     # --- landscape reference points (data loss, field mae) ---
     pts = {'truth+TRUEtracks': (Lfull(fp_truth, TH_true), 0.0),
@@ -103,10 +117,10 @@ def main():
             if fit_tracks:
                 ut, se = oe.update({'TH': g[1]}, se, {'TH': TH}); TH = optax.apply_updates({'TH': TH}, ut)['TH']
             return fp, TH, sf, se
-        rng2 = np.random.RandomState(0); B = min(16, M); traj = [(fmae(fp), Lfull(fp, TH))]
+        rng2 = np.random.RandomState(0); B = min(16, M); traj = [(fmae(fp), Lfull(fp, TH), dmae(fp))]
         for i in range(args.steps):
             fp, TH, sf, se = step(fp, TH, sf, se, jnp.asarray(rng2.choice(M, B, replace=False)))
-            if (i + 1) % 1000 == 0: traj.append((fmae(fp), Lfull(fp, TH)))
+            if (i + 1) % 1000 == 0: traj.append((fmae(fp), Lfull(fp, TH), dmae(fp)))
         return fp, TH, traj
 
     fp_init = {'weights': [w + 0.5 * jnp.abs(w) * jax.random.normal(jax.random.PRNGKey(int(s)), w.shape)
@@ -123,10 +137,14 @@ def main():
                fieldonly=dict(mae=traj_fonly[-1][0], L=traj_fonly[-1][1], traj=traj_fonly))
     json.dump(res, open(args.out, 'w'))
     print(f"DATA-LOSS reference:  truth+true={res['L_truth_true']:.4f}   truth+reco={res['L_truth_reco']:.4f}")
-    print(f"cold-start joint:   mae={res['cold']['mae']:.2f}  L={res['cold']['L']:.4f}")
-    print(f"truth-init joint:   mae={res['truthinit']['mae']:.2f}  L={res['truthinit']['L']:.4f}   (stays? -> optimizer; drifts? -> landscape)")
-    print(f"truth-init FIELDONLY (reco tracks fixed): mae={res['fieldonly']['mae']:.2f}  L={res['fieldonly']['L']:.4f}   (drift = bias from wrong tracks)")
-    print(f"-> if L_cold > L_truth+true: optimizer stuck above truth.  if ~=: degenerate landscape.")
+    print(f"truth Delta mean = {_Dtmag*1e4:.1f} um  (|E|_mae in V/cm ; Delta_mae in um and %truthDelta)")
+    def line(tag, tr):
+        print(f"  {tag:>26}: |E|_mae {tr[0][0]:.2f}->{tr[-1][0]:.2f}   Delta_mae {tr[0][2]*1e4:.1f}->{tr[-1][2]*1e4:.1f}um "
+              f"({100*tr[0][2]/_Dtmag:.0f}%->{100*tr[-1][2]/_Dtmag:.0f}%)")
+    line('cold-start joint', traj_cold)
+    line('TRUTH-INIT joint', traj_tinit)
+    line('truth-init FIELDONLY(wrong tk)', traj_fonly)
+    print("-> if TRUTH-INIT Delta barely moves but |E| swings, the drift is a DERIVATIVE-METRIC artifact.")
 
 
 if __name__ == '__main__':
