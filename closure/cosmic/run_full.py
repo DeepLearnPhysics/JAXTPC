@@ -106,7 +106,7 @@ def main():
         return a[None, :] + ii[:, None] * STEP * dirv[None, :]
     def model(coeffs, th, d):
         pos = track(th)
-        return rsim.forward_segments(rbase._replace(sce_models=smodel(coeffs)), pos, mask_outside_volume(pos, jnp.full(NSEG, de_mip), HALF), dx=STEP)
+        return rsim.forward_segments(rbase._replace(sce_models=smodel(coeffs)), pos, mask_outside_volume(pos, d, HALF), dx=STEP)
     def loss(coeffs, TH, idx):
         sg = jax.vmap(lambda th, d: model(coeffs, th, d))(TH[idx], De[idx])
         tot = sum(jnp.mean(jax.vmap(lambda u, v: sobolev_loss_single(u, v, spec[pl]))(sg[pl], obs[pl][idx])) for pl in range(nplanes))
