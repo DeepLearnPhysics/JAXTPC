@@ -26,6 +26,7 @@ def main():
     ap.add_argument('--ep-sigma', type=float, default=10.0)
     ap.add_argument('--init', choices=['truth', 'cold'], default='truth')
     ap.add_argument('--field-lr', type=float, default=3e-4)
+    ap.add_argument('--field-lr-final', type=float, default=None, help='if set, cosine-decay field LR from --field-lr to this (fast->slow schedule)')
     ap.add_argument('--ep-lr', type=float, default=0.1)
     ap.add_argument('--ep-prior', type=float, default=0.03)
     ap.add_argument('--steps', type=int, default=8000)
@@ -100,7 +101,8 @@ def main():
         fp = {'weights': [w + 0.5 * jnp.abs(w) * jax.random.normal(jax.random.PRNGKey(int(s)), w.shape) for s, w in enumerate(truth['weights'])],
               'biases': [b for b in truth['biases']]}
     TH = TH_reco
-    of = optax.chain(optax.clip_by_global_norm(0.5), optax.adam(args.field_lr)); oe = optax.adam(args.ep_lr)
+    flr = args.field_lr if args.field_lr_final is None else optax.cosine_decay_schedule(args.field_lr, args.steps, args.field_lr_final / args.field_lr)
+    of = optax.chain(optax.clip_by_global_norm(0.5), optax.adam(flr)); oe = optax.adam(args.ep_lr)
     sf = of.init(fp); se = oe.init({'TH': TH})
 
     @jax.jit
