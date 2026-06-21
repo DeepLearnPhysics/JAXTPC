@@ -97,7 +97,9 @@ def main():
                       _tp0['norm_offsets'], _tp0['norm_scales'], _sb['omega_0'])
     _Dtmag = float(jnp.mean(jnp.abs(_Dt)))
     def dmae(fp):
-        Dr = siren_delta({'weights': fp['weights'], 'biases': fp['biases']}, _gd,
+        w = [x[0] if x.ndim == 3 else x for x in fp['weights']]
+        b = [x[0] if x.ndim == 2 else x for x in fp['biases']]
+        Dr = siren_delta({'weights': w, 'biases': b}, _gd,
                          _tp0['norm_offsets'], _tp0['norm_scales'], _sb['omega_0'])
         return float(jnp.mean(jnp.abs(Dr - _Dt)))
 
