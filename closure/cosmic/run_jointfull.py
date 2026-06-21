@@ -66,7 +66,15 @@ def main():
     cfg = sim.config; nt = cfg.num_time_steps
     nx, ny, nz, ef, es = load_noise_params(cfg.noise_spectrum_path)
     spn = jnp.array(_get_noise_spectrum_shape(nt, ef, es))
-    obs = list(jax.vmap(lambda p, d: fwd(truth, p, d))(Ptrue, De))
+    # chunk the obs precompute (vmapping the forward over all M tracks OOMs at M~1000s)
+    obs = None
+    for i in range(0, M, 256):
+        o = jax.vmap(lambda p, d: fwd(truth, p, d))(Ptrue[i:i + 256], De[i:i + 256])
+        if obs is None:
+            obs = [[] for _ in o]
+        for pl in range(len(o)):
+            obs[pl].append(o[pl])
+    obs = [jnp.concatenate(a, 0) for a in obs]
     knz = jax.random.PRNGKey(0)
     for pl in range(len(obs)):
         L = jnp.asarray(cfg.volumes[0].wire_lengths_m[pl], jnp.float32)
