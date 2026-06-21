@@ -208,6 +208,36 @@ def recover_efield(params, positions_cm, E0, v0, v_table, E_table,
 
 
 # =========================================================================
+# Polynomial Δ field — a more expressive / better-conditioned alternative to
+# the SIREN (the SIREN is the representation bottleneck; see run_express). Same
+# Δ→E pipeline (E derived from ∂Δ/∂x), same anode-BC scaling (Δ=0 at anode via
+# the (x_norm+1) factor). `exps` is a static list of integer (a,b,c) tuples.
+# =========================================================================
+
+def poly_delta(coeffs, positions_cm, norm_offsets, norm_scales, exps):
+    """Polynomial distortion Δ(r) at positions (N,3) cm → (N,3) cm. Δ=0 at anode."""
+    xn = (positions_cm - norm_offsets) / norm_scales
+    mon = jnp.stack([xn[:, 0] ** a * xn[:, 1] ** b * xn[:, 2] ** c for (a, b, c) in exps], -1)
+    return (mon @ coeffs) * (xn[:, 0:1] + 1.0)
+
+
+def recover_efield_poly(coeffs, positions_cm, E0, v0, v_table, E_table,
+                        norm_offsets, norm_scales, exps):
+    """E (N,3) V/cm from a polynomial Δ field — same Δ→E inversion as the SIREN."""
+    def delta_phys(xyz):
+        xn = (xyz - norm_offsets) / norm_scales
+        mon = jnp.stack([xn[0] ** a * xn[1] ** b * xn[2] ** c for (a, b, c) in exps])
+        return (mon @ coeffs) * (xn[0] + 1.0)
+    tangent = jnp.array([1.0, 0.0, 0.0])
+    dDdx = jax.vmap(lambda xyz: jax.jvp(delta_phys, (xyz,), (tangent,))[1])(positions_cm)
+    return efield_from_dDdx(dDdx, E0, v0, v_table, E_table)
+
+
+def poly_exps(deg):
+    return [(a, b, c) for a in range(deg + 1) for b in range(deg + 1) for c in range(deg + 1) if a + b + c <= deg]
+
+
+# =========================================================================
 # Initialisation / training (pure JAX + optax) — used to fit Δ maps offline
 # =========================================================================
 

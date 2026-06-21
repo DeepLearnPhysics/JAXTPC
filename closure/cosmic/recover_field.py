@@ -74,7 +74,7 @@ def _wire_cfg():
             'electric_field': {'field_strength': E0}}
 
 
-def build(n_seg, truth_scale, seed=1, n_tracks=8, omega_0=2.0, truth_npz=None):
+def build(n_seg, truth_scale, seed=1, n_tracks=8, omega_0=2.0, truth_npz=None, sce_poly_deg=None):
     """Build sim with a truth SCE field + a batch of cosmics.
 
     ``truth_npz``: path to a trained SIREN to use as truth (e.g. the
@@ -99,7 +99,8 @@ def build(n_seg, truth_scale, seed=1, n_tracks=8, omega_0=2.0, truth_npz=None):
     sim = DetectorSimulator(_wire_cfg(), total_pad=n_seg, response_chunk_size=n_seg,
                             include_track_hits=False, differentiable=True,
                             n_segments=n_seg, iterate_mode='scan',
-                            include_electric_dist=True, electric_dist_siren_path=fp)
+                            include_electric_dist=True, electric_dist_siren_path=fp,
+                            sce_poly_deg=sce_poly_deg)
 
     logT, dedx = load_dedx_table_jax()
     rng = np.random.RandomState(0)

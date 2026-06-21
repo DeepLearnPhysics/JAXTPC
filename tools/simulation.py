@@ -98,6 +98,7 @@ class DetectorSimulator:
         include_electric_dist=False,
         electric_dist_path=None,
         electric_dist_siren_path=None,
+        sce_poly_deg=None,
         include_digitize=False,
         digitization_config=None,
         differentiable=False,
@@ -230,6 +231,7 @@ class DetectorSimulator:
         # path carries a *per-volume stacked* field in sim_params.sce_models, so
         # each module can use a different field with no recompilation and no
         # per-module code branch (see _load_sce_siren / _build_jit).
+        self._sce_poly_deg = sce_poly_deg
         self._sce_siren, sce_stacked = self._load_sce_siren(
             include_electric_dist, electric_dist_siren_path)
         if self._sce_siren is not None:
@@ -523,26 +525,38 @@ class DetectorSimulator:
             # own sliced params `sce_p`. E is *derived* from Δ(r) by autodiff
             # (∂Δ/∂x via jvp) + Walkowiak v(E) inversion, so Δ is the single
             # source of truth and E / drift corrections stay self-consistent.
-            from tools.sce_siren import recover_efield, siren_delta
+            from tools.sce_siren import (recover_efield, siren_delta,
+                                          recover_efield_poly, poly_delta, poly_exps)
             sb = self._sce_siren
             _vt, _et, _om, _nf2 = (sb['v_table'], sb['E_table'],
                                    sb['omega_0'], sb['nominal_field'])
+            # Optional polynomial Δ field (a more expressive, better-conditioned
+            # alternative to the SIREN; same Δ→E pipeline). Selected at trace time
+            # by `poly_coeffs` in the field dict; exps captured statically.
+            _exps = poly_exps(self._sce_poly_deg) if self._sce_poly_deg else None
 
             def _sce_apply(sce_p, positions_cm, velocity_cm_us):
-                params = {'weights': sce_p['weights'], 'biases': sce_p['biases']}
-                E = recover_efield(
-                    params, positions_cm, sce_p['E0'], sce_p['v0'], _vt, _et,
-                    sce_p['norm_offsets'], sce_p['norm_scales'], _om)
+                if _exps is not None and 'poly_coeffs' in sce_p:
+                    coeffs = sce_p['poly_coeffs']
+                    E = recover_efield_poly(
+                        coeffs, positions_cm, sce_p['E0'], sce_p['v0'], _vt, _et,
+                        sce_p['norm_offsets'], sce_p['norm_scales'], _exps)
+                    delta = poly_delta(coeffs, positions_cm,
+                                       sce_p['norm_offsets'], sce_p['norm_scales'], _exps)
+                else:
+                    params = {'weights': sce_p['weights'], 'biases': sce_p['biases']}
+                    E = recover_efield(
+                        params, positions_cm, sce_p['E0'], sce_p['v0'], _vt, _et,
+                        sce_p['norm_offsets'], sce_p['norm_scales'], _om)
+                    delta = siren_delta(
+                        params, positions_cm,
+                        sce_p['norm_offsets'], sce_p['norm_scales'], _om)
                 # Local +x is anti-parallel to global x for drift_direction=+1
                 # volumes (x_local = dd·(x_anode − x_global)). Track angles
                 # (theta/phi) are global, so express E_x in the global frame:
                 # E_x_global = −dd · E_x_local. |E| (recombination) is unchanged.
                 E = E.at[:, 0].multiply(-sce_p['drift_direction'])
                 E_normalized = E / _nf2
-
-                delta = siren_delta(
-                    params, positions_cm,
-                    sce_p['norm_offsets'], sce_p['norm_scales'], _om)
                 # Δx ≡ v0·t_drift − x0  ⟹  t_drift = (x0 + Δx)/v0.
                 x0 = positions_cm[:, 0]
                 t_drift = (x0 + delta[:, 0]) / sce_p['v0']
