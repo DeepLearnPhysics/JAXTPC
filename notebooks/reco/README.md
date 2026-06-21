@@ -1,17 +1,28 @@
-# Reconstruction
+# Reconstruction — closure methods
 
-Reconstruction demos and studies built on the (differentiable) simulator —
-recovering deposit/track quantities from the simulated readout.
+Reconstruction in JAXTPC **is** the closure methods in [`closure/`](../../closure):
+differentiable optimization of an event's parameters through the simulator until
+the simulated readout matches the observed (truth) readout. They all share the
+same machinery — `DetectorSimulator(differentiable=True).forward_segments(...)`
+as the forward, the **Sobolev geomean-log1p loss** (`tools/losses.py`,
+`sobolev_loss_geomean_log1p` + `make_sobolev_weight`), and Adam — differing in
+*what* is optimized.
 
-**Planned**
-- `gradient_reco.ipynb` — gradient-based reconstruction: optimize deposit
-  positions/charge to match an observed event through the differentiable forward
-- `learned_reco.ipynb` — feed-forward NN reconstruction (e.g. epipolar
-  y-recovery + charge density) from wire projections
-- `single_particle_closure.ipynb` — single-particle closure study: how well are
-  charge / dE / geometry recovered, and where are the failure modes
-- `space_points.ipynb` — rough 3D reconstruction from wire crossings
-  (`tools/space_points.py`)
+| Notebook | Based on | Optimizes | 
+|---|---|---|
+| `segments_closure.ipynb` | `closure/segments/run.py` | an event as **N point charges** `[x, y, z, dE]`, with Adam + **MCMC relocation** of dead segments (3DGS-MCMC style) |
+| `mcs_closure.ipynb` | `closure/mcs/run.py` | an MCS muon track: **vertex, direction, energy + per-segment scattering angles** (8 globals + 2N angles; Levels 5–6) |
+| `muon_closure.ipynb` | `closure/muon/run.py` | a muon track from initial guesses (track-surface parameterization) |
 
-These depend on which reconstruction approaches we want to showcase; this folder
-is the home for reco tutorials and reproducible studies.
+Each notebook will be a runnable walkthrough of the corresponding `closure/`
+script on a small event: build truth signals → build the differentiable forward
+→ Sobolev loss → optimize → show the loss curve and truth-vs-reconstruction
+overlay. A minimal segments closure has been verified end-to-end (gradient +
+40-step Adam, loss 1.04 → 0.56).
+
+> The full closure scripts read a real edepsim HDF5 (`load_particle_step_data`).
+> The notebooks use a synthetic truth event so they run with no external data;
+> the `closure/` scripts remain the reference for full-scale runs.
+
+**Not in scope** (per project direction): learned/NN reconstruction and
+wire-crossing "space points" — these are not the closure standard.

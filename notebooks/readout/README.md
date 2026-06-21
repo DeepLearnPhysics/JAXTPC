@@ -1,16 +1,15 @@
 # Readout
 
-Wire vs pixel readout, and the units convention that trips people up.
+Wire vs pixel readout.
 
 | Notebook | What it does |
 |---|---|
-| `pixel_simulation.ipynb` | Single-event pixel-readout sim (full 1000×1000), projections / anode / waveforms |
+| `pixel_simulation.ipynb` | Single-event pixel-readout sim (full 1000×1000): projections / anode / waveforms |
 
-**Planned**
-- `wire_vs_pixel_units.ipynb` — the two readouts side-by-side, and the
-  **ENC vs ADC** convention made concrete
-
-> **Units convention (the footgun):** wire hits are in **ENC** (electrons),
-> pixel hits are in **ADC**. The thresholds `inter_thresh` / `threshold_adc` /
-> `corr_threshold` therefore mean different things per readout. See
-> `docs/physics/units.md`.
+The **ENC (wire) vs ADC (pixel) units convention** is documented in
+[`docs/physics/units.md`](../../docs/physics/units.md) and noted inline in the
+wire/pixel sim notebooks — it does not warrant a separate notebook (there is no
+computation to walk through, just a units table). The wire path lives in
+[`getting_started/wire_simulation.ipynb`](../getting_started/wire_simulation.ipynb);
+this folder is where pixel-specific and any future wire-vs-pixel *comparison*
+notebooks belong if a concrete comparison (beyond units) is wanted.
