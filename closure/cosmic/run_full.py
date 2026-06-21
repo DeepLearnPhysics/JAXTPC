@@ -91,7 +91,12 @@ def main():
     # obs = forward(truth, TRUE tracks) + noise
     cfg = tsim.config; nt = cfg.num_time_steps
     nx, ny, nz, ef, es = load_noise_params(cfg.noise_spectrum_path); spn = jnp.array(_get_noise_spectrum_shape(nt, ef, es))
-    obs = list(jax.vmap(lambda p, d: tsim.forward_segments(tbase._replace(sce_models=smodel(Ctruth)), p, d, dx=STEP))(Ptrue, De))
+    obs = None  # chunk the obs precompute (vmapping all M OOMs at thousands)
+    for i0 in range(0, M, 256):
+        o = jax.vmap(lambda p, d: tsim.forward_segments(tbase._replace(sce_models=smodel(Ctruth)), p, d, dx=STEP))(Ptrue[i0:i0 + 256], De[i0:i0 + 256])
+        if obs is None: obs = [[] for _ in o]
+        for pl in range(len(o)): obs[pl].append(o[pl])
+    obs = [jnp.concatenate(a, 0) for a in obs]
     knz = jax.random.PRNGKey(0); nplanes = len(obs)
     for pl in range(nplanes):
         L = jnp.asarray(cfg.volumes[0].wire_lengths_m[pl], jnp.float32)
