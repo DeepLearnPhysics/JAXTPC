@@ -29,6 +29,7 @@ def main():
     ap.add_argument('--field-lr-final', type=float, default=None, help='if set, cosine-decay field LR from --field-lr to this (fast->slow schedule)')
     ap.add_argument('--ep-lr', type=float, default=0.1)
     ap.add_argument('--ep-prior', type=float, default=0.03)
+    ap.add_argument('--batch', type=int, default=16)
     ap.add_argument('--steps', type=int, default=8000)
     ap.add_argument('--truth', default=os.path.join(HERE, 'truth_40cm.npz'))
     ap.add_argument('--out', required=True)
@@ -112,7 +113,7 @@ def main():
         ut, se = oe.update({'TH': g[1]}, se, {'TH': TH}); TH = optax.apply_updates({'TH': TH}, ut)['TH']
         return fp, TH, sf, se
 
-    rng2 = np.random.RandomState(0); B = min(16, M)
+    rng2 = np.random.RandomState(0); B = min(args.batch, M)
     def terr(TH): return float(jnp.mean(jnp.abs(TH - TH_true)))
     hist = [(0, fmae(fp), dmae(fp), terr(TH))]
     print(f"init={args.init} field_lr={args.field_lr:.0e} ep_lr={args.ep_lr} ep_sigma={args.ep_sigma}  truth Delta={_Dtmag*1e4:.0f}um")
