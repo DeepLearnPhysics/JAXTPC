@@ -25,7 +25,7 @@ from closure.mcs.forward import (
     highland_prior,
 )
 from tools.particle_generator import load_dedx_table_jax
-from MCS_muon.mcs_muon_generator import _perpendicular_basis
+from closure.mcs.mcs_physics import _perpendicular_basis
 
 
 # ---------------------------------------------------------------------------

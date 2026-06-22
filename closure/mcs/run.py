@@ -201,7 +201,8 @@ def build_full_loss(forward, log_T, dedx, truth_signals, spec_weights, half_ext)
 # =============================================================================
 
 def run_optimization(loss_fn, init_params, n_steps, lr, mode,
-                     project_fn=None, lr_scat=None, has_globals=True):
+                     project_fn=None, lr_scat=None, has_globals=True,
+                     decay=1.0, early_stop=False):
     """Generic Adam optimization loop.
 
     Parameters
@@ -214,10 +215,16 @@ def run_optimization(loss_fn, init_params, n_steps, lr, mode,
     project_fn : callable or None — called on params after each step
     lr_scat : float or None — if set, scale gradients for indices >= 8
     has_globals : bool — whether first 8 params are globals (for display)
+    decay : float — per-step exponential LR decay (1.0 = constant). Stabilizes
+        the scattering DOF against the late-time overfitting climb (see
+        FINDINGS_MCS.md §3).
+    early_stop : bool — if True, return the params at the lowest wire+prior loss
+        seen, not the final params. The scattering angles otherwise drift to a
+        coherent low-frequency over-bend after the loss minimum.
 
     Returns
     -------
-    params : final parameters
+    params : best (early_stop) or final parameters
     loss_hist : list of float
     param_hist : list of np.ndarray (first 8 elements only)
     opt_state : final optimizer state
@@ -229,19 +236,30 @@ def run_optimization(loss_fn, init_params, n_steps, lr, mode,
     jax.block_until_ready(init_grad)
     print(f"  Compiled ({time.time()-t0:.1f}s), initial loss = {float(init_loss):.6f}")
 
-    optimizer = optax.adam(learning_rate=lr)
+    if decay < 1.0:
+        schedule = optax.exponential_decay(lr, transition_steps=1, decay_rate=decay)
+        optimizer = optax.adam(learning_rate=schedule)
+    else:
+        optimizer = optax.adam(learning_rate=lr)
     opt_state = optimizer.init(init_params)
     params = init_params
 
     loss_hist = []
     param_hist = []
+    best_loss = np.inf
+    best_params = params
 
-    print(f"Running {n_steps} optimization steps (LR={lr})...", flush=True)
+    print(f"Running {n_steps} optimization steps (LR={lr}, decay={decay}, "
+          f"early_stop={early_stop})...", flush=True)
     t_start = time.time()
 
     for step in range(n_steps):
         loss, grad = loss_and_grad(params)
-        loss_hist.append(float(loss))
+        lv = float(loss)
+        loss_hist.append(lv)
+        if lv < best_loss:
+            best_loss = lv
+            best_params = params
 
         # Store globals for history
         if has_globals:
@@ -280,6 +298,9 @@ def run_optimization(loss_fn, init_params, n_steps, lr, mode,
     total_time = time.time() - t_start
     print(f"Optimization complete in {total_time:.1f}s ({total_time/n_steps:.2f}s/step)")
 
+    if early_stop:
+        print(f"  Early-stop: best loss = {best_loss:.6f}")
+        return best_params, loss_hist, param_hist, opt_state
     return params, loss_hist, param_hist, opt_state
 
 
@@ -402,6 +423,13 @@ def main():
                         help='Globals LR in stage 2 (lower to protect converged globals)')
     parser.add_argument('--lr-scat', type=float, default=DEFAULT_LR_SCAT)
     parser.add_argument('--lambda-prior', type=float, default=LAMBDA_PRIOR)
+    parser.add_argument('--decay', type=float, default=1.0,
+                        help='Per-step exponential LR decay for the scattering '
+                             'stage (stabilizes against late over-bend; '
+                             'recommend 0.99). 1.0 = constant LR.')
+    parser.add_argument('--early-stop', action='store_true',
+                        help='Return params at the lowest loss in the scattering '
+                             'stage instead of the final params (recommended).')
     args = parser.parse_args()
 
     LAMBDA_PRIOR = args.lambda_prior
@@ -546,6 +574,7 @@ def main():
         params, loss_hist, param_hist, _ = run_optimization(
             loss_fn, init_params, args.steps, args.lr,
             args.mode, project_fn=project_full, lr_scat=args.lr_scat,
+            decay=args.decay, early_stop=args.early_stop,
         )
         _print_globals_summary(np.array(params[:8]) * SCALES, init_globals)
         dt1_fit = np.array(params[8:8 + N_SEGMENTS]) * ANGLE_SCALE
@@ -591,6 +620,7 @@ def main():
             params, loss_hist_2, param_hist_2, _ = run_optimization(
                 loss_fn_full, init_full, remaining, args.lr_phase2,
                 'staged-phase2', project_fn=project_full, lr_scat=args.lr_scat,
+                decay=args.decay, early_stop=args.early_stop,
             )
             loss_hist = loss_hist_1 + loss_hist_2
             param_hist = param_hist_1 + param_hist_2

@@ -18,7 +18,7 @@ Migrated from closure_analysis_MCS/mcs_cumsum_forward.py.
 import jax
 import jax.numpy as jnp
 
-from MCS_muon.mcs_muon_generator import (
+from closure.mcs.mcs_physics import (
     _perpendicular_basis,
     highland_theta0,
     _ke_to_beta_p,

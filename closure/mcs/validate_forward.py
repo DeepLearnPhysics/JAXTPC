@@ -26,7 +26,7 @@ from tools.particle_generator import (
     load_dedx_table_jax,
     _get_consistent_csda,
 )
-from MCS_muon.mcs_muon_generator import (
+from closure.mcs.mcs_physics import (
     _perpendicular_basis,
     _ke_to_beta_p,
     generate_mcs_muon_segments,
