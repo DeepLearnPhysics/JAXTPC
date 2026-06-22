@@ -101,19 +101,40 @@ def build_viz_config(sensor_path):
 # Response loading
 # =============================================================================
 
-def load_event_sensor(sensor_path, event_idx):
-    """Load one event's response signals as dense arrays.
+def load_event_sensor(sensor_path, event_idx, as_sparse=False):
+    """Load one event's response signals.
 
     Automatically detects wire (2D) vs pixel (3D) format, and
     uint16 (digitized) vs float32.
 
+    Values are returned **as stored**, untransformed: digitized data is raw ADC
+    (``uint16``, = pedestal + signal) and non-digitized data is float signal.
+    When ``pedestals`` is returned (digitized), subtract it from the 1-D
+    ``values`` for a signed display.
+
+    Parameters
+    ----------
+    as_sparse : bool
+        If True, return the on-disk sparse representation directly (active
+        coordinates + values) without materializing a dense canvas — the right
+        choice for visualization (``visualize_wire_signals(..., sparse=True)``
+        scatters it). **Required** for pixel readout and for digitized wire
+        data (a dense raw-ADC array is a pedestal footgun and a dense pixel grid
+        is enormous); the dense path is only for non-digitized wire.
+
     Returns
     -------
-    dense_signals : dict
-        Wire: {(vol, plane): (num_wires, num_time_steps) ndarray}
-        Pixel: {(vol, plane): (num_py, num_pz, num_time_steps) ndarray}
+    signals : dict
+        as_sparse=False: {(vol, plane): (num_wires, num_time) float ndarray},
+            non-digitized wire only. **Raises** for pixel or digitized data.
+        as_sparse=True:
+            Wire:  {(vol, plane): {'wire', 'time', 'values'}}  (values = raw ADC
+                   if digitized, else float signal)
+            Pixel: {(vol, plane): {'py', 'pz', 'time', 'values'}}
     event_attrs : dict
     pedestals : dict or None
+        {(vol, plane): pedestal} when digitized (subtract from ``values`` for
+        signal), else None.
     """
     event_key = f'event_{event_idx:03d}'
 
@@ -173,12 +194,20 @@ def load_event_sensor(sensor_path, event_idx):
                              (pzs >= 0) & (pzs < num_pz) &
                              (times >= 0) & (times < num_time_steps))
 
-                    dense = np.zeros((num_py, num_pz, num_time_steps), dtype=np.float32)
-                    dense[pys[valid], pzs[valid], times[valid]] = values[valid]
-
                     # Find plane index from label
                     p = 0  # pixel volumes have plane_idx=0
-                    dense_signals[(v, p)] = dense
+                    # Pixel data is never densified: a dense
+                    # (num_py, num_pz, num_time) array is enormous (e.g.
+                    # 1000x1000x4321). Sparse only.
+                    if not as_sparse:
+                        raise ValueError(
+                            "pixel sensor data cannot be densified — a dense "
+                            "(num_py, num_pz, num_time) array is enormous. Call "
+                            "load_event_sensor(..., as_sparse=True).")
+                    dense_signals[(v, p)] = {
+                        'py': pys[valid], 'pz': pzs[valid],
+                        'time': times[valid], 'values': values[valid],
+                    }
 
                 else:
                     # Wire 2D format
@@ -199,17 +228,35 @@ def load_event_sensor(sensor_path, event_idx):
                              (times >= 0) & (times < num_time_steps))
 
                     raw_values = g['values'][:]
-                    if raw_values.dtype == np.uint16:
+                    digitized_plane = raw_values.dtype == np.uint16
+                    if digitized_plane:
+                        # Stored as-is: raw ADC (pedestal + signal). The pedestal
+                        # is returned separately; subtract it from the 1-D values
+                        # for a signed display. Not transformed here.
                         digitized = True
-                        ped = int(g.attrs['pedestal'])
-                        pedestals[(v, p)] = ped
-                        dense = np.zeros((nw, num_time_steps), dtype=np.uint16)
-                        dense[wires[valid], times[valid]] = raw_values[valid]
+                        pedestals[(v, p)] = int(g.attrs['pedestal'])
+
+                    if as_sparse:
+                        dense_signals[(v, p)] = {
+                            'wire': wires[valid],
+                            'time': times[valid],
+                            'values': raw_values[valid],
+                        }
+                    elif digitized_plane:
+                        # A dense raw-ADC array is a pedestal footgun: its 0
+                        # background isn't the baseline, so a uniform
+                        # `dense - pedestal` washes it to -pedestal. Refuse to
+                        # build it; the data is sparse, so keep it sparse.
+                        raise ValueError(
+                            "digitized sensor data is sparse raw ADC; a dense "
+                            "array would carry a pedestal-offset footgun. Call "
+                            "load_event_sensor(..., as_sparse=True) and subtract "
+                            "the pedestal from the 1-D values.")
                     else:
+                        # Non-digitized: float signal, no pedestal -> safe to densify.
                         dense = np.zeros((nw, num_time_steps), dtype=np.float32)
                         dense[wires[valid], times[valid]] = raw_values[valid]
-
-                    dense_signals[(v, p)] = dense
+                        dense_signals[(v, p)] = dense
 
     return dense_signals, event_attrs, pedestals if digitized else None
 

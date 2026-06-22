@@ -136,6 +136,53 @@ class TestRespRoundtrip:
         finally:
             os.unlink(tmp_path)
 
+    def test_digitized_is_sparse_only_raw_adc(self, mock_sim_config):
+        """Digitized sensor: loader returns raw ADC (untransformed), sparse-only.
+
+        Pins the loader contract for the uint16 case: values come back as stored
+        (raw ADC = pedestal + signal), the pedestal is returned separately, and
+        the dense path is *refused* (a dense raw-ADC array is a pedestal footgun).
+        """
+        cfg, params = mock_sim_config
+        import h5py
+        from tools.config import create_digitization_config
+
+        ped_ind = 2000
+        digcfg = create_digitization_config(pedestal_collection=400,
+                                             pedestal_induction=ped_ind)
+        signals = {}
+        for s in range(2):
+            for p in range(3):
+                nw = cfg.volumes[s].num_wires[p]
+                arr = np.zeros((nw, cfg.num_time_steps), dtype=np.float32)
+                arr[10, 20] = 42.0
+                arr[15, 30] = -7.5          # bipolar undershoot
+                signals[(s, p)] = arr
+
+        with tempfile.NamedTemporaryFile(suffix='.h5', delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            with h5py.File(tmp_path, 'w') as f:
+                write_config_sensor(f, cfg, params, 'emb', 'test', 0,
+                                    'test.h5', 1, 0, 1.0,
+                                    digitization_config=digcfg)
+                save_event_sensor(f, 'event_000', signals, 1.0, 0,
+                                  _mock_deposits(), cfg=cfg, digitized=True)
+
+            # Sparse: raw uint16 ADC + pedestal; (values - pedestal) == signal.
+            sp, _, peds = load_event_sensor(tmp_path, 0, as_sparse=True)
+            assert peds is not None
+            assert set(sp[(0, 0)].keys()) == {'wire', 'time', 'values'}
+            assert sp[(0, 0)]['values'].dtype == np.uint16        # untransformed
+            sig = sp[(0, 0)]['values'].astype(np.int32) - peds[(0, 0)]
+            np.testing.assert_allclose(np.sort(sig), np.sort([-7, 42]), atol=1.0)
+
+            # Dense path is refused for digitized data (would be a footgun).
+            with pytest.raises(ValueError, match="as_sparse=True"):
+                load_event_sensor(tmp_path, 0)
+        finally:
+            os.unlink(tmp_path)
+
     def test_delta_encoding_correctness(self, mock_sim_config):
         """Verify delta encoding handles non-sequential wire/time indices."""
         cfg, params = mock_sim_config
