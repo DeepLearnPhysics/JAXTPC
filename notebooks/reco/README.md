@@ -8,16 +8,16 @@ as the forward, the **Sobolev geomean-log1p loss** (`tools/losses.py`,
 `sobolev_loss_geomean_log1p` + `make_sobolev_weight`), and Adam — differing in
 *what* is optimized.
 
-| Notebook | Based on | Optimizes | 
-|---|---|---|
-| `segments_closure.ipynb` | `closure/segments/run.py` | an event as **N point charges** `[x, y, z, dE]`, with Adam + **MCMC relocation** of dead segments (3DGS-MCMC style) |
-| `muon_closure.ipynb` | `closure/muon/run.py` | a muon track from initial guesses (track-surface parameterization) |
+| Notebook | Based on | Optimizes | Status |
+|---|---|---|---|
+| `segments_closure.ipynb` | `closure/segments/run.py` | an event as **N point charges** `[x, y, z, dE]`, with Adam + **MCMC relocation** of dead segments (3DGS-MCMC style) | **built, verified ✓** |
+| `muon_closure.ipynb` | `closure/muon/run.py` | a muon track from initial guesses (track-surface parameterization) | planned |
 
-Each notebook will be a runnable walkthrough of the corresponding `closure/`
-script on a small event: build truth signals → build the differentiable forward
-→ Sobolev loss → optimize → show the loss curve and truth-vs-reconstruction
-overlay. A minimal segments closure has been verified end-to-end (gradient +
-40-step Adam, loss 1.04 → 0.56).
+Each notebook is a runnable walkthrough of the corresponding `closure/` script on
+a small event: build truth signals → build the differentiable forward → Sobolev
+loss → optimize → show the loss curve and truth-vs-reconstruction overlay.
+`segments_closure.ipynb` is verified end-to-end (oversampled point charges +
+the real `relocate_segments`; loss 0.89 → 0.0035 with 3 relocations).
 
 > The **MCS closure** (`closure/mcs/`) is intentionally *not* surfaced as a
 > notebook — it is research code (see `closure/mcs/FINDINGS_MCS.md`), kept in
