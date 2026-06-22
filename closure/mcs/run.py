@@ -76,6 +76,12 @@ DEFAULT_LR = 0.015
 DEFAULT_LR_PHASE2 = 0.003   # Lower for near-converged globals in stage 2
 DEFAULT_LR_SCAT = 0.01      # Higher for scattering angles
 LAMBDA_PRIOR = 0.001
+# Sobolev order. s=1.0 (was 1.5) — the lower order shrinks the loss weight's
+# low/high-frequency dynamic range (~4e9 -> ~3e6), which is far better
+# conditioned and converges the joint fit ~3x faster with the same recovery.
+# Going below ~1.0 lets the global energy/trajectory lose its constraint
+# (s=0.5 -> energy off by 20%). See sobolev_s_scan.py.
+SOBOLEV_S = 1.0
 
 PARAM_NAMES = ['x', 'y', 'z', 'sin_th', 'cos_th', 'sin_ph', 'cos_ph', 'energy']
 PLANE_NAMES = ['east_U', 'east_V', 'east_Y', 'west_U', 'west_V', 'west_Y']
@@ -478,9 +484,9 @@ def main():
               f"sum_abs={float(jnp.sum(jnp.abs(sig))):.2f}")
 
     # --- Sobolev weights ---
-    print("Precomputing Sobolev spectral weights (s=1.5)...", flush=True)
+    print(f"Precomputing Sobolev spectral weights (s={SOBOLEV_S})...", flush=True)
     spec_weights = tuple(
-        make_sobolev_weight(*truth_signals[p].shape, s=1.5) for p in range(6)
+        make_sobolev_weight(*truth_signals[p].shape, s=SOBOLEV_S) for p in range(6)
     )
 
     # --- Initial guess for globals ---

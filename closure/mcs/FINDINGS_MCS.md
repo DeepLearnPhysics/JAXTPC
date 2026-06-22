@@ -98,6 +98,10 @@ Conclusions:
 
 ## 4. Recommended defaults
 
+> **Superseded by §9** — the current recipe is s=1.0, λ=1e-3, converged joint
+> fit (no early-stop). The early-stop / λ=3e-2 below was the best at s=1.5 and is
+> kept for the historical record.
+
 For the full closure: **early-stop at best wire-loss, lr=0.01–0.015 with
 decay≈0.99, λ_prior≈3e-2, no coarse-graining**, optionally staged (globals-only
 warm-up then open scattering) to protect the energy. See §5 for the full-mode
@@ -239,26 +243,70 @@ readout, or a non-white prior — not a better wire-loss schedule. The
 aggregate-angle *magnitude* stays biased low at the strong prior, so an MCS
 *momentum* estimate would still need a per-window bias calibration.
 
-### Reproduce
-```
-python3 -m closure.mcs.validate_forward                       # 14/14 physics checks
-python3 -m closure.mcs.run --mode globals-only --steps 300    # vertex/dir/E (solved)
-python3 -m closure.mcs.run --mode staged --steps 800 \
-        --stage1-steps 250 --lambda-prior 0.03 --decay 0.99 --early-stop
-python3 -m closure.mcs.study --study scattering --steps 250   # regularization sweep
-python3 -m closure.mcs.study --study full --steps 300         # single-stage failure
-python3 -m closure.mcs.window_scan                            # aggregate recovery (early-stop)
-python3 -m closure.mcs.long_fit                               # convergence: fine angles emerge slowly
-python3 -m closure.mcs.coarse2fine                           # sharpening the loss overfits (negative result)
-```
+## 9. UPDATE — current recipe: s=1.0, λ=1e-3, converged joint fit (better + faster)
+
+§1–8 used s=1.5 with early-stop (or very long runs). A systematic pass on the
+loss landscape gives a strictly better, faster recipe.
+
+**Sobolev order s (`sobolev_s_scan.py`).** The weight `1/(freq²+ε)^s` has ε
+verified correct: `ε = 1/(π²·max_pad²)` ⇒ screening length `max_pad/2` samples
+(= 512 for max_pad=1024). At s=1.5 the f→0 vs Nyquist weight ratio is ~4×10⁹ — a
+huge dynamic range that makes the loss low-frequency-dominated and
+ill-conditioned. Lowering to **s=1.0** shrinks it to ~3×10⁶: the joint fit
+converges ~3× faster (reaches in ~800 steps what s=1.5 needs ~2300) with the
+same recovery. s=0.5 is too far — the global energy loses its low-frequency
+constraint and breaks (−21%). → default switched to **`SOBOLEV_S = 1.0`**.
+
+**Prior weight λ (`decompose_sweep.py`).** The loss is two terms,
+`wire + λ·prior`. Decomposed across the stage transition, the loss jump when
+stage 2 turns on is **entirely the wire term** (scattering reset truth→0 → the
+track goes straight → worse fit); the prior term is negligible (≤3×10⁻⁴) at
+every λ. Sweeping λ at s=1.0: **λ=1e-3 is optimal** — best angle correlation at
+every scale (0.50 / 0.87 / 0.97 at 12.5 / 50 / 200 mm) and net-deflection ratio
+1.03. λ=0 overfits (1.83×, corr collapses); λ≥1e-2 over-regularizes. This is
+run.py's default `LAMBDA_PRIOR=1e-3`; the earlier "λ=3e-2 sweet spot" was for
+s=1.5 + early-stop.
+
+**Convergence + timing (`convergence.py`, `multi_event.py`).** 0.15 s/step
+(RTX 2080 Ti, N=2000, 6-plane differentiable sim). The wire loss plateaus in
+~65 stage-2 steps (globals + coarse trajectory); the fine-angle correlation
+keeps refining over ~800 steps at near-flat loss. JIT compile ~110 s, once,
+amortized across events.
+
+**Multi-event robustness** (5 scattering realizations, s=1.0, λ=1e-3):
+
+| quantity | mean ± std |
+|---|---|
+| vertex error | 0.42 ± 0.17 mm |
+| energy error | −6 ± 8 MeV (~1.6 %) |
+| direction error | <0.5° |
+| corr @ 5 cm | 0.83 ± 0.06 |
+| 3D track residual | 0.93 ± 0.06 mm |
+| net-deflection ratio | 0.97 ± 0.47 |
+| loss-plateau | 65 ± 10 steps |
+| time / event (warm) | 130 ± 1 s |
+
+Globals + trajectory are robust event-to-event; the net-deflection *magnitude*
+is the one high-variance quantity (low-scattering events under-recover under the
+prior), so an MCS momentum estimate needs per-event/window calibration.
+
+**Current recipe:** staged — globals-only warm-up (~250 steps), then a converged
+**joint** fit at **s=1.0, λ=1e-3**, global lr 0.003 / angle lr 0.01, decay
+0.9995, **no early-stop**. ~315 steps (~50 s) for globals + trajectory; ~1050
+steps (~130 s) for full scattering refinement. (Do NOT raise the angle lr — the
+LR scan showed 0.02 oscillates and 0.04 diverges; the fix for speed is the
+better conditioning above, or preconditioning the double-integral forward.)
 
 ### Reproduce
 ```
-python3 -m closure.mcs.validate_forward                       # 14/14 physics checks
-python3 -m closure.mcs.run --mode globals-only --steps 300    # vertex/dir/E (solved)
-python3 -m closure.mcs.run --mode staged --steps 800 \
-        --stage1-steps 250 --lambda-prior 0.03 --decay 0.99 --early-stop
-python3 -m closure.mcs.study --study scattering --steps 250   # regularization sweep
-python3 -m closure.mcs.study --study full --steps 300         # single-stage failure
-python3 -m closure.mcs.window_scan                            # aggregate-angle recovery vs scale
+python3 -m closure.mcs.validate_forward      # 14/14 forward-model physics checks
+python3 -m closure.mcs.sobolev_s_scan        # eps check + s-scan -> s=1.0
+python3 -m closure.mcs.decompose_sweep       # wire/prior decomposition + lambda sweep -> 1e-3
+python3 -m closure.mcs.convergence           # convergence-by-scale + timing
+python3 -m closure.mcs.multi_event           # convergence + quality across events
+python3 -m closure.mcs.render_closure        # 2D wire event display (truth/reco/diff)
+python3 -m closure.mcs.render_3d             # 3D track + transverse scattering
+python3 -m closure.mcs.render_history        # loss + parameters vs iteration
+# earlier exploratory scripts: study.py, window_scan.py, long_fit.py, coarse2fine.py,
+#   resolve_scan.py, depth_scan.py, oracle_test.py, diagnose_fit.py, diagnose_rise.py
 ```
