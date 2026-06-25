@@ -117,8 +117,7 @@ def test_sce_field_gradient_on_cosmic_finite_difference():
     NSEG = 256
     sim = DetectorSimulator(cfg, total_pad=NSEG, response_chunk_size=NSEG,
                             include_track_hits=False, differentiable=True,
-                            n_segments=NSEG, iterate_mode='scan',
-                            include_electric_dist=True, electric_dist_siren_path=fp)
+                            n_segments=NSEG, iterate_mode='scan', distortion=fp)
     logT, dedx = load_dedx_table_jax()
     pos, de, _, _, step = generate_cosmic_chord(
         jnp.array([-20., -12., 8.]) * 10, jnp.array([0., 10., -6.]) * 10,
@@ -126,19 +125,19 @@ def test_sce_field_gradient_on_cosmic_finite_difference():
     base = sim._default_sim_params
 
     def loss(sce):
-        sigs = sim.forward_segments(base._replace(sce_models=sce), pos, de, dx=step)
+        sigs = sim.forward_segments(base._replace(distortion_field=sce), pos, de, dx=step)
         return sum(jnp.sum(s ** 2) for s in sigs)
 
-    g = jax.grad(loss)(base.sce_models)
+    g = jax.grad(loss)(base.distortion_field)
     gw = g['weights'][-1]
     assert bool(jnp.all(jnp.isfinite(gw)))
     assert float(jnp.linalg.norm(gw)) > 0.0
 
     eps, idx = 1e-3, (0, 0, 0)
-    W = base.sce_models['weights'][-1]
+    W = base.distortion_field['weights'][-1]
 
     def L1(Wx):
-        s = dict(base.sce_models); wl = list(s['weights']); wl[-1] = Wx
+        s = dict(base.distortion_field); wl = list(s['weights']); wl[-1] = Wx
         s['weights'] = wl
         return float(loss(s))
     fd = (L1(W.at[idx].add(eps)) - L1(W.at[idx].add(-eps))) / (2 * eps)
@@ -155,10 +154,10 @@ def test_sce_strength_closure_from_cosmics():
 
     sim, pos, de, step = build(n_seg=256, truth_scale=1.0)
     base = sim._default_sim_params
-    truth = base.sce_models
+    truth = base.distortion_field
 
     def fwd(stk):
-        return sim.forward_segments(base._replace(sce_models=stk), pos, de, dx=step)
+        return sim.forward_segments(base._replace(distortion_field=stk), pos, de, dx=step)
     obs = [jax.lax.stop_gradient(s) for s in fwd(truth)]
 
     def scaled(alpha):

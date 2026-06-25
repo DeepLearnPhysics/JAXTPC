@@ -31,7 +31,7 @@ def main():
     M = args.n_muons
 
     sim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=args.truth)
-    base = sim._default_sim_params; truth = base.sce_models
+    base = sim._default_sim_params; truth = base.distortion_field
     def fwd(pos, de): return sim.forward_segments(base, pos, de, dx=STEP)  # truth field fixed
 
     logT, dedx = load_dedx_table_jax(); rng = np.random.RandomState(0); jr = np.random.RandomState(123)

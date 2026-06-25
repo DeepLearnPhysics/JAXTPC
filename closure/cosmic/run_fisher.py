@@ -30,7 +30,7 @@ def main():
     args = ap.parse_args()
 
     sim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=args.truth)
-    base = sim._default_sim_params; truth = base.sce_models
+    base = sim._default_sim_params; truth = base.distortion_field
     FIXED = {k: truth[k] for k in ('norm_offsets', 'norm_scales', 'E0', 'v0', 'drift_direction')}
     w0 = [np.asarray(w[0]) for w in truth['weights']]; b0 = [np.asarray(b[0]) for b in truth['biases']]
     shapes = [w.shape for w in w0]; sizes = [w.size for w in w0]; P = sum(sizes)
@@ -71,7 +71,7 @@ def main():
     def signal(a, ep, c):
         fld = field_from_a(a)
         sg = jax.vmap(lambda e, cc, d: sim.forward_segments(
-            base._replace(sce_models=fld), track(e, cc), d, dx=STEP))(ep, c, DE)
+            base._replace(distortion_field=fld), track(e, cc), d, dx=STEP))(ep, c, DE)
         return jnp.concatenate([s.reshape(-1) for s in sg])
 
     a0 = jnp.zeros(args.k_field); C0 = jnp.zeros((args.n_tracks, Ks, 2))

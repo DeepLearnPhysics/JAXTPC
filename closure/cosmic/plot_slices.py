@@ -25,7 +25,7 @@ LO, HI = (-200.0, -200.0, -200.0), (0.0, 200.0, 200.0)   # actual drift box (no 
 
 
 def emag_on(sim, stacked, pts):
-    sb = sim._sce_siren
+    sb = sim.distortion_state()
     p0 = jax.tree.map(lambda x: x[0], stacked)
     par = {'weights': p0['weights'], 'biases': p0['biases']}
     E = S.recover_efield(par, jnp.asarray(pts, jnp.float32), p0['E0'], p0['v0'],
@@ -63,7 +63,7 @@ def main():
         p, d, _, _, s = generate_cosmic_chord(jnp.array(a), jnp.array(b), 4000., 32,
                                               logT, dedx, half_extents_mm=HALF)
         P.append(p); D.append(d); S.append(float(s))
-    truth = sim._default_sim_params.sce_models
+    truth = sim._default_sim_params.distortion_field
     print(f"recovering M={args.n_muons}, {args.steps} steps ...")
     hist, learned = recover_accum(sim, jnp.stack(P), jnp.stack(D), np.asarray(S, np.float32),
                                   steps=args.steps, lr=3e-4, record_every=200)

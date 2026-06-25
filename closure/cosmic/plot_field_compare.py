@@ -25,7 +25,7 @@ LO, HI = (-200.0, -200.0, -200.0), (0.0, 200.0, 200.0)   # actual drift box (no 
 
 
 def field_slice(sim, stacked, z=0.0, n=60):
-    sb = sim._sce_siren
+    sb = sim.distortion_state()
     xs = np.linspace(0.5, 19.5, n); ys = np.linspace(-19, 19, n)
     XX, YY = np.meshgrid(xs, ys, indexing='ij')
     g = jnp.array(np.stack([XX.ravel(), YY.ravel(), np.full(XX.size, z)], -1), jnp.float32)
@@ -57,7 +57,7 @@ def main():
                                               logT, dedx, half_extents_mm=HALF)
         P.append(p); D.append(d); S.append(float(s))
     pos_all, de_all = jnp.stack(P), jnp.stack(D)
-    truth = sim._default_sim_params.sce_models
+    truth = sim._default_sim_params.distortion_field
 
     print(f"recovering full field from M={args.n_muons} muons, {args.steps} steps ...")
     hist, learned = recover_accum(sim, pos_all, de_all, np.asarray(S, np.float32),

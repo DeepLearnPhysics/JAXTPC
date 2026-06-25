@@ -272,7 +272,8 @@ def main():
                              'builds two simulators and routes per-event on n_groups. '
                              'Events with max(n_groups) < this use the faster medium '
                              'sim; the rest use --maxg.')
-    parser.add_argument('--sce', default=None, help='Path to SCE HDF5 map for E-field distortions')
+    parser.add_argument('--distortion', default=None,
+                        help='Path to a drift-field distortion file (trained SIREN/distortion field)')
     # Grouping
     parser.add_argument('--group-size', type=int, default=5)
     parser.add_argument('--gap-threshold', type=float, default=5.0,
@@ -357,7 +358,7 @@ def main():
     include_electronics = args.electronics
     include_digitize = not args.no_digitize
     include_track_hits = not args.no_track_hits
-    include_sce = args.sce is not None
+    include_distortion = args.distortion is not None
     events_per_file = args.events_per_file
     threshold_adc = args.threshold_adc
     dataset_name = args.dataset
@@ -419,7 +420,7 @@ def main():
     print(f'  Coherent:      {"ON" if include_coherent_noise else "OFF"}')
     print(f'  Electronics:   {"ON" if include_electronics else "OFF"}')
     print(f'  Digitization:  {"ON" if include_digitize else "OFF"}')
-    print(f'  SCE:           {args.sce if include_sce else "OFF"}')
+    print(f'  Distortion:    {args.distortion if include_distortion else "OFF"}')
     print(f'  Track hits:    {"ON" if include_track_hits else "OFF"}')
     print(f'  Group size:    {args.group_size}')
     print(f'  Total pad:     {args.total_pad:,}')
@@ -484,8 +485,7 @@ def main():
             include_electronics=include_electronics,
             include_track_hits=include_track_hits,
             include_digitize=include_digitize,
-            include_electric_dist=include_sce,
-            electric_dist_path=args.sce,
+            distortion=args.distortion,
             group_size=args.group_size,
             gap_threshold_mm=args.gap_threshold,
         )

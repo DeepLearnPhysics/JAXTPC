@@ -46,10 +46,10 @@ def main():
     args = ap.parse_args()
     M = args.n_muons; logT, dedx = load_dedx_table_jax()
 
-    tsim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=os.path.join(HERE, 'truth_40cm.npz'), sce_poly_deg=args.truth_deg)
-    rsim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=os.path.join(HERE, 'truth_40cm.npz'), sce_poly_deg=args.rec_deg)
-    tp0 = jax.tree.map(lambda x: x[0], tsim._default_sim_params.sce_models)
-    no, ns, sb = tp0['norm_offsets'], tp0['norm_scales'], tsim._sce_siren
+    tsim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=os.path.join(HERE, 'truth_40cm.npz'), distortion_poly_deg=args.truth_deg)
+    rsim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=os.path.join(HERE, 'truth_40cm.npz'), distortion_poly_deg=args.rec_deg)
+    tp0 = jax.tree.map(lambda x: x[0], tsim._default_sim_params.distortion_field)
+    no, ns, sb = tp0['norm_offsets'], tp0['norm_scales'], tsim.distortion_state()
     tbase, rbase = tsim._default_sim_params, rsim._default_sim_params
 
     m = run(build_params(preset='jaxtpc', overrides=dict(Lx=Lx, Ly=Ly, Lz=Lz, E0=E0, Q_charge_production=Q,
@@ -95,7 +95,7 @@ def main():
     nx, ny, nz, ef, es = load_noise_params(cfg.noise_spectrum_path); spn = jnp.array(_get_noise_spectrum_shape(nt, ef, es))
     obs = None
     for i0 in range(0, M, 128):
-        o = jax.vmap(lambda ph: (lambda pd: tsim.forward_segments(tbase._replace(sce_models=smodel(Ctruth)), pd[0], pd[1], dx=STEP))(muon(ph)))(PHYS[i0:i0 + 128])
+        o = jax.vmap(lambda ph: (lambda pd: tsim.forward_segments(tbase._replace(distortion_field=smodel(Ctruth)), pd[0], pd[1], dx=STEP))(muon(ph)))(PHYS[i0:i0 + 128])
         if obs is None: obs = [[] for _ in o]
         for pl in range(len(o)): obs[pl].append(o[pl])
     obs = [jnp.concatenate(a, 0) for a in obs]; nplanes = len(obs); knz = jax.random.PRNGKey(0)
@@ -108,7 +108,7 @@ def main():
 
     def model(coeffs, phys):
         pos, de = muon(phys)
-        return rsim.forward_segments(rbase._replace(sce_models=smodel(coeffs)), pos, de, dx=STEP)
+        return rsim.forward_segments(rbase._replace(distortion_field=smodel(coeffs)), pos, de, dx=STEP)
     N0 = PHYS0 / SC                                                      # reco anchor (normalized)
     def loss(coeffs, N, idx):                                            # N = phys/SC (normalized for optimizer)
         sg = jax.vmap(lambda n: model(coeffs, n * SC))(N[idx])

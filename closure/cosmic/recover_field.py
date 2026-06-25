@@ -3,7 +3,7 @@
 SCE-field closure from cosmic-ray muons via the differentiable simulator.
 
 Demonstrates the payoff of making the SCE field a differentiable simulator
-parameter (`sim_params.sce_models`): given cosmic muons with *known* straight
+parameter (`sim_params.distortion_field`): given cosmic muons with *known* straight
 trajectories (entrance/exit on detector surfaces, GeV/MIP so they cross
 without stopping), we can recover the space-charge field by gradient descent
 on the field through the full forward simulation — no hand-derived inverse.
@@ -74,7 +74,7 @@ def _wire_cfg():
             'electric_field': {'field_strength': E0}}
 
 
-def build(n_seg, truth_scale, seed=1, n_tracks=8, omega_0=2.0, truth_npz=None, sce_poly_deg=None):
+def build(n_seg, truth_scale, seed=1, n_tracks=8, omega_0=2.0, truth_npz=None, distortion_poly_deg=None):
     """Build sim with a truth SCE field + a batch of cosmics.
 
     ``truth_npz``: path to a trained SIREN to use as truth (e.g. the
@@ -99,8 +99,7 @@ def build(n_seg, truth_scale, seed=1, n_tracks=8, omega_0=2.0, truth_npz=None, s
     sim = DetectorSimulator(_wire_cfg(), total_pad=n_seg, response_chunk_size=n_seg,
                             include_track_hits=False, differentiable=True,
                             n_segments=n_seg, iterate_mode='scan',
-                            include_electric_dist=True, electric_dist_siren_path=fp,
-                            sce_poly_deg=sce_poly_deg)
+                            distortion=fp, distortion_poly_deg=distortion_poly_deg)
 
     logT, dedx = load_dedx_table_jax()
     rng = np.random.RandomState(0)
@@ -137,16 +136,16 @@ def recover_full(sim, pos, de, step, steps=200, lr=3e-4, init_out_scale=0.5,
     from tools.losses import make_sobolev_weight, sobolev_loss_geomean_log1p
 
     base = sim._default_sim_params
-    truth = base.sce_models
+    truth = base.distortion_field
     FIXED = {k: truth[k] for k in
              ('norm_offsets', 'norm_scales', 'E0', 'v0', 'drift_direction')}
-    omega = sim._sce_siren['omega_0']
+    omega = sim.distortion_state()['omega_0']
 
     def full(par):
         return {**FIXED, 'weights': par['weights'], 'biases': par['biases']}
 
     def fwd(stk):
-        return sim.forward_segments(base._replace(sce_models=stk), pos, de, dx=step)
+        return sim.forward_segments(base._replace(distortion_field=stk), pos, de, dx=step)
     obs = [jax.lax.stop_gradient(s) for s in fwd(truth)]
     planes = tuple(range(len(obs)))
     spec_w = tuple(make_sobolev_weight(*obs[p].shape, max_pad=256, s=1.5)
@@ -219,7 +218,7 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
     from tools.losses import make_sobolev_weight, sobolev_loss_single
 
     base = sim._default_sim_params
-    truth = base.sce_models
+    truth = base.distortion_field
     FIXED = {k: truth[k] for k in
              ('norm_offsets', 'norm_scales', 'E0', 'v0', 'drift_direction')}
 
@@ -242,7 +241,7 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
         jnp.asarray(step_model, jnp.float32), (M,))
 
     def fwd1(stk, p, d, s):
-        return sim.forward_segments(base._replace(sce_models=stk), p, d, dx=s)
+        return sim.forward_segments(base._replace(distortion_field=stk), p, d, dx=s)
 
     # Plane shapes from a single-muon forward (for spec / noise-PSD sizing).
     obs0 = fwd1(truth, pos_all[0], de_all[0], step_arr[0])
@@ -343,7 +342,7 @@ def recover_accum(sim, pos_all, de_all, step, steps=300, lr=3e-4, batch=8,
     # integral. E is evaluated on a regular grid and curl taken by central
     # differences. λ>0 trades data-fit for electrostatic validity; λ=0 is the
     # current setup. This lets us TEST whether validity helps recovery.
-    sb = sim._sce_siren
+    sb = sim.distortion_state()
     Lx = float(2 * truth['norm_scales'][0, 0]) if truth['norm_scales'].ndim == 2 \
         else float(2 * truth['norm_scales'][0])
     _cn = curl_grid_n
@@ -452,7 +451,7 @@ def emag_grid(sim, stacked):
     so edge structure is not under-weighted — important for edge fields, where a
     truncated ±18 grid would optimistically miss the near-wall region.
     """
-    sb = sim._sce_siren
+    sb = sim.distortion_state()
     gx, gy, gz = np.meshgrid(np.linspace(0.5, 19.5, 10), np.linspace(-19.5, 19.5, 10),
                              np.linspace(-19.5, 19.5, 10), indexing='ij')
     grid = jnp.array(np.stack([gx.ravel(), gy.ravel(), gz.ravel()], -1), jnp.float32)
@@ -474,10 +473,10 @@ def main():
 
     sim, pos, de, step = build(args.n_seg, args.truth_scale, n_tracks=args.n_tracks)
     base = sim._default_sim_params
-    truth_stk = base.sce_models
+    truth_stk = base.distortion_field
 
     def fwd(stk):
-        return sim.forward_segments(base._replace(sce_models=stk), pos, de, dx=step)
+        return sim.forward_segments(base._replace(distortion_field=stk), pos, de, dx=step)
     obs = [jax.lax.stop_gradient(s) for s in fwd(truth_stk)]
 
     def sig_loss(stk):

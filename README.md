@@ -233,5 +233,5 @@ Profiler-tuned `production_*.yaml` variants (including the doraemon wire/pixel c
 | `include_electronics` | False | Enable RC-RC electronics response |
 | `include_digitize` | False | Enable ADC digitization |
 | `include_track_hits` | True | Enable track correspondence |
-| `include_electric_dist` | False | Enable space charge effects |
+| `distortion` | None | Field-distortion spec: `None`/`'none'`, an `.npz` path, a list of paths, or a `{'rep':'poly'/'siren', ...}` dict |
 | `differentiable` | False | Enable differentiable path (with `n_segments`) |

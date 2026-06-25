@@ -351,6 +351,7 @@ def save_siren_npz(path, params, omega_0, norm_offsets, norm_scales,
     for i, (W, b) in enumerate(zip(params['weights'], params['biases'])):
         data[f'w_{i}'] = np.asarray(W)
         data[f'b_{i}'] = np.asarray(b)
+    data['type'] = 'siren'   # self-describing distortion-file type tag
     data['n_layers'] = np.int32(len(params['weights']))
     data['omega_0'] = np.float32(omega_0)
     data['norm_offsets'] = np.asarray(norm_offsets, np.float32)

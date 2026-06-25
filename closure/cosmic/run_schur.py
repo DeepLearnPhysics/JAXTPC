@@ -39,7 +39,7 @@ def main():
     M, Kf = args.n_muons, args.k_field
 
     sim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=args.truth)
-    base = sim._default_sim_params; truth = base.sce_models
+    base = sim._default_sim_params; truth = base.distortion_field
     FIXED = {k: truth[k] for k in ('norm_offsets', 'norm_scales', 'E0', 'v0', 'drift_direction')}
     w0 = [np.asarray(w[0]) for w in truth['weights']]; b0 = [jnp.asarray(b) for b in truth['biases']]
     shapes = [w.shape for w in w0]; sizes = [w.size for w in w0]; P = sum(sizes)
@@ -53,7 +53,7 @@ def main():
             ws.append((w + dw[off:off + sz].reshape(sh))[None]); off += sz
         return {**FIXED, 'weights': ws, 'biases': b0}
     def field(a): return field_w(a @ D)
-    def fwd(stk, pos, de): return sim.forward_segments(base._replace(sce_models=stk), pos, de, dx=STEP)
+    def fwd(stk, pos, de): return sim.forward_segments(base._replace(distortion_field=stk), pos, de, dx=STEP)
 
     logT, dedx = load_dedx_table_jax(); rng = np.random.RandomState(0); jr = np.random.RandomState(123)
     De, TH_true, TH_reco = [], [], []
@@ -132,7 +132,7 @@ def main():
     # Delta-space metric: the data integrates Delta along tracks; |E| ~ d(Delta)/dx.
     # Report Delta-MAE alongside |E|-MAE to see if a "floor" is a derivative artifact.
     from tools.sce_siren import siren_delta
-    _sb = sim._sce_siren
+    _sb = sim.distortion_state()
     _gx, _gy, _gz = np.meshgrid(np.linspace(0.5, 19.5, 10), np.linspace(-19.5, 19.5, 10),
                                 np.linspace(-19.5, 19.5, 10), indexing='ij')
     _gd = jnp.array(np.stack([_gx.ravel(), _gy.ravel(), _gz.ravel()], -1), jnp.float32)

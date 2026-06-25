@@ -37,10 +37,10 @@ def main():
     M = args.n_muons
 
     sim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=args.truth)
-    base = sim._default_sim_params; truth = base.sce_models
+    base = sim._default_sim_params; truth = base.distortion_field
     FIXED = {k: truth[k] for k in ('norm_offsets', 'norm_scales', 'E0', 'v0', 'drift_direction')}
     def full(fp): return {**FIXED, 'weights': fp['weights'], 'biases': fp['biases']}
-    def fwd(stk, pos, de): return sim.forward_segments(base._replace(sce_models=stk), pos, de, dx=STEP)
+    def fwd(stk, pos, de): return sim.forward_segments(base._replace(distortion_field=stk), pos, de, dx=STEP)
     fp_truth = {'weights': [w for w in truth['weights']], 'biases': [b for b in truth['biases']]}
 
     logT, dedx = load_dedx_table_jax(); rng = np.random.RandomState(0); jr = np.random.RandomState(123)
@@ -85,7 +85,7 @@ def main():
 
     Et = emag_grid(sim, truth)
     def fmae(fp): return float(jnp.mean(jnp.abs(emag_grid(sim, full(fp)) - Et)))
-    _sb = sim._sce_siren
+    _sb = sim.distortion_state()
     _gx, _gy, _gz = np.meshgrid(np.linspace(0.5, 19.5, 10), np.linspace(-19.5, 19.5, 10), np.linspace(-19.5, 19.5, 10), indexing='ij')
     _gd = jnp.array(np.stack([_gx.ravel(), _gy.ravel(), _gz.ravel()], -1), jnp.float32)
     _tp0 = jax.tree.map(lambda x: x[0], truth)

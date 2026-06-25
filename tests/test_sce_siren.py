@@ -179,7 +179,7 @@ def test_anode_bc_zero_distortion():
 @pytest.mark.slow
 @pytest.mark.requires_kernels
 def test_siren_wires_into_simulator(tmp_path):
-    """A SIREN field loads via electric_dist_siren_path, runs end-to-end, and
+    """A SIREN field loads via distortion=, runs end-to-end, and
     perturbs the readout vs. the no-SCE baseline while staying finite."""
     import jax
     from tools.simulation import DetectorSimulator
@@ -240,7 +240,7 @@ def test_siren_wires_into_simulator(tmp_path):
         return to_dense(sig, sim.config)
 
     base = run()
-    sce = run(include_electric_dist=True, electric_dist_siren_path=path)
+    sce = run(distortion=path)
 
     for k in base:
         assert bool(jnp.all(jnp.isfinite(sce[k]))), f"non-finite signal in {k}"
@@ -253,7 +253,7 @@ def test_siren_wires_into_simulator(tmp_path):
 def test_per_module_different_fields_no_recompile(tmp_path):
     """Two modules (dd=-1 and dd=+1) carry DIFFERENT SCE fields through one
     compiled body. Swapping each module's field (same shapes) must not
-    recompile — per-module variation is data in sim_params.sce_models, not a
+    recompile — per-module variation is data in sim_params.distortion_field, not a
     code branch. Also exercises the dd=+1 frame path."""
     import jax
     from tools.simulation import DetectorSimulator
@@ -316,20 +316,19 @@ def test_per_module_different_fields_no_recompile(tmp_path):
     sim = DetectorSimulator(wire_config, total_pad=TOTAL_PAD,
                             response_chunk_size=RESP_CHUNK, include_track_hits=False,
                             recombination_model='emb',
-                            include_electric_dist=True,
-                            electric_dist_siren_path=paths)
+                            distortion=paths)
     from tools.output import to_dense
     sig0, _, _ = sim.process_event(dep, key=jax.random.PRNGKey(0))
     out0 = to_dense(sig0, sim.config)
     for k in out0:
         assert bool(jnp.all(jnp.isfinite(out0[k])))
 
-    # Swap the per-module fields by overriding sim_params.sce_models with a
+    # Swap the per-module fields by overriding sim_params.distortion_field with a
     # new stacked pytree of the SAME shapes → must NOT recompile.
     n_before = sim._calculator_jit._cache_size()
     sp = sim._default_sim_params
-    swapped = jax.tree.map(lambda x: x[::-1], sp.sce_models)  # reverse volume axis
-    sig1, _, _ = sim.process_event(dep, sim_params=sp._replace(sce_models=swapped),
+    swapped = jax.tree.map(lambda x: x[::-1], sp.distortion_field)  # reverse volume axis
+    sig1, _, _ = sim.process_event(dep, sim_params=sp._replace(distortion_field=swapped),
                                    key=jax.random.PRNGKey(0))
     out1 = to_dense(sig1, sim.config)
     n_after = sim._calculator_jit._cache_size()

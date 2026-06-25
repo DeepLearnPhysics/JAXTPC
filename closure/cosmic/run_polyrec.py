@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Polynomial-field recovery THROUGH the sim (the validated poly _sce_apply).
+"""Polynomial-field recovery THROUGH the sim (the validated poly _apply_distortion).
 
 Field-only (true tracks), obs from the SIREN truth; recover a polynomial Delta field
 via Adam. Metric = poly |E| vs the SIREN-truth |E| on the local emag grid. This is
@@ -30,11 +30,11 @@ def main():
     args = ap.parse_args()
     M, deg = args.n_muons, args.deg
 
-    sim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=args.truth, sce_poly_deg=deg)
-    base = sim._default_sim_params; truth = base.sce_models; tp0 = jax.tree.map(lambda x: x[0], truth)
-    no, ns, sb = tp0['norm_offsets'], tp0['norm_scales'], sim._sce_siren
+    sim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=args.truth, distortion_poly_deg=deg)
+    base = sim._default_sim_params; truth = base.distortion_field; tp0 = jax.tree.map(lambda x: x[0], truth)
+    no, ns, sb = tp0['norm_offsets'], tp0['norm_scales'], sim.distortion_state()
     exps = poly_exps(deg); ncoef = len(exps)
-    def fwd(sm, p, d): return sim.forward_segments(base._replace(sce_models=sm), p, d, dx=STEP)
+    def fwd(sm, p, d): return sim.forward_segments(base._replace(distortion_field=sm), p, d, dx=STEP)
     def polysm(coeffs):
         return {'poly_coeffs': coeffs[None], 'norm_offsets': no[None], 'norm_scales': ns[None],
                 'E0': tp0['E0'][None], 'v0': tp0['v0'][None], 'drift_direction': tp0['drift_direction'][None]}

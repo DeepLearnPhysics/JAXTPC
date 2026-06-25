@@ -29,7 +29,7 @@ OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'closure_full.png
 
 
 def emag_slice(sim, stacked, z_cm=0.0, n=48):
-    sb = sim._sce_siren
+    sb = sim.distortion_state()
     xs = np.linspace(0.5, 19.5, n)
     ys = np.linspace(-19, 19, n)
     XX, YY = np.meshgrid(xs, ys, indexing='ij')
@@ -54,10 +54,10 @@ def main():
     sim, pos, de, step = build(args.n_seg, truth_scale=1.0,
                                n_tracks=args.n_tracks, omega_0=args.omega)
     base = sim._default_sim_params
-    truth = base.sce_models
+    truth = base.distortion_field
 
     def fwd(stk):
-        return sim.forward_segments(base._replace(sce_models=stk), pos, de, dx=step)
+        return sim.forward_segments(base._replace(distortion_field=stk), pos, de, dx=step)
     obs = [jax.lax.stop_gradient(s) for s in fwd(truth)]
 
     planes = tuple(range(len(obs)))

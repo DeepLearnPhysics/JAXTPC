@@ -32,13 +32,13 @@ def main():
     M, deg = args.n_muons, args.deg
 
     sim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=args.truth)
-    base = sim._default_sim_params; truth = base.sce_models
-    tp0 = jax.tree.map(lambda x: x[0], truth); sb = sim._sce_siren
+    base = sim._default_sim_params; truth = base.distortion_field
+    tp0 = jax.tree.map(lambda x: x[0], truth); sb = sim.distortion_state()
     no, ns, om = tp0['norm_offsets'], tp0['norm_scales'], sb['omega_0']
     E0, v0, vt, et = tp0['E0'], tp0['v0'], sb['v_table'], sb['E_table']
     zero_field = {**truth, 'weights': [jnp.zeros_like(w) for w in truth['weights']],
                   'biases': [jnp.zeros_like(b) for b in truth['biases']]}
-    def fwd(field, pos, de): return sim.forward_segments(base._replace(sce_models=field), pos, de, dx=STEP)
+    def fwd(field, pos, de): return sim.forward_segments(base._replace(distortion_field=field), pos, de, dx=STEP)
 
     logT, dedx = load_dedx_table_jax(); rng = np.random.RandomState(0)
     POS, DE = [], []

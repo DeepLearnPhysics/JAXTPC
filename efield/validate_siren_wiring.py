@@ -15,7 +15,7 @@ Pipeline
    maps. This is the number that matters: if |E| and R match, the field that
    reaches recombination in the sim is correct.
 5. Save the trained SIREN to an .npz consumable by
-   ``DetectorSimulator(..., electric_dist_siren_path=...)``.
+   ``DetectorSimulator(..., distortion=...)``.
 
 Run (coarse, ~1-2 min CPU):
     JAX_PLATFORM_NAME=cpu python3 efield/validate_siren_wiring.py --quick

@@ -45,10 +45,10 @@ def main():
     args = ap.parse_args()
     M = args.n_muons
 
-    tsim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=os.path.join(HERE, 'truth_40cm.npz'), sce_poly_deg=args.truth_deg)
-    rsim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=os.path.join(HERE, 'truth_40cm.npz'), sce_poly_deg=args.rec_deg)
-    tp0 = jax.tree.map(lambda x: x[0], tsim._default_sim_params.sce_models)
-    no, ns, sb = tp0['norm_offsets'], tp0['norm_scales'], tsim._sce_siren
+    tsim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=os.path.join(HERE, 'truth_40cm.npz'), distortion_poly_deg=args.truth_deg)
+    rsim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=os.path.join(HERE, 'truth_40cm.npz'), distortion_poly_deg=args.rec_deg)
+    tp0 = jax.tree.map(lambda x: x[0], tsim._default_sim_params.distortion_field)
+    no, ns, sb = tp0['norm_offsets'], tp0['norm_scales'], tsim.distortion_state()
     tbase, rbase = tsim._default_sim_params, rsim._default_sim_params
 
     m = run(build_params(preset='jaxtpc', overrides=dict(Lx=Lx, Ly=Ly, Lz=Lz, E0=E0, Q_charge_production=Q,
@@ -93,7 +93,7 @@ def main():
     nx, ny, nz, ef, es = load_noise_params(cfg.noise_spectrum_path); spn = jnp.array(_get_noise_spectrum_shape(nt, ef, es))
     obs = None  # chunk the obs precompute (vmapping all M OOMs at thousands)
     for i0 in range(0, M, 256):
-        o = jax.vmap(lambda p, d: tsim.forward_segments(tbase._replace(sce_models=smodel(Ctruth)), p, d, dx=STEP))(Ptrue[i0:i0 + 256], De[i0:i0 + 256])
+        o = jax.vmap(lambda p, d: tsim.forward_segments(tbase._replace(distortion_field=smodel(Ctruth)), p, d, dx=STEP))(Ptrue[i0:i0 + 256], De[i0:i0 + 256])
         if obs is None: obs = [[] for _ in o]
         for pl in range(len(o)): obs[pl].append(o[pl])
     obs = [jnp.concatenate(a, 0) for a in obs]
@@ -111,7 +111,7 @@ def main():
         return a[None, :] + ii[:, None] * STEP * dirv[None, :]
     def model(coeffs, th, d):
         pos = track(th)
-        return rsim.forward_segments(rbase._replace(sce_models=smodel(coeffs)), pos, mask_outside_volume(pos, d, HALF), dx=STEP)
+        return rsim.forward_segments(rbase._replace(distortion_field=smodel(coeffs)), pos, mask_outside_volume(pos, d, HALF), dx=STEP)
     def loss(coeffs, TH, idx):
         sg = jax.vmap(lambda th, d: model(coeffs, th, d))(TH[idx], De[idx])
         tot = sum(jnp.mean(jax.vmap(lambda u, v: sobolev_loss_single(u, v, spec[pl]))(sg[pl], obs[pl][idx])) for pl in range(nplanes))

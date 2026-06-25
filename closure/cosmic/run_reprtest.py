@@ -21,7 +21,7 @@ import tools.sce_siren as S
 
 
 def efield(sim, stk, grid):
-    sb = sim._sce_siren; p0 = jax.tree.map(lambda x: x[0], stk)
+    sb = sim.distortion_state(); p0 = jax.tree.map(lambda x: x[0], stk)
     return np.asarray(S.recover_efield({'weights': p0['weights'], 'biases': p0['biases']}, jnp.asarray(grid),
                                        p0['E0'], p0['v0'], sb['v_table'], sb['E_table'],
                                        p0['norm_offsets'], p0['norm_scales'], sb['omega_0']))
@@ -42,7 +42,7 @@ def poly_features(g, d):
 
 def main():
     sim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=os.path.join(HERE, 'truth_40cm.npz'))
-    truth = sim._default_sim_params.sce_models
+    truth = sim._default_sim_params.distortion_field
     gfit, gev = make_grid(12), make_grid(18)
     Ef, Ee = efield(sim, truth, gfit), efield(sim, truth, gev)
     mag_e = np.sqrt((Ee ** 2).sum(-1))

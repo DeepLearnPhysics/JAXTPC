@@ -5,8 +5,7 @@ Generate and validate a per-module SCE-SIREN field for each detector module.
 This is the production tool behind the per-module SCE path: it produces one
 trained SIREN ``.npz`` per module, ready to pass to the simulator as a list
 
-    DetectorSimulator(..., include_electric_dist=True,
-                      electric_dist_siren_path=['mod0.npz', 'mod1.npz', ...])
+    DetectorSimulator(..., distortion=['mod0.npz', 'mod1.npz', ...])
 
 Each module can have its own space-charge conditions (e.g. a different charge
 production rate Q for a module nearer a high-cosmic-flux region, or a different
@@ -118,7 +117,7 @@ def main():
               f"{r['Ex_mae']:>9.3f}V{r['Emag_rel']:>9.4%}{r['R_rel']:>9.4%}")
     print("=" * 74)
     print("Pass to the simulator (order = volume order):")
-    print("  electric_dist_siren_path=[" +
+    print("  distortion=[" +
           ", ".join(f"'{r['out']}'" for r in results) + "]")
 
 

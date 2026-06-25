@@ -10,7 +10,7 @@ import jax.numpy as jnp
 
 from tools.config import (
     VolumeDeposits, SimParams, VolumeGeometry, SimConfig,
-    VolumeIntermediates, PlaneIntermediates, PixelIntermediates, SCEOutputs,
+    VolumeIntermediates, PlaneIntermediates, PixelIntermediates, DistortionOutputs,
 )
 from tools.drift import compute_drift_to_plane, correct_drift_for_plane, apply_drift_corrections
 from tools.wires import (
@@ -69,9 +69,9 @@ def compute_phi_drift(efield_correction, theta, phi, field_strength_Vcm):
 # ============================================================================
 
 def compute_volume_physics(
-    deposits, sim_params, vol_geom, sce_fn, recomb_fn,
+    deposits, sim_params, vol_geom, distortion_fn, recomb_fn,
 ):
-    """Volume-level physics: recombination + drift + SCE corrections.
+    """Volume-level physics: recombination + drift + distortion corrections.
 
     Parameters
     ----------
@@ -81,8 +81,8 @@ def compute_volume_physics(
         Physics parameters.
     vol_geom : VolumeGeometry
         Static geometry for this volume.
-    sce_fn : callable
-        (positions_cm, velocity_cm_us) -> SCEOutputs.
+    distortion_fn : callable
+        (positions_cm, velocity_cm_us) -> DistortionOutputs.
     recomb_fn : callable
         (de, dx_cm, phi_drift, e_field_Vcm, recomb_params) -> (charges, photons).
 
@@ -94,14 +94,14 @@ def compute_volume_physics(
     positions_cm = deposits.positions_mm / 10.0
     dx_cm = deposits.dx / 10.0
 
-    # Query SCE map once — returns E-field correction and drift corrections.
-    # Velocity is passed so the SCE factory can compute delta_t relative to
+    # Query distortion field once — returns E-field correction and drift corrections.
+    # Velocity is passed so the distortion factory can compute delta_t relative to
     # the runtime velocity (avoiding mismatch with the map's generation velocity).
-    sce = sce_fn(positions_cm, sim_params.velocity_cm_us)
+    distortion = distortion_fn(positions_cm, sim_params.velocity_cm_us)
 
     # Process normalized E-field correction for recombination
     phi_drift, E_mag = compute_phi_drift(
-        sce.efield_correction, deposits.theta, deposits.phi,
+        distortion.efield_correction, deposits.theta, deposits.phi,
         sim_params.recomb_params.field_strength_Vcm,
     )
     charges, photons = recomb_fn(
@@ -124,10 +124,10 @@ def compute_volume_physics(
         sim_params.velocity_cm_us, 0.0
     )
 
-    # Apply SCE drift corrections: time is primary, distance derived from it
+    # Apply distortion drift corrections: time is primary, distance derived from it
     drift_dist, drift_time, yz = apply_drift_corrections(
         drift_time, yz,
-        sce.drift_time_corr_us, sce.drift_yz_corr_cm,
+        distortion.drift_time_corr_us, distortion.drift_yz_corr_cm,
         sim_params.velocity_cm_us,
     )
 

@@ -39,10 +39,10 @@ def main():
     args = ap.parse_args()
     M = args.n_muons
 
-    tsim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=os.path.join(HERE, 'truth_40cm.npz'), sce_poly_deg=args.truth_deg)
-    rsim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=os.path.join(HERE, 'truth_40cm.npz'), sce_poly_deg=args.rec_deg)
-    tp0 = jax.tree.map(lambda x: x[0], tsim._default_sim_params.sce_models)
-    no, ns, sb = tp0['norm_offsets'], tp0['norm_scales'], tsim._sce_siren
+    tsim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=os.path.join(HERE, 'truth_40cm.npz'), distortion_poly_deg=args.truth_deg)
+    rsim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=os.path.join(HERE, 'truth_40cm.npz'), distortion_poly_deg=args.rec_deg)
+    tp0 = jax.tree.map(lambda x: x[0], tsim._default_sim_params.distortion_field)
+    no, ns, sb = tp0['norm_offsets'], tp0['norm_scales'], tsim.distortion_state()
 
     # real field maps
     m = run(build_params(preset='jaxtpc', overrides=dict(Lx=Lx, Ly=Ly, Lz=Lz, E0=E0, Q_charge_production=Q,
@@ -79,11 +79,11 @@ def main():
         p, d, _, _, _ = generate_cosmic_chord(jnp.array(a), jnp.array(b), 4000., NSEG, logT, dedx, half_extents_mm=HALF, step_mm=STEP)
         P.append(p); D.append(d)
     P = jnp.stack(P); D = jnp.stack(D)
-    obs = [jax.lax.stop_gradient(s) for s in jax.vmap(lambda p, d: tsim.forward_segments(tsim._default_sim_params._replace(sce_models=smodel(Ctruth)), p, d, dx=STEP))(P, D)]
+    obs = [jax.lax.stop_gradient(s) for s in jax.vmap(lambda p, d: tsim.forward_segments(tsim._default_sim_params._replace(distortion_field=smodel(Ctruth)), p, d, dx=STEP))(P, D)]
     nplanes = len(obs)
     rbase = rsim._default_sim_params
     def loss(coeffs):
-        sg = jax.vmap(lambda p, d: rsim.forward_segments(rbase._replace(sce_models=smodel(coeffs)), p, d, dx=STEP))(P, D)
+        sg = jax.vmap(lambda p, d: rsim.forward_segments(rbase._replace(distortion_field=smodel(coeffs)), p, d, dx=STEP))(P, D)
         return sum(jnp.mean((a - b) ** 2) for a, b in zip(sg, obs)) / nplanes
 
     nc = len(exps_r); coeffs = jnp.zeros((nc, 3)); opt = optax.adam(args.lr); st = opt.init(coeffs)

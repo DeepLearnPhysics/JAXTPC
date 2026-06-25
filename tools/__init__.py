@@ -20,7 +20,7 @@ from tools.config import (
     SimConfig,
     ModifiedBoxParams,
     EMBParams,
-    SCEOutputs,
+    DistortionOutputs,
     VolumeGeometry,
     VolumeIntermediates,
     PlaneIntermediates,
@@ -61,7 +61,7 @@ __all__ = [
     # Core types
     'DepositData', 'VolumeDeposits', 'SimParams', 'SimConfig',
     'ModifiedBoxParams', 'EMBParams',
-    'SCEOutputs', 'VolumeGeometry', 'VolumeIntermediates', 'PlaneIntermediates',
+    'DistortionOutputs', 'VolumeGeometry', 'VolumeIntermediates', 'PlaneIntermediates',
     'DiffusionConfig', 'TrackHitsConfig', 'DigitizationConfig', 'ResponseKernel',
     # Recombination
     'RECOMB_MODELS', 'compute_quanta', 'XI_FN',

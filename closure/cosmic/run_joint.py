@@ -38,10 +38,10 @@ def main():
     args = ap.parse_args()
 
     sim, _, _, _ = build(160, 1.0, n_tracks=1, truth_npz=args.truth)
-    base = sim._default_sim_params; truth = base.sce_models
+    base = sim._default_sim_params; truth = base.distortion_field
     FIXED = {k: truth[k] for k in ('norm_offsets', 'norm_scales', 'E0', 'v0', 'drift_direction')}
     def full(fp): return {**FIXED, 'weights': fp['weights'], 'biases': fp['biases']}
-    def fwd(stk, pos, de): return sim.forward_segments(base._replace(sce_models=stk), pos, de, dx=STEP)
+    def fwd(stk, pos, de): return sim.forward_segments(base._replace(distortion_field=stk), pos, de, dx=STEP)
 
     logT, dedx = load_dedx_table_jax(); rng = np.random.RandomState(0); jr = np.random.RandomState(123)
     Pt, De, EPt, EPm = [], [], [], []

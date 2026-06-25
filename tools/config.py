@@ -557,10 +557,10 @@ class SimParams(NamedTuple):
     diffusion_long_cm2_us: jnp.ndarray    # Longitudinal diffusion coefficient
     recomb_params: Any              # ModifiedBoxParams or EMBParams
     response_models: Any            # dict {(vol_idx, plane_type): eqx.Module} or None
-    sce_models: Any                 # tuple of per-volume models, or None
+    distortion_field: Any           # tuple of per-volume models, or None
 
 
-class SCEOutputs(NamedTuple):
+class DistortionOutputs(NamedTuple):
     """Raw outputs from SCE correction map query."""
     efield_correction: jnp.ndarray  # (N, 3) dimensionless, E_local / |E_nominal|
     drift_time_corr_us: jnp.ndarray  # (N,) drift time correction in μs (delta_t = t_drift - t_nominal)
@@ -641,7 +641,7 @@ class PixelIntermediates(NamedTuple):
 
 
 def create_sim_params(detector_config, recombination_model='modified_box',
-                      response_models=None, sce_models=None):
+                      response_models=None, distortion_field=None):
     """Create SimParams from raw parsed YAML detector config.
 
     Parameters
@@ -652,7 +652,7 @@ def create_sim_params(detector_config, recombination_model='modified_box',
         'modified_box' or 'emb'.
     response_models : dict or None
         {(vol_idx, plane_type): eqx.Module} for NN response, or None for DKernel.
-    sce_models : tuple or None
+    distortion_field : tuple or None
         Per-volume tuple of SCE models, or None for HDF5/nominal.
     """
     from tools.geometry import get_drift_velocity
@@ -715,7 +715,7 @@ def create_sim_params(detector_config, recombination_model='modified_box',
         diffusion_long_cm2_us=diffusion_long,
         recomb_params=recomb,
         response_models=response_models,
-        sce_models=sce_models,
+        distortion_field=distortion_field,
     )
 
 
