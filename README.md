@@ -27,8 +27,7 @@ JAXTPC/
 │   ├── particle_generator.py     # Differentiable muon track generation
 │   ├── losses.py                 # Sobolev / spectral loss functions
 │   ├── coherent_noise.py         # Tagged coherent (per-wire-group) noise model
-│   ├── pointcloud.py             # Signal → weighted point cloud (OT losses)
-│   ├── space_points.py           # Rough 3D reconstruction from wire crossings
+│   ├── pixel_visualization.py    # Pixel-readout signal visualization (sparse/dense projections)
 │   ├── nn_utils.py               # NN inference utilities
 │   ├── sparse_utils.py           # Dense ↔ truly-sparse format conversion
 │   ├── utils.py                  # Misc shared helpers
@@ -57,7 +56,7 @@ JAXTPC/
 │   ├── cubic_wireplane_config.yaml   # Default: dual-TPC, SBND-scale
 │   ├── sbnd_config.yaml              # SBND
 │   ├── microboone_config.yaml        # MicroBooNE
-│   ├── icarus_config.yaml            # ICARUS (4 volumes)
+│   ├── icarus_config.yaml            # ICARUS (2 volumes)
 │   ├── dune_ndlar_config.yaml        # DUNE ND-LAr (70 volumes)
 │   ├── dune_fd1_config.yaml          # DUNE Far Detector
 │   ├── cubic_pixel_config.yaml       # Pixel readout test config
@@ -224,9 +223,9 @@ The simulator returns `(response_signals, track_hits_raw, deposits)`:
 | `cubic_wireplane_config.yaml` | 2 | Wire (U/V/Y) | Default, SBND-scale |
 | `sbnd_config.yaml` | 2 | Wire | SBND |
 | `microboone_config.yaml` | 1 | Wire | MicroBooNE |
-| `icarus_config.yaml` | 4 | Wire | ICARUS |
+| `icarus_config.yaml` | 2 | Wire | ICARUS |
 | `dune_ndlar_config.yaml` | 70 | Wire | DUNE ND-LAr (5x7 module grid) |
-| `dune_fd1_config.yaml` | 2 | Wire | DUNE Far Detector |
+| `dune_fd1_config.yaml` | 4 | Wire | DUNE Far Detector |
 | `cubic_pixel_config.yaml` | 2 | Pixel | Pixel readout (cubic geometry) |
 
 Profiler-tuned `production_*.yaml` variants (including the doraemon wire/pixel configs) are also under `config/`.

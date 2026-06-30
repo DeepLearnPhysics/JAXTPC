@@ -21,17 +21,18 @@ JAXTPC/
 │   ├── kernels.py             # Response kernel loading, DCT diffusion table, runtime interpolation
 │   ├── electronics.py         # RC⊗RC electronics shaping via sparse FFT
 │   ├── noise.py               # MicroBooNE noise model (ENC from wire length)
+│   ├── coherent_noise.py      # Tagged coherent (per-wire-group) noise model
 │   ├── track_hits.py          # Track hit labeling (group-based charge attribution)
 │   ├── efield_distortions.py  # Space charge effects (SCE maps, trilinear interpolation)
 │   ├── loader.py              # HDF5 I/O, volume splitting, group ID assignment, padding
 │   ├── output.py              # Output format conversion (dense ↔ sparse ↔ bucketed)
 │   ├── visualization.py       # Multi-plane plotting (dense + sparse, DeadbandNorm)
+│   ├── pixel_visualization.py # Pixel-readout signal visualization (sparse/dense projections)
 │   ├── particle_generator.py  # Differentiable muon track generation (PDG dE/dx tables)
 │   ├── losses.py              # Multi-scale spectral blur MSE loss for optimization
-│   ├── pointcloud.py          # Signal → weighted point cloud for OT losses
 │   ├── nn_utils.py            # NN inference utilities (symlog, kernel unfolding)
 │   ├── sparse_utils.py        # Dense ↔ truly sparse format conversion
-│   ├── space_points.py        # Rough 3D reconstruction from wire crossings
+│   ├── utils.py               # Standalone HDF5 event I/O (save_event/load_event)
 │   ├── responses/             # Pre-computed wire response kernels (NPZ per plane type)
 │   └── data/                  # PDG muon dE/dx table
 ├── production/                # Batch processing pipeline
@@ -49,7 +50,7 @@ JAXTPC/
 │   ├── scan_values.py         # CPU-only values + config patch + plots
 │   ├── find_optimal_chunks.py # Two-pass timing → response_chunk, hits_chunk
 │   └── threshold_analysis.py  # Post-sim sweep → threshold_adc, corr_threshold
-├── tests/                     # Pytest suite (77 tests, CPU-only, synthetic data)
+├── tests/                     # Pytest suite (264 tests, CPU-only, synthetic data)
 │   └── conftest.py            # Fixtures: jax_key, minimal_detector_config, ...
 ├── viewer/                    # Interactive 3D/2D HTML viewer + GIF export
 │   ├── serve_viewer.py        # Local HTTP server with byte-range HDF5 support
@@ -173,7 +174,7 @@ The wire and pixel paths use *different* unit conventions at the hits stage. Thi
 
 | Threshold | Wire | Pixel | Where applied |
 |---|---|---|---|
-| `inter_thresh` | ENC | ADC | In JIT: box compaction (`track_hits.py:1144` wire / `:839` pixel) and merge per-chunk pruning (`merge_chunk_sensor_hits:315`) |
+| `inter_thresh` | ENC | ADC | In JIT: box compaction (`track_hits.py:1144` wire / `:839` pixel) and merge per-chunk pruning (`merge_chunk_sensor_hits:367`) |
 | `corr_threshold` / `hits_threshold` | ENC | ADC | Host, CSR encode (`save.py:447` wire / `:528` pixel) |
 | `threshold_adc` | ADC | ADC | Host, `to_sparse` (`output.py:155, 203, 250…`) on sensor only |
 
@@ -226,7 +227,7 @@ Produces three HDF5 file types per batch:
 
 A fourth file, `{dataset}_labl_{NNNN}.h5`, carries per-track labels and the per-deposit → track_id foreign key. It is produced separately via `production/make_labl.py` (temp stand-in; reads hits + edepsim). See `production/README.md` for the labl schema and workflow.
 
-Threaded save architecture: reader prefetch thread loads the next event's HDF5 while GPU sim runs; main thread dispatches sim; save worker threads (default 4) encode CSR + write HDF5 in parallel with per-file locks (`sen_lock`, `step_lock`, `hits_lock`) so sensor/step/hits writes overlap across workers. Enable `JAXTPC_PROFILE_SAVE=1` to see per-phase timings (encode/lockwait/write-sensor/write-step/write-hits) in the save log.
+Threaded save architecture: reader prefetch thread loads the next event's HDF5 while GPU sim runs; main thread dispatches sim; save worker threads (default 2) encode CSR + write HDF5 in parallel with per-file locks (`sen_lock`, `step_lock`, `hits_lock`) so sensor/step/hits writes overlap across workers. Enable `JAXTPC_PROFILE_SAVE=1` to see per-phase timings (encode/lockwait/write-sensor/write-step/write-hits) in the save log.
 
 **Output compression** (`--codec`, default `blosc-zstd`): all datasets are compressed with the codec set via `production/save.py:set_codec`. blosc-zstd is smaller than gzip *and* faster on both read and write (gzip is Pareto-dominated). Alternatives: `blosc-lz4hc` (gzip's size, ~4× faster reads), `blosc-lz4` (fastest read+write, +19% size), `gzip`, `lzf`. **Reading non-gzip output requires `import hdf5plugin`** — `production/load.py` and pimm-data's readers register it automatically; ad-hoc `h5py` consumers must import it themselves. Re-encode existing files between codecs with `pimm-data/scripts/transcode_codec.py`.
 
@@ -242,10 +243,10 @@ track_hits, truth_dense, g2t = load_event_hits(hits_path, event_idx=0, num_time_
 
 ### Tests
 ```bash
-# Fast tests only (~7s)
+# Fast tests only (~2.5 min on CPU)
 JAX_PLATFORM_NAME=cpu python3 -m pytest tests/ -v -m "not slow"
 
-# Full suite, includes integration (~90s) — requires response kernel NPZ files
+# Full suite, includes integration (~13 min on CPU) — requires response kernel NPZ files
 JAX_PLATFORM_NAME=cpu python3 -m pytest tests/ -v
 
 # Single test

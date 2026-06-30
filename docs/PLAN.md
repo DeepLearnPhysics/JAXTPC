@@ -47,7 +47,7 @@ Status legend: `[ ]` todo · `[~]` partial/exists-needs-work · `[x]` done
 `scripts` will collide on install). This is the foundation the install/quickstart
 pages rest on.
 
-- `[ ]` **`pyproject.toml`** — PEP 621 metadata: name `jaxtpc`, version (sync to
+- `[x]` **`pyproject.toml`** — PEP 621 metadata: name `jaxtpc`, version (sync to
   the existing `0.9.0` tag + a `__version__`), `requires-python>=3.10`,
   dependencies from `requirements.txt` (jax bounded `>=0.4,<0.7`, numpy, scipy,
   matplotlib, h5py, hdf5plugin, pyyaml, pillow), optional extras: `dev`
@@ -58,9 +58,9 @@ pages rest on.
   (`tools.` → `jaxtpc.tools.`). Breaking; do as one focused PR. *Decision needed:*
   do this now vs ship as a repo-root project first. (See the production-readiness
   assessment for detail.)
-- `[ ]` **`console_scripts`** — `jaxtpc-batch`, `jaxtpc-setup-production`,
+- `[x]` **`console_scripts`** — `jaxtpc-batch`, `jaxtpc-setup-production`,
   `jaxtpc-viewer`, `jaxtpc-export-gif`, `jaxtpc-make-labl`.
-- `[ ]` **`LICENSE`**, `[ ]` **`CITATION.cff`** (this is a tool that will be cited),
+- `[ ]` **`LICENSE`**, `[x]` **`CITATION.cff`** (this is a tool that will be cited),
   `[ ]` **`CONTRIBUTING.md`**.
 - `[ ]` **Ship package data** — `tools/responses/*.npz`, `tools/data/*.csv`,
   `config/*.yaml`, and the runtime assets currently outside the package
@@ -193,14 +193,14 @@ work in CI and for external users; show the `load_event(...)` swap for real data
 ## 9. Phased execution plan
 
 **Phase 0 — foundation (unblocks "install + run")**
-- `[ ]` `pyproject.toml`, `LICENSE`, `CITATION.cff`
+- `[ ]` `LICENSE` (`pyproject.toml` + `CITATION.cff` done)
 - `[ ]` decide packaging layout (src/jaxtpc namespace vs repo-root)
 - `[ ]` relocate/declare the 3 out-of-package runtime assets
 
 **Phase 1 — front door (external users)**
-- `[ ]` mkdocs skeleton + CI deploy + API auto-gen
-- `[ ]` `index`, `install`, `quickstart`; NB 00
-- `[ ]` `physics/units.md` + `concepts/coordinates.md` (the top footguns)
+- `[ ]` mkdocs CI deploy + API auto-gen (skeleton + pages built)
+- `[x]` `index`, `install`, `quickstart`; NB 00
+- `[x]` `physics/units.md` + `concepts/coordinates.md` (the top footguns)
 
 **Phase 2 — physics & tutorials**
 - `[ ]` NB 01–04; physics pages; detector config schema
