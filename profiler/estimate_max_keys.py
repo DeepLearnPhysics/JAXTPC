@@ -50,7 +50,7 @@ def _cdf_1d(mu, sigma, n):
     return 0.5 * (erf(hi / (sigma * np.sqrt(2))) - erf(lo / (sigma * np.sqrt(2))))
 
 
-def build_wire_element_table(diffusion, num_s=16, thresh_frac=THRESH_FRAC):
+def build_wire_element_table(diffusion, num_s=32, thresh_frac=THRESH_FRAC):
     """Build per-s element count from CDF diffusion kernel.
 
     Returns element_table shape (num_s,) int32: number of kernel
@@ -74,7 +74,7 @@ def build_wire_element_table(diffusion, num_s=16, thresh_frac=THRESH_FRAC):
     return table
 
 
-def build_pixel_element_table(sim_config, vol_geom, num_s=16,
+def build_pixel_element_table(sim_config, vol_geom, num_s=32,
                               thresh_frac=THRESH_FRAC,
                               pixel_kernel_path=None):
     """Build per-s element count from the actual pixel response kernel.
@@ -145,7 +145,7 @@ def _estimate_keys_element_count(group_ids, s_idx, keep, element_table,
 
 # ── charge-aware footprint (matches box path: cells where |signal|>inter_thresh)
 
-def build_pixel_value_table(sim_config, vol_geom, num_s=16,
+def build_pixel_value_table(sim_config, vol_geom, num_s=32,
                             pixel_kernel_path=None):
     """Sorted-DESC |kernel value| per s-level (ADC per electron) for pixel.
 
@@ -176,7 +176,7 @@ def build_pixel_value_table(sim_config, vol_geom, num_s=16,
     return [np.sort(np.abs(out_np[i]).ravel())[::-1] for i in range(num_s)]
 
 
-def build_wire_value_table(diffusion, num_s=16):
+def build_wire_value_table(diffusion, num_s=32):
     """Sorted-DESC |kernel value| per s-level for wire (CDF diffusion kernel)."""
     K_wire, K_time = diffusion.K_wire, diffusion.K_time
     msw, mst = diffusion.max_sigma_trans_unitless, diffusion.max_sigma_long_unitless
@@ -510,7 +510,9 @@ def estimate_max_keys(data_paths, config_path, events_per_file=None,
 
     detector_config = generate_detector(config_path)
     sim_config = create_sim_config(detector_config)
-    num_s = 16
+    # Match the sim's diffusion-table resolution so the max_keys geometry
+    # estimate is built from the same s-levels the simulator uses.
+    num_s = sim_config.volumes[0].diffusion.num_s
 
     # Build element count tables per volume (once, on main process)
     element_tables = {}

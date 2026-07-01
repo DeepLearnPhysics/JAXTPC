@@ -42,7 +42,7 @@ from profiler.find_optimal_pad import (
 )
 
 
-def _build_element_tables(sim_config, num_s=16):
+def _build_element_tables(sim_config, num_s=32):
     tables = {}
     for v, vg in enumerate(sim_config.volumes):
         if vg.readout_type == 'pixel':

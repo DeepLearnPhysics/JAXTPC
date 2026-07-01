@@ -188,7 +188,7 @@ def generate_dkernel_table(sigma_trans_max, sigma_long_max,
     return vmap(make_level)(s_levels)
 
 
-def create_diffusion_kernel_array(planes=['U', 'V', 'Y'], num_s=16, kernel_dir=None,
+def create_diffusion_kernel_array(planes=['U', 'V', 'Y'], num_s=32, kernel_dir=None,
                                  time_spacing=0.5,
                                  max_sigma_trans_unitless=None, max_sigma_long_unitless=None):
     """
@@ -386,7 +386,7 @@ def interpolate_diffusion_kernel_batch(DKernel, s_observed_batch, w_offset_batch
 # HIGH-LEVEL API
 # ============================================================================
 
-def load_response_kernels(response_path=None, num_s=16,
+def load_response_kernels(response_path=None, num_s=32,
                          time_spacing=0.5,
                          max_sigma_trans_unitless=None, max_sigma_long_unitless=None):
     """
@@ -739,7 +739,7 @@ def apply_pixel_diffusion_response(DKernel, s_values, py_offsets, pz_offsets,
         pixel_spacing, num_py, num_pz, rebin_factor)
 
 
-def load_pixel_response_kernel(npz_path, num_s=16, time_spacing=0.5,
+def load_pixel_response_kernel(npz_path, num_s=32, time_spacing=0.5,
                                 pixel_pitch_cm=0.4,
                                 max_sigma_trans_unitless=None,
                                 max_sigma_long_unitless=None):

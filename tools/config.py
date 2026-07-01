@@ -263,7 +263,7 @@ def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50
                       include_intrinsic_noise=False, include_coherent_noise=False,
                       include_electronics=False,
                       include_track_hits=False, include_digitize=False,
-                      track_config=None, include_diffusion=True, num_s=16):
+                      track_config=None, include_diffusion=True, num_s=32):
     """Create SimConfig from raw parsed YAML detector configuration.
 
     Reads per-volume geometry from the 'volumes' array in the config.
