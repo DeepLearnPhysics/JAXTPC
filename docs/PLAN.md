@@ -239,6 +239,34 @@ Ranked by how badly they bite, with code location and the page that owns each.
 
 ---
 
+## 8b. Alternate modes & example code — keep and document (do NOT delete)
+
+A value-first audit (2026) found that most "uncalled" code is intentional:
+alternate modes, reference implementations, public API, toy generators, and
+planned scaffolding. **These are kept on purpose and are documentation
+material** — showcase them as the framework's option menu. Only strictly-
+superseded cruft was removed (commit `ed85862`: `compute_gaussian_diffusion` +
+`prepare_pixel_deposit_with_diffusion`, `label_merged_hits`, `diff_dedx` +
+`_softplus`, the orphan `load._plane_label`, `export_gif.golden_hash_colors`).
+
+| Mode / surface | Code | Status | Document in |
+|---|---|---|---|
+| **Wire bucketed accumulation** (memory-saver) | `compute_plane_signal_bucketed`, `compute_bucket_maps`, `sparse_buckets_to_dense`, `generate_noise_bucketed`, `visualize_active_buckets`; compact reference `accumulate_response_signals_sparse_bucketed` | LIVE (`use_bucketed`/`--bucketed`) | `concepts/capacities.md` + `viz/plotting.md` + API |
+| **`vmap` volume iteration** | `vmap_over`, `iterate_mode='vmap'` | LIVE (constructor flag) | `architecture/simulator.md` (scan vs vmap, D3) |
+| **Merge track-hits path** | `merge_chunk_sensor_hits`, `box_enabled=False` branch | LIVE (non-default) | `truth/track-hits.md` (box vs merge) |
+| **Legacy standalone track-hits** | `group_hits_by_track` / `label_hits` / `sparse_hits_to_dense` | test-only, marked legacy | `truth/track-hits.md` (mark legacy) |
+| **Standalone sparse↔dense API** | `sparse_utils.py`; `sim.to_dense`/`to_sparse` | reference/API | `viz/plotting.md` + API |
+| **Standalone single-file HDF5 I/O** | `utils.py` (`save_event`/`load_event`/…, SCE I/O) | utility/planned | `contributing/io-formats-internal.md` |
+| **Toy generators** | `particle_generator` numpy muon gen; `efield_distortions.generate_toy_efield_map`, `compute_drift_corrections` | utility/planned (SCE port) | `differentiable/particle-generation.md`, `physics/sce.md` |
+| **Extra viewers** | `visualize_single_plane`/`_waveforms`/`_wire_planes`; `visualize_pixel_3d`/`_buckets`/`_all_pixel_volumes` | utility | `viz/plotting.md`, `detector/wire-vs-pixel.md` |
+
+**Needs-decision (documented, not yet resolved):**
+- **Pixel bucketed mode** — `physics.compute_pixel_bucket_maps` / `compute_pixel_signal_bucketed` (+ `wires.scatter_contributions_to_pixel_buckets_batched`, `build_bucket_mapping_3d`, `pixel_visualization.visualize_pixel_buckets`) is a *complete* pixel analog of the wire bucketed mode whose output is already decoded (`output.py`), but `simulation.py`'s pixel branch never dispatches it. **Decision: keep, document as the pixel analog / reference** (not wired end-to-end yet). One dispatch site from working if ever wanted.
+- **`nn_utils.py`** (`inv_symlog`/`unfold_kernel`/`normalize_positions`) — NN/SIREN response scaffolding with no in-repo consumer; keep as **planned** (tie to SCE-SIREN work), add a "not yet wired" marker.
+- **Module-level `finalize_track_hits`** (`track_hits.py`) — a name-collision duplicate of the live `DetectorSimulator.finalize_track_hits` *method* (the method is the entry point; the module function is only stale-imported by one test). Resolve later: remove the duplicate, or de-dup by having the method call it.
+
+---
+
 ## 9. Reading guide — the code spine (content spec for `architecture/reading-guide.md`)
 
 Walk the reader through the code in **execution order**, naming real functions:
