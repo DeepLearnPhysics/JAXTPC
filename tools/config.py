@@ -74,10 +74,10 @@ class DiffusionConfig(NamedTuple):
 class TrackHitsConfig(NamedTuple):
     """Configuration for track hit labeling.
 
-    Threshold units differ per readout (see CLAUDE.md "Units convention"):
-    wire hits are in ENC (electrons), pixel hits are in ADC. So ``inter_thresh``
-    and downstream ``hits_threshold`` are interpreted in ENC for wire and ADC
-    for pixel — same field name, different units.
+    Threshold units differ per readout: wire hits are in ENC (electrons), pixel
+    hits are in ADC. So ``inter_thresh`` (and the downstream host-side
+    ``corr_threshold``) are interpreted in ENC for wire and ADC for pixel —
+    same field, different units.
     """
     threshold: float        # Minimum charge to keep (legacy; not used in production)
     max_tracks: int         # Max tracks for array pre-allocation
@@ -296,7 +296,7 @@ def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50
     include_diffusion : bool
         If True, compute DiffusionConfig per volume.
     num_s : int
-        Number of diffusion levels for kernel interpolation. Default 16.
+        Number of diffusion levels for kernel interpolation. Default 32.
     """
     from tools.geometry import (
         get_drift_velocity, get_plane_geometry_for_volume,
