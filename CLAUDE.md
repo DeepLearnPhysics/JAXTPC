@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-JAXTPC is a GPU-accelerated physics simulation framework for modeling liquid argon Time Projection Chambers (TPCs) used in neutrino physics experiments. It simulates the full detector response chain: charge recombination, electron drift with lifetime attenuation, diffusion-convolved wire/pixel response via DCT-based kernel interpolation, optional electronics shaping, noise injection, and ADC digitization. Supports arbitrary multi-volume detector geometries (SBND, MicroBooNE, ICARUS, DUNE FD1, DUNE ND-LAr) with both wire and pixel readout. The framework supports both production batch processing and a differentiable path for gradient-based optimization.
+JAXTPC is a GPU-accelerated physics simulation framework for modeling liquid argon Time Projection Chambers (TPCs) used in neutrino physics experiments. It simulates the full detector response chain: charge recombination, electron drift with lifetime attenuation, diffusion-convolved wire/pixel response via Gaussian-blurred kernel interpolation, optional electronics shaping, noise injection, and ADC digitization. Supports arbitrary multi-volume detector geometries (SBND, MicroBooNE, ICARUS, DUNE FD1, DUNE ND-LAr) with both wire and pixel readout. The framework supports both production batch processing and a differentiable path for gradient-based optimization.
 
 ## Repository Structure
 
@@ -18,7 +18,7 @@ JAXTPC/
 │   ├── drift.py               # JIT-compiled drift physics (distance, time, SCE corrections)
 │   ├── recombination.py       # Charge/light calculation (Modified Box + EMB models)
 │   ├── wires.py               # Wire geometry, deposit preparation, dense/bucketed accumulation
-│   ├── kernels.py             # Response kernel loading, DCT diffusion table, runtime interpolation
+│   ├── kernels.py             # Response kernel loading, Gaussian diffusion table, runtime interpolation
 │   ├── electronics.py         # RC⊗RC electronics shaping via sparse FFT
 │   ├── noise.py               # MicroBooNE noise model (ENC from wire length)
 │   ├── coherent_noise.py      # Tagged coherent (per-wire-group) noise model
@@ -149,7 +149,7 @@ For each event, per volume, per plane:
 
 3. **Wire geometry** (`wires.py`): Project (y,z) → closest wire index and distance for each plane's angle/spacing.
 
-4. **Response** (`kernels.py`): DCT-domain Gaussian blurring produces a `DKernel` table indexed by diffusion level `s = drift_distance/max_drift`. Runtime: interpolate DKernel at each deposit's s-value, produce `(N, kW, kH)` response contributions.
+4. **Response** (`kernels.py`): reflect-pad + separable Gaussian convolution produces a `DKernel` table indexed by diffusion level `s = drift_distance/max_drift`. Runtime: interpolate DKernel at each deposit's s-value, produce `(N, kW, kH)` response contributions.
 
 5. **Accumulation** (`physics.py`): `fori_loop` over chunks of `response_chunk_size` deposits:
    - **Dense mode**: scatter-add `(kW, kH)` kernels into `(num_wires, num_time)` array

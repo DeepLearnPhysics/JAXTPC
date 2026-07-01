@@ -384,6 +384,10 @@ def label_merged_hits(state_pk, state_tr, state_ch, state_count,
     """
     Find dominant track per pixel from merged state.
 
+    NOTE: currently unused. The box track-hits path is the production default;
+    this belongs to the non-default *merge* fallback and is not the legacy
+    standalone path (see the module docstring).
+
     State is already sorted by (pixel_key, track) from the merge loop.
     Applies final threshold, then uses segment_max to find the track
     with highest charge at each (wire, time) pixel.
@@ -478,6 +482,9 @@ def label_merged_hits(state_pk, state_tr, state_ch, state_count,
 def sparse_hits_to_dense(track_hit_result, num_wires, num_time_steps):
     """
     Convert sparse track hits to dense 2D array.
+
+    Part of the legacy standalone track-hit path (group_hits_by_track /
+    label_hits / sparse_hits_to_dense); NOT used by the simulator.
 
     Uses hits_by_track which contains [wire, time, charge] per hit.
     This function should be called OUTSIDE the simulation when dense

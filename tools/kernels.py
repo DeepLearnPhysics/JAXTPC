@@ -1,12 +1,14 @@
 """
 Response Kernel Module
 
-Loads wire response kernels, builds diffusion tables via DCT-domain Gaussian
-blurring, and provides JIT-compiled interpolation for runtime signal generation.
+Loads wire response kernels, builds diffusion tables by reflect-padding each
+base kernel and applying a separable 2-D Gaussian convolution
+(``jax.lax.conv_general_dilated``) at each diffusion level, and provides
+JIT-compiled interpolation for runtime signal generation.
 
 Contents:
 1. Kernel Loading - Load NPZ kernel files
-2. DCT Diffusion - Generate DKernel tables (vmap over s levels)
+2. Diffusion Table - Generate DKernel tables (vmap over s levels)
 3. Runtime Interpolation - JIT-compiled batch interpolation
 4. High-Level API - load_response_kernels(), apply_diffusion_response()
 """

@@ -1,0 +1,24 @@
+%% D1 — JAXTPC pipeline data-flow (embed in architecture/pipeline-overview.md
+%% inside a ```mermaid fenced block). Shows the wire path through the
+%% post-processing chain and the pixel branch that skips it, plus the two
+%% units transitions (dimensionless kernel x electrons = ENC; digitize = ADC).
+flowchart LR
+  A["dE, dx, theta, phi<br/>(DepositData)"] --> B["Recombination<br/><i>recombination.py</i>"]
+  B -->|"Q (e-), L (photons)"| C["Drift + SCE<br/><i>drift.py / efield_distortions.py</i>"]
+  C -->|"drift time, distance"| D["Per-plane correction<br/>+ lifetime attenuation<br/><i>physics.compute_plane_physics</i>"]
+  D --> E["Wire / pixel projection<br/><i>wires.py</i>"]
+  E --> F["DKernel response<br/>(s = d/max_drift interp)<br/><i>kernels.py</i>"]
+  F -->|"x electrons -> ENC"| G["Accumulate<br/>dense / bucketed / box<br/><i>physics.compute_plane_signal</i>"]
+
+  subgraph WIRE["Wire post-processing"]
+    direction LR
+    G --> H["Electronics (RC(x)RC)<br/><i>electronics.py</i>"]
+    H --> I["Noise: intrinsic + coherent<br/><i>noise.py / coherent_noise.py</i>"]
+    I -->|"digitize -> ADC"| J["Digitize<br/><i>electronics.py</i>"]
+  end
+  J --> K["sensor (wire)<br/>ADC, 12-bit"]
+
+  G -. "pixel: single pass, gain baked in,<br/>skips electronics/noise/digitize" .-> L["sensor (pixel)<br/>ADC"]
+
+  classDef units fill:#eef,stroke:#88a;
+  class F,J units;

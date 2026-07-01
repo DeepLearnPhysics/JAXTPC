@@ -23,16 +23,29 @@ theme:
 # Build with the docs extra:  pip install -e ".[docs]" && mkdocs serve
 plugins:
   - search
-  # - mkdocstrings:        # auto API reference from docstrings (enable once docs/reference/api/* added)
-  #     handlers: { python: { paths: ["."] } }
-  # - mkdocs-jupyter:      # render notebooks/ as pages
+  - mkdocstrings:        # auto API reference from docstrings (reference/api/*)
+      handlers:
+        python:
+          paths: ["."]
+          options:
+            docstring_style: numpy
+            show_source: true
+            show_root_heading: true
+            members_order: source
+  - mkdocs-jupyter:      # render notebooks/ as pages
+      include_source: true
+      execute: false     # notebooks are pre-executed; CI runs them separately
 
 markdown_extensions:
   - admonition
   - tables
   - toc: { permalink: true }
   - pymdownx.highlight
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
 
 nav:
   - Home: index.md
