@@ -294,31 +294,6 @@ def build_csda_range_table(log_T_table, dedx_table, n_points=2000):
     return R_dense.astype(np.float32), T_dense.astype(np.float32)
 
 
-def diff_dedx(kinetic_energy_mev, log_T_table, dedx_table):
-    """Differentiable dE/dx lookup via log-energy interpolation.
-
-    Parameters
-    ----------
-    kinetic_energy_mev : scalar
-        Muon kinetic energy in MeV (must be > 0).
-    log_T_table : jnp.ndarray
-        Log of table energies.
-    dedx_table : jnp.ndarray
-        dE/dx values in MeV/cm.
-
-    Returns
-    -------
-    scalar
-        dE/dx in MeV/cm.
-    """
-    return jnp.interp(jnp.log(kinetic_energy_mev), log_T_table, dedx_table)
-
-
-def _softplus(x, beta):
-    """Softplus with temperature: log(1 + exp(beta*x)) / beta."""
-    return jnp.logaddexp(beta * x, 0.0) / beta
-
-
 def _csda_energy_deposits(kinetic_energy_mev, step_size_cm, n_segments,
                           R_cm_table, T_MeV_table, relax_steps=2.0):
     """Compute energy deposits in parallel using CSDA range table.

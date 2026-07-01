@@ -24,11 +24,6 @@ except ImportError:
 _PLANE_LABELS = {0: 'U', 1: 'V', 2: 'Y'}
 
 
-def _plane_label(plane_idx):
-    """Plane index → short label."""
-    return _PLANE_LABELS.get(plane_idx, str(plane_idx))
-
-
 # =============================================================================
 # File paths
 # =============================================================================

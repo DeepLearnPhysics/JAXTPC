@@ -71,22 +71,6 @@ PDG_NAMES = {
 }
 
 
-def golden_hash_colors(ids):
-    """Map integer IDs to HSL colors via golden ratio hash."""
-    unique = np.unique(ids)
-    hues = (np.abs(unique).astype(np.float64) * PHI_FRAC) % 1.0
-    colors = np.zeros((len(ids), 4))
-    id_to_idx = {uid: i for i, uid in enumerate(unique)}
-    for i, uid in enumerate(unique):
-        h = hues[i]
-        s, l = 0.75, 0.55
-        mask = ids == uid
-        rgb = plt.cm.hsv(h)[:3]
-        # Increase saturation
-        colors[mask] = (*rgb, 0.7)
-    return colors
-
-
 def hsl_to_rgb(h, s, l):
     """HSL to RGB conversion."""
     c = (1 - abs(2 * l - 1)) * s
