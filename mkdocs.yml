@@ -75,4 +75,39 @@ nav:
     - Config schema: detector/config-schema.md
     - Presets: detector/presets.md
     - Wire vs pixel: detector/wire-vs-pixel.md
+  - Production:
+    - Batch pipeline: production/batch.md
+    - Data formats: production/data-formats.md
+    - Profiler: production/profiler.md
+    - Scaling: production/scaling.md
+  - Differentiable:
+    - Overview: differentiable/overview.md
+    - Losses: differentiable/losses.md
+    - Particle generation: differentiable/particle-generation.md
+    - Optimization: differentiable/optimization.md
+  - Truth:
+    - Track hits: truth/track-hits.md
+  - Visualization:
+    - Plotting: viz/plotting.md
+    - Viewer & GIF: viz/viewer.md
+  - Reference:
+    - Glossary: reference/glossary.md
+    - FAQ: reference/faq.md
+    - Citation: reference/citation.md
+    - API:
+      - Overview: reference/api/index.md
+      - Core simulation: reference/api/core.md
+      - Data types: reference/api/data-types.md
+      - Loading & config: reference/api/loading.md
+      - Physics: reference/api/physics.md
+      - Response & readout: reference/api/response.md
+      - Post-processing: reference/api/post-processing.md
+      - Truth: reference/api/truth.md
+      - Differentiable: reference/api/differentiable.md
+      - Visualization: reference/api/visualization.md
+      - Production I/O: reference/api/production.md
+  - Contributing:
+    - Development: contributing/development.md
+    - Adding a detector: contributing/adding-a-detector.md
+    - Internal I/O formats: contributing/io-formats-internal.md
   - Roadmap: PLAN.md
