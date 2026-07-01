@@ -54,6 +54,7 @@ deposits = load_event("events.h5", cfg, event_idx=0)
 
 ## Next steps
 
+- [Reading guide](architecture/reading-guide.md) — how the code above actually works, function by function
 - [`notebooks/getting_started/wire_simulation.ipynb`](https://github.com/DeepLearnPhysics/JAXTPC/blob/main/notebooks/getting_started/wire_simulation.ipynb) — full walkthrough with truth/track labels
 - [`notebooks/readout/pixel_simulation.ipynb`](https://github.com/DeepLearnPhysics/JAXTPC/blob/main/notebooks/readout/pixel_simulation.ipynb) — pixel readout
 - [Units (ENC vs ADC)](physics/units.md) and [Coordinates](concepts/coordinates.md) — the two conventions to know

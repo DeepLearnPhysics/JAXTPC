@@ -81,7 +81,7 @@ Central class with two execution paths:
 - **`forward_segments(params, positions_mm, de, dx)`** — Lightweight differentiable forward for segment-like data; masks volumes by position range (no numpy splitting, fully traceable).
 - **`process_event_light(deposits)`** — Compute per-segment charge and scintillation photons only (no wire response).
 
-Construction builds per-volume closures for SCE, response, electronics, noise, digitization, and track hits. These are unrolled at trace time (volume/plane loops), so `(vol_idx, plane_idx)` dict lookups work inside JIT. Volumes with zero deposits are skipped via `jax.lax.cond`.
+Construction builds per-volume closures for SCE, response, electronics, noise, digitization, and track hits. These are unrolled at trace time (volume/plane loops), so `(vol_idx, plane_idx)` dict lookups work inside JIT. Volumes with zero deposits contribute nothing because the single padding mask in `compute_volume_physics` zeroes all charges when `n_actual=0` (all volumes run with uniform shapes; there is no conditional skip).
 
 ### Multi-Volume Architecture
 
@@ -267,7 +267,7 @@ python3 viewer/export_gif.py output/step/sim_step_0000.h5 --event 0
 - All physics calculations are JIT-compiled for GPU acceleration
 - `jax.vmap` for vectorized operations (deposit preparation, response computation)
 - `jax.lax.fori_loop` for bounded-memory batched accumulation
-- `jax.lax.cond` to skip empty volumes without breaking JIT shapes
+- Single `n_actual` padding mask (in `compute_volume_physics`) zeroes padded/empty-volume deposits so all volumes run with uniform JIT shapes
 - `jax.remat` for memory-efficient gradients in the differentiable path
 - Always call `jax.block_until_ready()` for proper device synchronization
 

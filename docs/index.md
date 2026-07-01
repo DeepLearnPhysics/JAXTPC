@@ -23,6 +23,20 @@ ND-LAr) with both wire and pixel readout.
   themed, runnable examples (getting started, physics, readout, gradients, reco,
   calibration, production)
 
+## Understand the code
+
+New to the codebase? Read the spine in order — it explains how a list of energy
+deposits becomes readout signals, using real function names:
+
+- **[Reading guide](architecture/reading-guide.md)** — a guided walk through the
+  call chain, source open alongside
+- **[Pipeline overview](architecture/pipeline-overview.md)** — the full response
+  chain in one diagram
+- **[Data model](architecture/data-model.md)** — the types that flow through it
+- **[Config vs params](architecture/config-vs-params.md)** ·
+  **[Execution paths](architecture/execution-paths.md)** ·
+  **[The simulator](architecture/simulator.md)**
+
 ## Read these before you get surprised
 
 Two conventions account for most confusion:
