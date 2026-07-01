@@ -158,24 +158,31 @@ feeds the API reference.)
    The false claim is in `CLAUDE.md` **and** the `kernels.py` module docstring.
    Correct both; describe the real algorithm in `physics/response-kernels.md`.
 2. **`production/README.md` is stale**: hardcoded 2-volume `(2,3)` shapes;
-   `include_noise` (code uses `include_intrinsic_noise` / `include_coherent_noise`);
-   a single-file-lock claim (code uses per-file locks + `--per-worker-files`);
-   a "no resume yet" claim (`--skip-existing` / `.done` exist); and `hits_threshold`
-   as a YAML key (actual key is `corr_threshold`). Rewrite `production/*` from code.
+   `include_noise` (code uses `include_intrinsic_noise` / `include_coherent_noise`,
+   with `include_noise` only a deprecated alias); a single-file-lock claim (code
+   uses per-file locks `sen_lock`/`step_lock`/`hits_lock` + `--per-worker-files`);
+   and `hits_threshold` as a YAML key (actual production-config key is
+   `corr_threshold`). Rewrite `production/*` from code. (The "no resume yet" claim
+   is in `RUN_PRODUCTION.md`, not this file — see §6.6.)
 3. **`tools/utils.py` is not "misc utilities."** It is a standalone single-file
    HDF5 event/SCE I/O format that overlaps `production/save.py`, and only supports
    the 2-volume U/V/Y geometry (`_PLANE_NAMES` KeyErrors otherwise). Document in
    `contributing/io-formats-internal.md`.
 4. **Drop `pointcloud.py` / `space_points.py`** — they do not exist; remove from
    every inventory (already fixed in README/CLAUDE trees; keep out of docs).
-5. **Mark legacy/provisional code:** `track_hits.py:label_merged_hits` /
-   `label_hits` / `group_hits_by_track` are legacy, not the production path;
-   `production/make_labl.py` is a self-described temporary stand-in. Say so
-   wherever they appear so readers don't mistake them for the production API.
+5. **Mark legacy/provisional code:** `track_hits.py`'s standalone path
+   `group_hits_by_track` / `label_hits` / `sparse_hits_to_dense` (K_wire×K_time
+   neighbor system) is legacy — kept for out-of-pipeline use and tests, **not**
+   used by the simulator (per the module docstring). Separately, `label_merged_hits`
+   is **uncalled** (effectively dead code) and belongs to the non-default *merge*
+   path, not this trio — don't lump it in. `production/make_labl.py` is a
+   self-described temporary stand-in. Say so wherever they appear so readers don't
+   mistake them for the production API.
 6. **Genericize `RUN_PRODUCTION.md`** into `production/scaling.md`: strip
    doraemon, `/sdf/...` paths, `CUDA_VISIBLE_DEVICES` SLURM loops, specific run
-   IDs, and pre-tiered perf numbers. Document the *mechanism* (sharding, resume,
-   per-worker files), not the site.
+   IDs, and pre-tiered perf numbers. Also **correct its stale "no resume yet"
+   claim** — resume exists (`--skip-existing` + `.done` markers). Document the
+   *mechanism* (sharding, resume, per-worker files), not the site.
 7. **Volume counts:** use the corrected table (icarus = 2, dune_fd1 = 4, ndlar = 70)
    in `detector/presets.md`.
 
