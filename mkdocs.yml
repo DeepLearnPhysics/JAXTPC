@@ -1,8 +1,19 @@
 site_name: JAXTPC
 site_description: GPU-accelerated, differentiable liquid-argon TPC detector simulation in JAX
+site_url: https://deeplearnphysics.github.io/JAXTPC/
 repo_url: https://github.com/DeepLearnPhysics/JAXTPC
 repo_name: DeepLearnPhysics/JAXTPC
+edit_uri: edit/main/docs/
 docs_dir: docs
+
+# Match CI (`mkdocs build --strict`) locally too, so `mkdocs serve`/`build`
+# surface broken links + mkdocstrings warnings before they fail CI.
+strict: true
+
+# PLAN.md is the internal docs build spec — kept in-repo for maintainers but
+# not published on the public site (and not linked as an internal page).
+exclude_docs: |
+  PLAN.md
 
 theme:
   name: material
@@ -117,4 +128,3 @@ nav:
     - Development: contributing/development.md
     - Adding a detector: contributing/adding-a-detector.md
     - Internal I/O formats: contributing/io-formats-internal.md
-  - Roadmap: PLAN.md

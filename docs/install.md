@@ -2,7 +2,7 @@
 
 JAXTPC is installable as `jaxtpc`. The supported mode today is an **editable
 install** from a clone (the `src/jaxtpc/` namespace migration is
-[deferred](PLAN.md), so a non-editable wheel isn't fully supported yet).
+[deferred](https://github.com/DeepLearnPhysics/JAXTPC/blob/main/docs/PLAN.md), so a non-editable wheel isn't fully supported yet).
 
 ```bash
 git clone https://github.com/DeepLearnPhysics/JAXTPC.git

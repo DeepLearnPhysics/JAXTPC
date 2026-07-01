@@ -15,7 +15,7 @@ flowchart LR
   B -->|"Q (e-), L (photons)"| C["Drift + SCE<br/><i>drift.py / efield_distortions.py</i>"]
   C -->|"drift time, distance"| D["Per-plane correction<br/>+ lifetime attenuation<br/><i>physics.compute_plane_physics</i>"]
   D --> E["Wire / pixel projection<br/><i>wires.py</i>"]
-  E --> F["DKernel response<br/>(s = d/max_drift interp)<br/><i>kernels.py</i>"]
+  E --> F["DKernel response<br/>(s = √(d/max_drift) interp)<br/><i>kernels.py</i>"]
   F -->|"x electrons -> ENC"| G["Accumulate<br/>dense / bucketed / box<br/><i>physics.compute_plane_signal</i>"]
 
   subgraph WIRE["Wire post-processing"]
@@ -77,7 +77,8 @@ fractional offset (pixel).
 
 Diffusion broadens each deposit's footprint by an amount that grows with drift
 distance. This is captured by a **DKernel** table indexed by a normalized
-diffusion level `s = drift_distance / max_drift`. The table is built by
+diffusion level `s = clip(sqrt(drift_distance / max_drift), 0, 1)` (the √
+because the kernel width is linear in `s` while diffusion σ ∝ √drift). The table is built by
 reflect-padding a base kernel and applying a **separable Gaussian convolution**
 at each `s` level (`kernels.generate_dkernel_table`); at runtime the kernel is
 interpolated at each deposit's `s` and multiplied by its electron count.

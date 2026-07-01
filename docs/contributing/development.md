@@ -123,5 +123,5 @@ Two rules keep the docs from drifting away from the code:
 !!! note "Notebook execution in CI is planned"
     The current CI runs pytest and the nbstripout gate; automated
     `jupyter nbconvert --execute` of the notebooks on the synthetic path is
-    planned (see [`docs/PLAN.md`](../PLAN.md) §12–§14), not yet wired. Until it
+    planned (see [`docs/PLAN.md`](https://github.com/DeepLearnPhysics/JAXTPC/blob/main/docs/PLAN.md) §12–§14), not yet wired. Until it
     lands, run the notebooks locally after changing a public API.

@@ -48,5 +48,7 @@ Two conventions account for most confusion:
 
 ## Project status
 
-See the **[documentation roadmap](PLAN.md)** for what's written, what's planned,
-and how the docs and notebooks are organized.
+JAXTPC is under active development. See the
+**[GitHub repository](https://github.com/DeepLearnPhysics/JAXTPC)** for source,
+issues, and releases; maintainers can find the internal docs build plan at
+[`docs/PLAN.md`](https://github.com/DeepLearnPhysics/JAXTPC/blob/main/docs/PLAN.md).

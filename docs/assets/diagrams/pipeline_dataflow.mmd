@@ -7,7 +7,7 @@ flowchart LR
   B -->|"Q (e-), L (photons)"| C["Drift + SCE<br/><i>drift.py / efield_distortions.py</i>"]
   C -->|"drift time, distance"| D["Per-plane correction<br/>+ lifetime attenuation<br/><i>physics.compute_plane_physics</i>"]
   D --> E["Wire / pixel projection<br/><i>wires.py</i>"]
-  E --> F["DKernel response<br/>(s = d/max_drift interp)<br/><i>kernels.py</i>"]
+  E --> F["DKernel response<br/>(s = √(d/max_drift) interp)<br/><i>kernels.py</i>"]
   F -->|"x electrons -> ENC"| G["Accumulate<br/>dense / bucketed / box<br/><i>physics.compute_plane_signal</i>"]
 
   subgraph WIRE["Wire post-processing"]
