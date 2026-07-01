@@ -32,9 +32,12 @@ plugins:
             show_source: true
             show_root_heading: true
             members_order: source
-  - mkdocs-jupyter:      # render notebooks/ as pages
+  - mkdocs-jupyter:      # render the synthetic tutorial notebooks (docs/tutorials/)
       include_source: true
-      execute: false     # notebooks are pre-executed; CI runs them separately
+      execute: true      # execute-at-build: plots live only in the built site,
+                         # never committed (source notebooks stay stripped)
+      allow_errors: false
+      theme: light
 
 markdown_extensions:
   - admonition
@@ -52,6 +55,10 @@ nav:
   - Get started:
     - Install: install.md
     - Quickstart: quickstart.md
+  - Tutorials:
+    - Quickstart (notebook): tutorials/00_quickstart.ipynb
+    - Physics walkthrough: tutorials/physics_walkthrough.ipynb
+    - Custom detector: tutorials/custom_detector.ipynb
   - Architecture:
     - Reading guide: architecture/reading-guide.md
     - Pipeline overview: architecture/pipeline-overview.md

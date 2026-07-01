@@ -27,17 +27,25 @@ jobs:
           python-version: '3.12'
           cache: pip
 
-      # Only the docs toolchain is needed: mkdocstrings uses griffe's STATIC
-      # analysis (no import), so the runtime deps (jax, etc.) are not required
-      # to build the API reference.
-      - name: Install docs dependencies
+      # Runtime deps (jax, etc.) are installed so the synthetic tutorial
+      # notebooks under docs/tutorials/ can be executed at build time; ipykernel
+      # provides the execution kernel. mkdocstrings itself uses griffe STATIC
+      # analysis (no import), but executing the notebooks needs the real package.
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install mkdocs-material "mkdocstrings[python]" mkdocs-jupyter
+          pip install -e .
+          pip install ipykernel mkdocs-material "mkdocstrings[python]" mkdocs-jupyter
+          python -m ipykernel install --user --name python3
 
-      # --strict fails the build on any broken link or mkdocstrings warning,
-      # so this also gates pull requests.
-      - name: Build site (strict)
+      # --strict fails on any broken link or mkdocstrings warning (also gates
+      # PRs). execute:true (mkdocs.yml) runs the docs/tutorials/ notebooks so
+      # their plots render — CPU-only (no GPU on hosted runners; the tutorials
+      # are small synthetic events). Outputs live only in the built site and are
+      # never committed (source notebooks stay stripped by nbstripout).
+      - name: Build site (strict, notebooks executed)
+        env:
+          JAX_PLATFORM_NAME: cpu
         run: mkdocs build --strict
 
       - uses: actions/upload-pages-artifact@v3
