@@ -20,3 +20,7 @@ tests/golden/data/
 # Harness / editor
 .claude/
 .DS_Store
+
+# Docs build artifacts (mkdocs site + mkdocs-jupyter execution cache)
+site/
+.cache/

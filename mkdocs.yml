@@ -18,10 +18,14 @@ exclude_docs: |
 theme:
   name: material
   features:
-    - navigation.sections
+    - navigation.tabs        # top-level sections become tabs
+    - navigation.sections    # second-level groups shown in the sidebar
+    - navigation.indexes     # sections can have a landing page
     - navigation.top
     - navigation.instant
+    - toc.follow
     - content.code.copy
+    - content.code.annotate
     - search.suggest
   palette:
     - scheme: default
@@ -62,52 +66,55 @@ markdown_extensions:
           format: !!python/name:pymdownx.superfences.fence_code_format
 
 nav:
-  - Home: index.md
   - Get started:
+    - Home: index.md
     - Install: install.md
     - Quickstart: quickstart.md
-  - Tutorials:
-    - Quickstart (notebook): tutorials/00_quickstart.ipynb
-    - Physics walkthrough: tutorials/physics_walkthrough.ipynb
-    - Custom detector: tutorials/custom_detector.ipynb
-  - Architecture:
-    - Reading guide: architecture/reading-guide.md
-    - Pipeline overview: architecture/pipeline-overview.md
-    - Data model: architecture/data-model.md
-    - Config vs params: architecture/config-vs-params.md
-    - Execution paths: architecture/execution-paths.md
-    - The simulator: architecture/simulator.md
-  - Concepts:
-    - Coordinates & frames: concepts/coordinates.md
-    - Padding & masking: concepts/padding-masking.md
-    - Capacities & overflow: concepts/capacities.md
-  - Physics:
-    - Overview: physics/overview.md
-    - Recombination: physics/recombination.md
-    - Drift & diffusion: physics/drift-diffusion.md
-    - Response kernels: physics/response-kernels.md
-    - Electronics & noise: physics/electronics-noise.md
-    - Space charge (SCE): physics/sce.md
-    - Units (ENC vs ADC): physics/units.md
-  - Detector:
-    - Config schema: detector/config-schema.md
-    - Presets: detector/presets.md
-    - Wire vs pixel: detector/wire-vs-pixel.md
+    - Examples:
+      - Overview: examples.md
+      - Quickstart: tutorials/00_quickstart.ipynb
+      - Physics walkthrough: tutorials/physics_walkthrough.ipynb
+      - Custom detector: tutorials/custom_detector.ipynb
+  - Understand:
+    - Architecture:
+      - Reading guide: architecture/reading-guide.md
+      - Pipeline overview: architecture/pipeline-overview.md
+      - Data model: architecture/data-model.md
+      - Config vs params: architecture/config-vs-params.md
+      - Execution paths: architecture/execution-paths.md
+      - The simulator: architecture/simulator.md
+    - Concepts:
+      - Coordinates & frames: concepts/coordinates.md
+      - Padding & masking: concepts/padding-masking.md
+      - Capacities & overflow: concepts/capacities.md
+  - Physics & detector:
+    - Physics:
+      - Overview: physics/overview.md
+      - Recombination: physics/recombination.md
+      - Drift & diffusion: physics/drift-diffusion.md
+      - Response kernels: physics/response-kernels.md
+      - Electronics & noise: physics/electronics-noise.md
+      - Space charge (SCE): physics/sce.md
+      - Units (ENC vs ADC): physics/units.md
+    - Detector:
+      - Config schema: detector/config-schema.md
+      - Presets: detector/presets.md
+      - Wire vs pixel: detector/wire-vs-pixel.md
+    - Visualization:
+      - Plotting: viz/plotting.md
+      - Viewer & GIF: viz/viewer.md
   - Production:
     - Batch pipeline: production/batch.md
     - Data formats: production/data-formats.md
     - Profiler: production/profiler.md
     - Scaling: production/scaling.md
-  - Differentiable:
-    - Overview: differentiable/overview.md
-    - Losses: differentiable/losses.md
-    - Particle generation: differentiable/particle-generation.md
-    - Optimization: differentiable/optimization.md
-  - Truth:
-    - Track hits: truth/track-hits.md
-  - Visualization:
-    - Plotting: viz/plotting.md
-    - Viewer & GIF: viz/viewer.md
+  - Differentiable & reco:
+    - Differentiable:
+      - Overview: differentiable/overview.md
+      - Losses: differentiable/losses.md
+      - Particle generation: differentiable/particle-generation.md
+      - Optimization: differentiable/optimization.md
+    - Truth & track hits: truth/track-hits.md
   - Reference:
     - Glossary: reference/glossary.md
     - FAQ: reference/faq.md
@@ -124,7 +131,7 @@ nav:
       - Differentiable: reference/api/differentiable.md
       - Visualization: reference/api/visualization.md
       - Production I/O: reference/api/production.md
-  - Contributing:
-    - Development: contributing/development.md
-    - Adding a detector: contributing/adding-a-detector.md
-    - Internal I/O formats: contributing/io-formats-internal.md
+    - Contributing:
+      - Development: contributing/development.md
+      - Adding a detector: contributing/adding-a-detector.md
+      - Internal I/O formats: contributing/io-formats-internal.md
