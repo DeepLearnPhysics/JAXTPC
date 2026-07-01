@@ -7,8 +7,10 @@ simulation can emit per-particle truth alongside the response.
 The production default is the **group-as-bucket ("box") path**: deposits are
 grouped into short per-track runs (see loader.compute_group_ids) and each
 group's charge is accumulated into a small fixed box, giving both the
-group-collapsed signal and the per-group truth in a single pass
-(``create_track_hits_fn`` -> ``merge_chunk_sensor_hits`` / ``label_from_groups``).
+group-collapsed signal and the per-group truth in a single pass. The default
+box mode (``create_track_hits_fn``) scatter-adds into the box and labels
+host-side via ``label_from_groups``; the non-default merge mode instead runs
+``merge_chunk_sensor_hits`` before ``label_from_groups``.
 A legacy standalone path (``group_hits_by_track`` / ``label_hits`` /
 ``sparse_hits_to_dense``, using a K_wire x K_time neighbor system) is kept for
 out-of-pipeline use and tests; it is NOT used by the simulator.
@@ -384,9 +386,11 @@ def label_merged_hits(state_pk, state_tr, state_ch, state_count,
     """
     Find dominant track per pixel from merged state.
 
-    NOTE: currently unused. The box track-hits path is the production default;
-    this belongs to the non-default *merge* fallback and is not the legacy
-    standalone path (see the module docstring).
+    NOTE: currently uncalled. It is a superseded predecessor of
+    ``label_from_groups`` (the operative host-side labeler for both the box and
+    merge paths): it labels directly on track-keyed merge state, whereas the
+    live merge path stores group ids and maps group->track in
+    ``label_from_groups``. Not part of the legacy standalone path.
 
     State is already sorted by (pixel_key, track) from the merge loop.
     Applies final threshold, then uses segment_max to find the track
@@ -669,6 +673,10 @@ def label_from_groups(state_sk, state_tk, state_gk, state_ch, state_count,
 
 def finalize_track_hits(track_hits, decode_fns=None):
     """Derive track labels from raw group merge state.
+
+    NOTE: the production entry point is the ``DetectorSimulator.finalize_track_hits``
+    method (tools/simulation.py), which is what callers use. This module-level
+    function is standalone (test-only) and not invoked by the simulator.
 
     Applies label_from_groups to each plane's raw
     (sk, tk, gk, ch, count, row_sums) 6-tuple. The group_to_track
