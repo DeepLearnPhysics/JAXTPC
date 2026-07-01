@@ -64,5 +64,15 @@ nav:
     - Padding & masking: concepts/padding-masking.md
     - Capacities & overflow: concepts/capacities.md
   - Physics:
+    - Overview: physics/overview.md
+    - Recombination: physics/recombination.md
+    - Drift & diffusion: physics/drift-diffusion.md
+    - Response kernels: physics/response-kernels.md
+    - Electronics & noise: physics/electronics-noise.md
+    - Space charge (SCE): physics/sce.md
     - Units (ENC vs ADC): physics/units.md
+  - Detector:
+    - Config schema: detector/config-schema.md
+    - Presets: detector/presets.md
+    - Wire vs pixel: detector/wire-vs-pixel.md
   - Roadmap: PLAN.md

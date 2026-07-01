@@ -145,11 +145,11 @@ For each event, per volume, per plane:
    - *EMB* (ICARUS 2024): adds angular correction β_eff(φ) — tracks parallel to E-field recombine more
    - Both share: R = ln(max(α + ξ, 1)) / ξ; Q = N_i × R; L = ΔE/W_ph − Q
 
-2. **Drift** (`drift.py`): Compute drift distance/time to furthest wire plane, then correct per-plane. Optional SCE corrections (E-field distortions + spatial displacement).
+2. **Drift** (`drift.py`): Compute base drift distance/time to the **anode** (SCE maps are anode-referenced, so the base drift must be too), then subtract each plane's distance-from-anode per plane in `compute_plane_physics`. Optional SCE corrections (E-field distortions + spatial displacement).
 
 3. **Wire geometry** (`wires.py`): Project (y,z) → closest wire index and distance for each plane's angle/spacing.
 
-4. **Response** (`kernels.py`): reflect-pad + separable Gaussian convolution produces a `DKernel` table indexed by diffusion level `s = drift_distance/max_drift`. Runtime: interpolate DKernel at each deposit's s-value, produce `(N, kW, kH)` response contributions.
+4. **Response** (`kernels.py`): reflect-pad + separable Gaussian convolution produces a `DKernel` table indexed by diffusion level `s = clip(sqrt(drift_distance/max_drift), 0, 1)` (the √ because kernel σ is linear in `s` while diffusion σ ∝ √drift). Runtime: interpolate DKernel at each deposit's s-value, produce `(N, kW, kH)` response contributions.
 
 5. **Accumulation** (`physics.py`): `fori_loop` over chunks of `response_chunk_size` deposits:
    - **Dense mode**: scatter-add `(kW, kH)` kernels into `(num_wires, num_time)` array
