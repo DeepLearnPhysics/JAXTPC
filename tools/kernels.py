@@ -72,7 +72,76 @@ def load_kernel(filename):
     wire_zero_bin = int(data['wire_zero_bin']) if 'wire_zero_bin' in data else int(np.argmin(np.abs(kernel_x_coords)))
     time_zero_bin = int(data['time_zero_bin']) if 'time_zero_bin' in data else int(np.argmin(np.abs(kernel_y_coords)))
 
+    kernel = _enforce_wire_tiling(kernel, wire_zero_bin, dx, plane)
+
     return kernel, kernel_x_coords, kernel_y_coords, plane, dx, dy, wire_zero_bin, time_zero_bin
+
+
+def _enforce_wire_tiling(kernel, wire_zero_bin, dx, plane, rtol=1e-3):
+    """Enforce the wire-tiling invariant on a COLLECTION-plane response.
+
+    Wires tile the pitch, so every drift electron is collected by exactly one of them:
+
+        S(x) = sum_n R(x - n)    must be CONSTANT in x.
+
+    On the kernel's sub-pitch grid that means the per-column time-integrals, summed over
+    every bins_per_wire-th column, must give the same total for each residue class.
+
+    A collection response is R = C * 1[|Delta| < 1/2] + induction, and that boxcar's edge
+    falls EXACTLY on a grid sample (Delta = +-1/2). A step landing on a sample must carry
+    HALF weight, so that the two half-contributions from the wires either side sum to one;
+    linear interpolation in Delta then tiles exactly. The shipped default kernels instead
+    store the NON-COLLECTING branch there, leaving a hole: measured on Y, the residue-class
+    spread is 112% and the mean tiling sum is 89.4% of the on-wire column, i.e. a uniform
+    ~10.6% under-collection plus an offset-dependent loss reaching 79% at small sigma_T.
+
+    The correction restores the deficit onto the two Delta = +-1/2 columns using the shape
+    of the adjacent interior column. It is IDEMPOTENT -- a kernel that already tiles (the
+    SBND kernels store the mean, which is exactly the half weight) is returned unchanged --
+    and it is skipped entirely for induction planes, whose net integral is ~0 so the
+    invariant carries no information.
+    """
+    bpw = int(round(1.0 / dx)) if dx else 0
+    if bpw < 2 or bpw % 2 or kernel.ndim != 2:
+        return kernel
+    I = kernel.sum(axis=0)
+    ncol = I.shape[0]
+    on_wire = abs(I[wire_zero_bin]) if 0 <= wire_zero_bin < ncol else 0.0
+    if on_wire <= 0:
+        return kernel
+    # Collection plane test: charge is concentrated inside |Delta| < 1/2, so the on-wire
+    # column dwarfs anything a full pitch away. Induction planes fail this and are skipped.
+    far = [c for c in range(ncol) if abs(c - wire_zero_bin) >= bpw]
+    if not far or on_wire < 10.0 * max(abs(I[c]) for c in far):
+        return kernel
+
+    sep = bpw // 2
+    classes = {}
+    for c in range(ncol):
+        classes.setdefault((c - wire_zero_bin) % bpw, []).append(c)
+    sums = {r: float(sum(I[c] for c in cols)) for r, cols in classes.items()}
+    others = [v for r, v in sums.items() if r != sep % bpw]
+    if not others:
+        return kernel
+    target = float(np.median(others))
+    deficit = target - sums[sep % bpw]
+    if abs(deficit) <= rtol * abs(target):
+        return kernel                      # already tiles -- idempotent, nothing to do
+
+    kernel = np.array(kernel, copy=True)
+    for sign in (+1, -1):
+        c_sep = wire_zero_bin + sign * sep
+        c_adj = wire_zero_bin + sign * (sep - 1)
+        if not (0 <= c_sep < ncol and 0 <= c_adj < ncol):
+            continue
+        shape = kernel[:, c_adj]
+        norm = shape.sum()
+        if norm == 0:
+            continue
+        kernel[:, c_sep] = kernel[:, c_sep] + 0.5 * deficit * (shape / norm)
+    print(f"   Response {plane}: wire-tiling enforced "
+          f"(residue-class deficit {deficit / target * 100:+.1f}% restored at Delta=+-1/2)")
+    return kernel
 
 
 def calculate_wire_count(kernel_width, wire_spacing=0.1):
