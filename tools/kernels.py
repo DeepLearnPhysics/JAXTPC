@@ -77,7 +77,7 @@ def load_kernel(filename):
     return kernel, kernel_x_coords, kernel_y_coords, plane, dx, dy, wire_zero_bin, time_zero_bin
 
 
-def _enforce_wire_tiling(kernel, wire_zero_bin, dx, plane, rtol=1e-3):
+def _enforce_wire_tiling(kernel, wire_zero_bin, dx, plane, rtol=0.05):
     """Enforce the wire-tiling invariant on a COLLECTION-plane response.
 
     Wires tile the pitch, so every drift electron is collected by exactly one of them:
@@ -125,6 +125,10 @@ def _enforce_wire_tiling(kernel, wire_zero_bin, dx, plane, rtol=1e-3):
         return kernel
     target = float(np.median(others))
     deficit = target - sums[sep % bpw]
+    # Only a genuine hole is corrected. A real kernel tiles to a few percent (finite grid,
+    # induction tails); the defect this targets is a MISSING BRANCH, which shows up as a
+    # ~100% deficit. Measured: default Y +100.5%, SBND Y -0.4% (it already stores the mean).
+    # rtol sits far from both, so correct kernels are returned untouched rather than nudged.
     if abs(deficit) <= rtol * abs(target):
         return kernel                      # already tiles -- idempotent, nothing to do
 
