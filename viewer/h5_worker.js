@@ -173,7 +173,7 @@ function decodeEvent(idx) {
         const g = iVol.get('Pixel');
         if (g && g.get('group_ids')) {
           const grpIds = new Int32Array(g.get('group_ids').value);
-          const grpSz = new Uint8Array(g.get('group_sizes').value);
+          const grpSz = new Uint16Array(g.get('group_sizes').value);
           const cpy = new Int16Array(g.get('center_py').value);
           const cpz = new Int16Array(g.get('center_pz').value);
           const ct = new Int16Array(g.get('center_times').value);
@@ -235,7 +235,7 @@ function decodeEvent(idx) {
           if (!g || !g.get('group_ids')) continue;
 
           const grpIds = new Int32Array(g.get('group_ids').value);
-          const grpSz = new Uint8Array(g.get('group_sizes').value);
+          const grpSz = new Uint16Array(g.get('group_sizes').value);
           const cw = new Int16Array(g.get('center_wires').value);
           const ct = new Int16Array(g.get('center_times').value);
           const pc = new Float32Array(g.get('peak_charges').value);
