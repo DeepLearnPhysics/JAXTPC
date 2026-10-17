@@ -280,7 +280,7 @@ entries (which groups contributed to which pixels).
                                          each group.
         {plane_label}/                   one subgroup per readout plane
             group_ids       (G_p,) int32   active groups on this plane
-            group_sizes     (G_p,) uint8   entries per group
+            group_sizes     (G_p,) uint16  entries per group
             center_wires    (G_p,) int16   wire idx of peak-charge pixel (wire readout)
             center_py       (G_p,) int16   pixel y idx of peak (pixel readout)
             center_pz       (G_p,) int16   pixel z idx of peak (pixel readout)

@@ -433,6 +433,20 @@ def save_event_step(f, event_key, deposits, source_event_idx, pos_step_mm=0.3,
         vg.create_dataset('photons', data=np.asarray(vol.photons[:n]).astype(np.float32), **_COMPRESSION)
 
 
+def _group_sizes(group_counts):
+    """CSR row lengths as uint16, refusing any that would wrap.
+
+    A wrapped size misaligns every later group on the plane, so it is an
+    error, not a truncation.
+    """
+    limit = np.iinfo(np.uint16).max
+    if len(group_counts) and int(group_counts.max()) > limit:
+        raise ValueError(
+            f"a correspondence group has {int(group_counts.max())} entries; "
+            f"group_sizes is uint16 and holds at most {limit}")
+    return group_counts.astype(np.uint16)
+
+
 def encode_correspondence_csr(gp_pk, gp_gid, gp_ch, gp_count, num_time_steps,
                               threshold=0.0):
     """Convert flat correspondence arrays to CSR + delta + uint16/peak format.
@@ -489,7 +503,7 @@ def encode_correspondence_csr(gp_pk, gp_gid, gp_ch, gp_count, num_time_steps,
 
     return {
         'group_ids': unique_gids.astype(np.int32),
-        'group_sizes': group_counts.astype(np.uint8),
+        'group_sizes': _group_sizes(group_counts),
         'center_wires': center_wires, 'center_times': center_times,
         'peak_charges': peak_charges,
         'delta_wires': delta_wires, 'delta_times': delta_times,
@@ -572,7 +586,7 @@ def encode_correspondence_csr_pixel(gp_sk, gp_tk, gp_gid, gp_ch, gp_count,
 
     return {
         'group_ids': unique_gids.astype(np.int32),
-        'group_sizes': group_counts.astype(np.uint8),
+        'group_sizes': _group_sizes(group_counts),
         'center_py': center_py, 'center_pz': center_pz,
         'center_times': center_times, 'peak_charges': peak_charges,
         'delta_py': delta_py, 'delta_pz': delta_pz,

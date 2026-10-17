@@ -321,6 +321,54 @@ class TestCSREncoding:
         # signs follow the data, not the (negative) peak
         assert recovered[0] < 0 and recovered[1] > 0 and recovered[2] < 0
 
+    def test_pixel_group_larger_than_255_roundtrip(self):
+        """A group with more than 255 entries keeps its size. group_sizes was
+        once uint8, so a 300-entry group was stored as 44 and every later
+        group on the plane was decoded from the wrong CSR offset."""
+        import h5py
+        from production.load import _decode_plane_hits_pixel
+
+        num_pz = 100
+        # Group 1: 300 entries (5x5 pixels x 12 ticks); group 2: 3 entries.
+        py, pz, t = np.meshgrid(np.arange(5), np.arange(5), np.arange(12),
+                                indexing='ij')
+        sk = np.concatenate([(10 + py.ravel()) * num_pz + (20 + pz.ravel()),
+                             [60 * num_pz + 70] * 3])
+        tk = np.concatenate([100 + t.ravel(), [500, 501, 502]]).astype(np.int32)
+        gid = np.array([1] * 300 + [2] * 3, dtype=np.int32)
+        ch = np.linspace(1.0, 50.0, 303).astype(np.float32)
+
+        csr = encode_correspondence_csr_pixel(sk, tk, gid, ch, 303, num_pz=num_pz)
+        np.testing.assert_array_equal(csr['group_sizes'], [300, 3])
+
+        with tempfile.NamedTemporaryFile(suffix='.h5', delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            with h5py.File(tmp_path, 'w') as f:
+                g = f.create_group('Pixel')
+                for key, val in csr.items():
+                    g.create_dataset(key, data=val)
+            with h5py.File(tmp_path, 'r') as f:
+                d_py, d_pz, d_t, d_gid, _, n = _decode_plane_hits_pixel(f['Pixel'])
+
+            assert n == 303
+            got = sorted(zip(d_gid.tolist(), (d_py * num_pz + d_pz).tolist(),
+                             d_t.tolist()))
+            want = sorted(zip(gid.tolist(), sk.tolist(), tk.tolist()))
+            assert got == want
+        finally:
+            os.unlink(tmp_path)
+
+    def test_group_size_overflow_raises(self):
+        """A group too large for uint16 group_sizes raises instead of wrapping."""
+        n = 65536
+        sk = np.zeros(n, dtype=np.int64)
+        tk = np.arange(n, dtype=np.int32) % 100
+        gid = np.ones(n, dtype=np.int32)
+        ch = np.ones(n, dtype=np.float32)
+        with pytest.raises(ValueError, match='uint16'):
+            encode_correspondence_csr_pixel(sk, tk, gid, ch, n, num_pz=100)
+
     def test_csr_encode_decode_roundtrip_via_hdf5(self):
         """Full CSR encode → HDF5 write → HDF5 read → decode roundtrip."""
         import h5py

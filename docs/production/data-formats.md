@@ -221,7 +221,7 @@ enabled (it is on by default; `--no-track-hits` skips this file). See
         group_to_track    (G,) int32     per-group Geant4 track_id (a label)
         {plane}/                         one subgroup per active readout plane
             group_ids       (G_p,) int32   active groups on this plane
-            group_sizes     (G_p,) uint8   entries per group (CSR row lengths)
+            group_sizes     (G_p,) uint16  entries per group (CSR row lengths)
             center_wires    (G_p,) int16   peak-charge wire idx   (wire)
             center_py       (G_p,) int16   peak pixel-y idx       (pixel)
             center_pz       (G_p,) int16   peak pixel-z idx       (pixel)
