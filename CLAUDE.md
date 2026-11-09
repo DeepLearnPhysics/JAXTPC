@@ -30,7 +30,7 @@ JAXTPC/
 │   ├── pixel_visualization.py # Pixel-readout signal visualization (sparse/dense projections)
 │   ├── particle_generator.py  # Differentiable muon track generation (PDG dE/dx tables)
 │   ├── losses.py              # Multi-scale spectral blur MSE loss for optimization
-│   ├── utils.py               # Standalone HDF5 event I/O (save_event/load_event)
+│   ├── utils.py               # SCE map HDF5 I/O (save_sce_data/load_sce_data)
 │   ├── responses/             # Pre-computed wire response kernels (NPZ per plane type)
 │   └── data/                  # PDG muon dE/dx table
 ├── production/                # Batch processing pipeline

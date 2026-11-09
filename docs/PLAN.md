@@ -113,7 +113,7 @@ docs/
   contributing/
     development.md            [dev]      env, pytest -m "not slow", CI gates                    *tests/TESTS.md*           [ ] new
     adding-a-detector.md      [dev]      frame + uniformity invariants, config-authoring checklist  ← code                 [ ] new
-    io-formats-internal.md    [dev]      tools/utils.py standalone HDF5 vs production format — when to use which  *utils.py*  [ ] new
+    io-formats-internal.md    [dev]      production event format pointer + SCE map I/O  *utils.py*  [ ] new
 ```
 
 **Ordering rationale:** architecture spine + data-model come immediately after
@@ -256,7 +256,7 @@ superseded cruft was removed (commit `ed85862`: `compute_gaussian_diffusion` +
 | **Merge track-hits path** | `merge_chunk_sensor_hits`, `box_enabled=False` branch | LIVE (non-default) | `truth/track-hits.md` (box vs merge) |
 | **Legacy standalone track-hits** | `group_hits_by_track` / `label_hits` / `sparse_hits_to_dense` | test-only, marked legacy | `truth/track-hits.md` (mark legacy) |
 | **Standalone sparse↔dense API** | `sim.to_dense`/`to_sparse` (`output.py`; `sparse_utils.py` removed, it duplicated this in a second format) | reference/API | `viz/plotting.md` + API |
-| **Standalone single-file HDF5 I/O** | `utils.py` (`save_event`/`load_event`/…, SCE I/O) | utility/planned | `contributing/io-formats-internal.md` |
+| **Standalone single-file HDF5 I/O** | `utils.py` (SCE map I/O only; single-file event I/O removed) | utility | `contributing/io-formats-internal.md` |
 | **Toy generators** | `particle_generator` numpy muon gen; `efield_distortions.generate_toy_efield_map`, `compute_drift_corrections` | utility/planned (SCE port) | `differentiable/particle-generation.md`, `physics/sce.md` |
 | **Extra viewers** | `visualize_single_plane`/`_waveforms`/`_wire_planes`; `visualize_pixel_3d`/`_buckets`/`_all_pixel_volumes` | utility | `viz/plotting.md`, `detector/wire-vs-pixel.md` |
 
