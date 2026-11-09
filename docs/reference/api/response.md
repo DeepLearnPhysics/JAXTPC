@@ -14,7 +14,3 @@ format conversion.
 ## Output formats
 
 ::: tools.output
-
-## Sparse utilities
-
-::: tools.sparse_utils

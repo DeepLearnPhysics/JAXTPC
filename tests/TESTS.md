@@ -108,17 +108,6 @@ Track hit labeling (`tools/track_hits.py`).
 | Dominant track labeling | Highest-charge track wins at shared location |
 | Sparse hits to dense | Known hits produce correct dense array |
 
-### test_sparse_utils.py (4 tests)
-
-Dense/sparse conversion (`tools/sparse_utils.py`).
-
-| Test | What it checks |
-|------|----------------|
-| Dense-sparse-dense roundtrip | Exact reconstruction |
-| Threshold filtering | Only |value| > threshold kept, sign preserved |
-| Duplicate index accumulation | Same (wire, time) values summed |
-| Empty sparse array | Produces all-zero dense output |
-
 ### test_noise.py (11 tests)
 
 Noise generation and threshold analysis (`tools/noise.py`).

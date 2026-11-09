@@ -198,10 +198,10 @@ each pulling `:::` directives from the relevant modules:
 - **Data types** — all of `config.py` (the NamedTuples + factories) on one page (return types documented only here).
 - **Loading & config** — `generate_detector`, `load_event`, `build_deposit_data`, `load_particle_step_data`, `create_sim_config`, `create_sim_params`.
 - **Physics** — `recombination`, `drift`, the `physics` shared body.
-- **Response & readout** — `kernels`, `wires`, `output`, `sparse_utils`.
+- **Response & readout** — `kernels`, `wires`, `output`.
 - **Post-processing** — `electronics`, `noise`, `coherent_noise`, `efield_distortions`.
 - **Truth** — `track_hits`.
-- **Differentiable** — `losses`, `particle_generator`, `nn_utils`.
+- **Differentiable** — `losses`, `particle_generator`.
 - **Visualization** — `visualization`, `pixel_visualization`.
 - **Production** — `production/save.py`, `production/load.py` (format reference).
 
@@ -215,7 +215,7 @@ each pulling `:::` directives from the relevant modules:
 
 Docstring health is otherwise good: `recombination`, `drift`, `wires`, `noise`,
 `coherent_noise`, `efield_distortions`, `losses`, `particle_generator`,
-`pixel_visualization`, `sparse_utils`, `utils`, `save`, `load` are essentially
+`pixel_visualization`, `utils`, `save`, `load` are essentially
 auto-gen-ready.
 
 ---
@@ -255,14 +255,14 @@ superseded cruft was removed (commit `ed85862`: `compute_gaussian_diffusion` +
 | **`vmap` volume iteration** | `vmap_over`, `iterate_mode='vmap'` | LIVE (constructor flag) | `architecture/simulator.md` (scan vs vmap, D3) |
 | **Merge track-hits path** | `merge_chunk_sensor_hits`, `box_enabled=False` branch | LIVE (non-default) | `truth/track-hits.md` (box vs merge) |
 | **Legacy standalone track-hits** | `group_hits_by_track` / `label_hits` / `sparse_hits_to_dense` | test-only, marked legacy | `truth/track-hits.md` (mark legacy) |
-| **Standalone sparse↔dense API** | `sparse_utils.py`; `sim.to_dense`/`to_sparse` | reference/API | `viz/plotting.md` + API |
+| **Standalone sparse↔dense API** | `sim.to_dense`/`to_sparse` (`output.py`; `sparse_utils.py` removed, it duplicated this in a second format) | reference/API | `viz/plotting.md` + API |
 | **Standalone single-file HDF5 I/O** | `utils.py` (`save_event`/`load_event`/…, SCE I/O) | utility/planned | `contributing/io-formats-internal.md` |
 | **Toy generators** | `particle_generator` numpy muon gen; `efield_distortions.generate_toy_efield_map`, `compute_drift_corrections` | utility/planned (SCE port) | `differentiable/particle-generation.md`, `physics/sce.md` |
 | **Extra viewers** | `visualize_single_plane`/`_waveforms`/`_wire_planes`; `visualize_pixel_3d`/`_buckets`/`_all_pixel_volumes` | utility | `viz/plotting.md`, `detector/wire-vs-pixel.md` |
 
 **Needs-decision (documented, not yet resolved):**
 - **Pixel bucketed mode** — `physics.compute_pixel_bucket_maps` / `compute_pixel_signal_bucketed` (+ `wires.scatter_contributions_to_pixel_buckets_batched`, `build_bucket_mapping_3d`, `pixel_visualization.visualize_pixel_buckets`) is a *complete* pixel analog of the wire bucketed mode whose output is already decoded (`output.py`), but `simulation.py`'s pixel branch never dispatches it. **Decision: keep, document as the pixel analog / reference** (not wired end-to-end yet). One dispatch site from working if ever wanted.
-- **`nn_utils.py`** (`inv_symlog`/`unfold_kernel`/`normalize_positions`) — NN/SIREN response scaffolding with no in-repo consumer; keep as **planned** (tie to SCE-SIREN work), add a "not yet wired" marker.
+- **`nn_utils.py`** — removed: scaffolding for a SIREN surrogate of the wire response kernel (extracted from an out-of-repo `siren_response_training/`), never wired in and unrelated to the SCE-SIREN.
 - **Module-level `finalize_track_hits`** (`track_hits.py`) — a name-collision duplicate of the live `DetectorSimulator.finalize_track_hits` *method* (the method is the entry point; the module function is only stale-imported by one test). Resolve later: remove the duplicate, or de-dup by having the method call it.
 
 ---

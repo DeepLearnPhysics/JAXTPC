@@ -10,7 +10,3 @@ gradient-based fits (see [Differentiable](../../differentiable/overview.md)).
 ## Particle generation
 
 ::: tools.particle_generator
-
-## NN utilities
-
-::: tools.nn_utils

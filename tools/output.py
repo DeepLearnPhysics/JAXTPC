@@ -99,6 +99,14 @@ def to_dense(response_signals, config):
             np.add.at(dense, (py, pz, t), v_arr)
             output[(vol_idx, plane_idx)] = dense
 
+        elif fmt == 'wire_sparse_dict':
+            # The wire output of to_sparse(); duplicate (wire, time) entries sum.
+            num_wires = vol.num_wires[plane_idx]
+            dense = np.zeros((num_wires, num_time), dtype=np.float32)
+            np.add.at(dense, (np.asarray(signal['wire']), np.asarray(signal['time'])),
+                      np.asarray(signal['values']))
+            output[(vol_idx, plane_idx)] = dense
+
         elif fmt == 'wire_sparse':
             active_signals, wire_indices, n_active = signal
             num_wires = vol.num_wires[plane_idx]

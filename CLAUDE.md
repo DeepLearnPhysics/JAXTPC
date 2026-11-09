@@ -30,8 +30,6 @@ JAXTPC/
 │   ├── pixel_visualization.py # Pixel-readout signal visualization (sparse/dense projections)
 │   ├── particle_generator.py  # Differentiable muon track generation (PDG dE/dx tables)
 │   ├── losses.py              # Multi-scale spectral blur MSE loss for optimization
-│   ├── nn_utils.py            # NN inference utilities (symlog, kernel unfolding)
-│   ├── sparse_utils.py        # Dense ↔ truly sparse format conversion
 │   ├── utils.py               # Standalone HDF5 event I/O (save_event/load_event)
 │   ├── responses/             # Pre-computed wire response kernels (NPZ per plane type)
 │   └── data/                  # PDG muon dE/dx table

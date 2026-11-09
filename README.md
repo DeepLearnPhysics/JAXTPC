@@ -28,8 +28,6 @@ JAXTPC/
 │   ├── losses.py                 # Sobolev / spectral loss functions
 │   ├── coherent_noise.py         # Tagged coherent (per-wire-group) noise model
 │   ├── pixel_visualization.py    # Pixel-readout signal visualization (sparse/dense projections)
-│   ├── nn_utils.py               # NN inference utilities
-│   ├── sparse_utils.py           # Dense ↔ truly-sparse format conversion
 │   ├── utils.py                  # Misc shared helpers
 │   └── responses/                # Pre-computed wire response kernels (U/V/Y NPZ)
 ├── production/                   # Batch production pipeline
