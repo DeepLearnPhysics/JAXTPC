@@ -178,3 +178,4 @@ The modules above are documented test-by-test; the remaining suites are listed h
 | test_production_io.py | 14 | Production HDF5 writers/readers (`production/save.py`, `production/load.py`): CSR + delta encoding round-trips |
 | test_box_track_hits.py | 2 | Box (group-as-bucket) track-hits path |
 | test_qs_fractions.py | 5 | Per-deposit charge-share fractions (`qs_fractions`) |
+| test_pixel_kernel_window.py | 3 | Pixel kernel output window is centred on the deposit pixel: mirror symmetry under u → −u |
