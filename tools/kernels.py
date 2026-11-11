@@ -810,10 +810,13 @@ def load_pixel_response_kernel(npz_path, num_s=32, time_spacing=0.5,
         sigma_trans_bins, sigma_long_bins,
         response, s_levels)
 
-    # Output spatial dimensions (in pixel pitches)
+    # Output spatial dimensions (in pixel pitches): an odd window centred on
+    # the deposit's pixel, offsets [-h..h]. h is half the number of pitches
+    # the table covers, so the furthest lookup, (h + 1/2) pitch, stays inside
+    # the table (for 45 bins at 10 bins/pitch: h = 2, offsets [-2..2]).
     bins_per_pix = int(round(pixel_pitch_cm / npz_pixel_bin))
-    num_py_out = int((Hpy - 1) / bins_per_pix)
-    num_pz_out = int((Hpz - 1) / bins_per_pix)
+    num_py_out = 2 * (int((Hpy - 1) / bins_per_pix) // 2) + 1
+    num_pz_out = 2 * (int((Hpz - 1) / bins_per_pix) // 2) + 1
 
     # Output time dimension (in simulation time steps)
     # After time interpolation: Ht - 1 NPZ bins, then rebin

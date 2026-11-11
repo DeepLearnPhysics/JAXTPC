@@ -114,6 +114,7 @@ design. This drives the whole downstream units convention.
 | `intensity × kernel →` | **ENC** (electrons) | **ADC** |
 | Downstream chain | response → electronics → noise → digitize → ADC | response → done (no electronics/noise/digitize) |
 | Interp routine | `interpolate_diffusion_kernel` | `interpolate_pixel_response_kernel` (+ time rebin) |
+| Output window | `num_wires` wires | `2h + 1` pixels per axis, offsets `[-h..h]`, `h` = half the pitches the table covers (5×5 for 45 bins at 10 bins/pitch) |
 
 The wire NPZ files carry a misleading `units = 'ADC_per_electron'` /
 `adc_per_electron` metadata field. **This loader ignores it** and treats the
