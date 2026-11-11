@@ -175,6 +175,7 @@ The modules above are documented test-by-test; the remaining suites are listed h
 | test_pipeline_forward.py | 15 | Differentiable-path forward + finite-difference gradient checks (`forward`/`forward_segments`) |
 | test_pipeline_forward_slow.py | 12 | Kernel-dependent differentiable-path integration (marked `slow`) |
 | test_pixel_post_response_truth.py | 16 | Pixel readout post-response truth (`tools/track_hits.py` pixel path) |
+| test_pixel_kernel_grid.py | 2 | Pixel kernel lookup on the bin-centre grid: total charge over output pixels equals the pad-sum at every sub-pixel offset |
 | test_production_io.py | 14 | Production HDF5 writers/readers (`production/save.py`, `production/load.py`): CSR + delta encoding round-trips |
 | test_box_track_hits.py | 2 | Box (group-as-bucket) track-hits path |
 | test_qs_fractions.py | 5 | Per-deposit charge-share fractions (`qs_fractions`) |

@@ -109,7 +109,7 @@ design. This drives the whole downstream units convention.
 |---|---|---|
 | Loader | `load_response_kernels` | `load_pixel_response_kernel` |
 | Table builder | `generate_dkernel_table` (2-D) | `generate_dkernel_table_3d` (3-D) |
-| Base kernel shape | `(H, W)` = (time, wire), two-sided | `(Hpy, Hpz, Ht)`, distance-indexed |
+| Base kernel shape | `(H, W)` = (time, wire), two-sided | `(Hpy, Hpz, Ht)`, distance-indexed, bin centres |
 | Kernel value | **Dimensionless field-impulse fraction** | **ADC per drift-electron** (chip gain baked in) |
 | `intensity × kernel →` | **ENC** (electrons) | **ADC** |
 | Downstream chain | response → electronics → noise → digitize → ADC | response → done (no electronics/noise/digitize) |
@@ -125,6 +125,13 @@ The pixel kernel additionally **rebins the time axis** from native NPZ resolutio
 to the simulation time step (`rebin_factor = time_spacing / npz_time_bin`,
 averaging groups of fine bins to preserve the current *rate*), and interpolates in
 `(s, pixel_y, pixel_z, time)`.
+
+The pixel NPZ covers one quadrant of the plane and samples it at bin centres:
+bin `k` holds the response at `(k + ½)·bin` from the pixel centre, as in the
+larnd-sim tables. The lookup reads a distance `d` (in bins) at `d − ½`, clipped
+at 0; within half a bin of the centre the mirror neighbour of bin 0 is bin 0
+itself. For the same reason the 3-D table builder pads the spatial axes with
+`mode='symmetric'`, which repeats bin 0 when it mirrors the table about the centre.
 
 For the full unit accounting and threshold semantics, see [units](units.md). For
 the readout-path differences, see [wire vs pixel](../detector/wire-vs-pixel.md).
