@@ -528,10 +528,11 @@ def apply_diffusion_response(DKernel, s_values, wire_offsets, time_offsets,
 
 def generate_dkernel_table_3d(sigma_trans_max, sigma_long_max,
                               base_kernel, s_levels):
-    """Generate 3D diffusion kernel table via reflect padding + spatial convolution.
+    """Generate 3D diffusion kernel table via symmetric padding + spatial convolution.
 
-    Pixel kernel is distance-indexed (bin 0 = pixel center). Uses reflect
-    padding on the spatial axes (correct boundary: center sample once) and
+    Pixel kernel is distance-indexed on a bin-centre grid: bin k holds the
+    response at (k + 1/2) * bin from the pixel center. Uses symmetric padding
+    on the spatial axes (the mirror of bin 0 about the center is bin 0) and
     zero-padded time axis. Separable 3D Gaussian convolution via
     lax.conv_general_dilated.
 
@@ -558,9 +559,9 @@ def generate_dkernel_table_3d(sigma_trans_max, sigma_long_max,
     ps = ks_s // 2
     pt = ks_t // 2
 
-    # Reflect-pad spatial axes (correct center boundary for distance-indexed),
+    # Symmetric-pad spatial axes (bin-centre grid: no sample at the center),
     # zero-pad time axis (signal is zero beyond kernel extent)
-    padded = jnp.pad(base_kernel, ((ps, 0), (ps, 0), (pt, 0)), mode='reflect')
+    padded = jnp.pad(base_kernel, ((ps, 0), (ps, 0), (pt, 0)), mode='symmetric')
     padded = padded.at[..., :pt].set(0.)  # zero the time reflection
 
     def make_level(s):
@@ -655,10 +656,12 @@ def interpolate_pixel_response_kernel(DKernel, s_observed,
 
     for ipy in range(num_py):
         for ipz in range(num_pz):
-            # Distance from deposit to this output pixel, in kernel bins
-            # py_offset/pz_offset are sub-pixel offsets [-0.5, 0.5)
-            dist_py = jnp.abs(py_positions[ipy] - py_offset) * bins_per_pixel
-            dist_pz = jnp.abs(pz_positions[ipz] - pz_offset) * bins_per_pixel
+            # Distance from deposit to this output pixel, in kernel bins.
+            # py_offset/pz_offset are sub-pixel offsets [-0.5, 0.5).
+            # Bin k is sampled at (k + 1/2) bins; within 1/2 bin of the center
+            # the mirror neighbour of bin 0 is bin 0, so clipping at 0 is exact.
+            dist_py = jnp.maximum(jnp.abs(py_positions[ipy] - py_offset) * bins_per_pixel - 0.5, 0.0)
+            dist_pz = jnp.maximum(jnp.abs(pz_positions[ipz] - pz_offset) * bins_per_pixel - 0.5, 0.0)
 
             py_left = jnp.clip(jnp.floor(dist_py).astype(int), 0, Hpy - 2)
             py_right = py_left + 1
