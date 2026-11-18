@@ -24,3 +24,6 @@ tests/golden/data/
 # Docs build artifacts (mkdocs site + mkdocs-jupyter execution cache)
 site/
 .cache/
+
+# example run outputs
+examples/*/outputs/

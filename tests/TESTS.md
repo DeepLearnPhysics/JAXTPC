@@ -17,6 +17,12 @@ JAX_PLATFORM_NAME=cpu python3 -m pytest tests/ -v --cov=tools --cov-report=term-
 
 ## Test Modules
 
+### test_examples.py
+
+Smoke tests for `examples/`. `test_mcs_forward_model` (MCS forward-model physics
+checks, no detector) runs by default; the end-to-end example runs (muon fit and
+event display, MCS globals fit, small segments run) need `JAXTPC_SLOW_TESTS=1`.
+
 ### test_recombination.py (11 tests)
 
 Modified Box model charge recombination (`tools/recombination.py`).

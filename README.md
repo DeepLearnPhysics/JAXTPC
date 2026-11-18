@@ -66,7 +66,7 @@ JAXTPC/
 ├── viewer/                       # Interactive 3D/2D HTML viewer + GIF/MP4 export
 ├── scripts/                      # Standalone utilities (e.g. wire-geometry export)
 ├── slurm/                        # SLURM array drivers for batch production
-├── closure/                      # Differentiable reconstruction / closure studies
+├── examples/                     # Differentiable reconstruction examples (muon, segments, MCS)
 └── notebooks/                    # Themed example notebooks (getting_started, physics, readout, gradients, reco, calibration, production)
 ```
 
