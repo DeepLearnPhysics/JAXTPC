@@ -79,7 +79,6 @@ class TrackHitsConfig(NamedTuple):
     ``corr_threshold``) are interpreted in ENC for wire and ADC for pixel —
     same field, different units.
     """
-    threshold: float        # Minimum charge to keep (legacy; not used in production)
     max_tracks: int         # Max tracks for array pre-allocation
     max_keys: int           # Max unique (track, wire, time) combinations (merge path)
     hits_chunk_size: int    # Deposits per fori_loop chunk (must divide padding tiers)
@@ -223,7 +222,6 @@ def create_digitization_config(
 
 
 def create_track_hits_config(
-    threshold: float = 1.0,
     max_tracks: int = 10000,
     max_keys: int = 4000000,
     hits_chunk_size: int = 25000,
@@ -243,7 +241,6 @@ def create_track_hits_config(
     (see tools.track_hits.compute_box_dims). Pass explicit ints to override.
     """
     return TrackHitsConfig(
-        threshold=threshold,
         max_tracks=max_tracks,
         max_keys=max_keys,
         hits_chunk_size=hits_chunk_size,

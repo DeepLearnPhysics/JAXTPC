@@ -237,7 +237,7 @@ Profiler-tuned `production_*.yaml` variants (including the doraemon wire/pixel c
 | `iterate_mode` | `'scan'` | Volume iteration: `'scan'` or `'vmap'` |
 | `use_bucketed` | False | Optional wire-only sparse bucket accumulation (memory saver; not required for pixel) |
 | `max_active_buckets` | 1,000 | Max buckets per plane (bucketed mode) |
-| `include_noise` | False | Enable intrinsic noise |
+| `include_intrinsic_noise` | False | Enable intrinsic noise |
 | `include_electronics` | False | Enable RC-RC electronics response |
 | `include_digitize` | False | Enable ADC digitization |
 | `include_track_hits` | True | Enable track correspondence |

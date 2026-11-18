@@ -139,7 +139,7 @@ class TestStandaloneNoise:
         from tools.geometry import generate_detector
         from tools.simulation import DetectorSimulator
         det = generate_detector(config_path)
-        sim = DetectorSimulator(det, include_noise=False, include_electronics=False,
+        sim = DetectorSimulator(det, include_intrinsic_noise=False, include_electronics=False,
                                 include_track_hits=False)
         return sim.config
 
@@ -227,7 +227,7 @@ class TestCoherentNoise:
         from tools.simulation import DetectorSimulator
         from tools.noise import add_noise
         det = generate_detector(config_path)
-        sim = DetectorSimulator(det, include_noise=False,
+        sim = DetectorSimulator(det, include_intrinsic_noise=False,
                                 include_electronics=False,
                                 include_track_hits=False)
         cfg = sim.config

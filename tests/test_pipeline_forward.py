@@ -174,7 +174,7 @@ class TestForwardVsProduction:
     def test_signals_match(self, detector_config, raw):
         sim_prod = DetectorSimulator(
             detector_config, total_pad=N, response_chunk_size=N,
-            include_track_hits=False, include_noise=False,
+            include_track_hits=False, include_intrinsic_noise=False,
             include_electronics=False, include_digitize=False)
 
         deps_prod = build_deposit_data(

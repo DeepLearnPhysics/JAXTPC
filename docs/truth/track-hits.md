@@ -121,22 +121,6 @@ track)`, and finds the dominant track per sensor cell — returning
 Doing the label step off-GPU keeps peak device memory down (call it after moving
 `response_signals` off the GPU).
 
-!!! note "Name collision: method vs module function"
-    There is **also** a module-level `finalize_track_hits`
-    (`tools/track_hits.py:572`). It is a **name-collision duplicate** — only
-    stale-imported by one test, *not* the production entry point. Always use the
-    `DetectorSimulator.finalize_track_hits` **method**. (PLAN §8b flags this for
-    later de-duplication.)
-
-## Legacy standalone trio (reference / test-only)
-
-`track_hits.py` also carries an older, self-contained labeling path:
-`group_hits_by_track` (`:85`) / `label_hits` (`:206`) / `sparse_hits_to_dense`
-(`:384`). This trio uses a `K_wire × K_time` neighbor system and is **not used
-by the simulator** — the module docstring marks it kept "for out-of-pipeline use
-and tests." Do not mistake it for the production API; the box/merge +
-`label_from_groups` path above is what `process_event` actually runs.
-
 ## End to end
 
 ```python

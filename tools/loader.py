@@ -505,33 +505,6 @@ def load_event(file_path, sim_config, event_idx=0, verbose=False,
         group_size=group_size, gap_threshold_mm=gap_threshold_mm)
 
 
-def main():
-    """Example usage of the particle step extractor."""
-    import argparse
-
-    parser = argparse.ArgumentParser(description='Extract particle step data from HDF5 files')
-    parser.add_argument('file_path', help='Path to the HDF5 file')
-    parser.add_argument('--event', '-e', type=int, default=0, help='Event index (default: 0)')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Print verbose information')
-
-    args = parser.parse_args()
-
-    raw = load_particle_step_data(args.file_path, args.event, args.verbose)
-
-    n_segments = raw['positions_mm'].shape[0]
-    n_tracks = len(np.unique(raw['track_ids']))
-    total_de = float(np.sum(raw['de']))
-
-    print(f"\nLoaded particle step data:")
-    print(f"  Segments: {n_segments:,}")
-    print(f"  Unique tracks: {n_tracks}")
-    print(f"  Total dE: {total_de:.2f} MeV")
-    print(f"\nFields:")
-    for key, arr in raw.items():
-        if hasattr(arr, 'shape'):
-            print(f"  {key}: shape={arr.shape}, dtype={arr.dtype}")
-
-
 # =============================================================================
 # GROUP ID ASSIGNMENT (numpy host-side, before split)
 # =============================================================================
@@ -822,7 +795,3 @@ def _build_padded_deposit_data(vol_arrays, vol_n_actuals, vol_group_to_track,
         group_to_track=tuple(vol_group_to_track),
         original_indices=tuple(vol_original_indices),
     )
-
-
-if __name__ == "__main__":
-    main()

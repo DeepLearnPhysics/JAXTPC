@@ -99,7 +99,8 @@ the host `add_noise(..., coherent=True)`).
 
 !!! note "`include_noise` is a deprecated alias"
     The live flags are `include_intrinsic_noise` and `include_coherent_noise`.
-    `include_noise` remains only as a back-compat alias — prefer the explicit
+    `include_noise` remains only as a back-compat alias and emits a
+    `DeprecationWarning` — use the explicit
     flags so the two components are toggled independently.
 
 ## Digitization

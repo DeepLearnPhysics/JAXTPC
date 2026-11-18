@@ -44,7 +44,7 @@ def sim(detector_config):
     """Dense + track_hits simulator. Shared across all tests."""
     return DetectorSimulator(
         detector_config, total_pad=200_000, response_chunk_size=50_000,
-        use_bucketed=False, include_noise=False, include_electronics=False,
+        use_bucketed=False, include_intrinsic_noise=False, include_electronics=False,
         include_track_hits=True, include_digitize=False)
 
 
@@ -193,7 +193,7 @@ class TestBucketed:
         return DetectorSimulator(
             detector_config, total_pad=200_000, response_chunk_size=50_000,
             use_bucketed=True, max_active_buckets=1000,
-            include_noise=False, include_electronics=False,
+            include_intrinsic_noise=False, include_electronics=False,
             include_track_hits=False, include_digitize=False)
 
     def test_dense_equals_bucketed(self, sim, sim_bucketed, sim_results):
@@ -241,7 +241,7 @@ class TestSyntheticPipeline:
         det = generate_detector(CONFIG_PATH)
         return DetectorSimulator(
             det, total_pad=500, response_chunk_size=500,
-            include_track_hits=False, include_noise=False,
+            include_track_hits=False, include_intrinsic_noise=False,
             include_electronics=False, include_digitize=False)
 
     @pytest.fixture(scope="class")

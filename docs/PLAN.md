@@ -254,7 +254,7 @@ superseded cruft was removed (commit `ed85862`: `compute_gaussian_diffusion` +
 | **Wire bucketed accumulation** (memory-saver) | `compute_plane_signal_bucketed`, `compute_bucket_maps`, `sparse_buckets_to_dense`, `generate_noise_bucketed`, `visualize_active_buckets`; compact reference `accumulate_response_signals_sparse_bucketed` | LIVE (`use_bucketed`/`--bucketed`) | `concepts/capacities.md` + `viz/plotting.md` + API |
 | **`vmap` volume iteration** | `vmap_over`, `iterate_mode='vmap'` | LIVE (constructor flag) | `architecture/simulator.md` (scan vs vmap, D3) |
 | **Merge track-hits path** | `merge_chunk_sensor_hits`, `box_enabled=False` branch | LIVE (non-default) | `truth/track-hits.md` (box vs merge) |
-| **Legacy standalone track-hits** | `group_hits_by_track` / `label_hits` / `sparse_hits_to_dense` | test-only, marked legacy | `truth/track-hits.md` (mark legacy) |
+| **Legacy standalone track-hits** | removed (`group_hits_by_track` / `label_hits` / `sparse_hits_to_dense`, test-only) | removed | `truth/track-hits.md` (mark legacy) |
 | **Standalone sparse↔dense API** | `sim.to_dense`/`to_sparse` (`output.py`; `sparse_utils.py` removed, it duplicated this in a second format) | reference/API | `viz/plotting.md` + API |
 | **Standalone single-file HDF5 I/O** | `utils.py` (SCE map I/O only; single-file event I/O removed) | utility | `contributing/io-formats-internal.md` |
 | **Toy generators** | `particle_generator` numpy muon gen; `efield_distortions.generate_toy_efield_map`, `compute_drift_corrections` | utility/planned (SCE port) | `differentiable/particle-generation.md`, `physics/sce.md` |
@@ -263,7 +263,7 @@ superseded cruft was removed (commit `ed85862`: `compute_gaussian_diffusion` +
 **Needs-decision (documented, not yet resolved):**
 - **Pixel bucketed mode** — `physics.compute_pixel_bucket_maps` / `compute_pixel_signal_bucketed` (+ `wires.scatter_contributions_to_pixel_buckets_batched`, `build_bucket_mapping_3d`, `pixel_visualization.visualize_pixel_buckets`) is a *complete* pixel analog of the wire bucketed mode whose output is already decoded (`output.py`), but `simulation.py`'s pixel branch never dispatches it. **Decision: keep, document as the pixel analog / reference** (not wired end-to-end yet). One dispatch site from working if ever wanted.
 - **`nn_utils.py`** — removed: scaffolding for a SIREN surrogate of the wire response kernel (extracted from an out-of-repo `siren_response_training/`), never wired in and unrelated to the SCE-SIREN.
-- **Module-level `finalize_track_hits`** (`track_hits.py`) — a name-collision duplicate of the live `DetectorSimulator.finalize_track_hits` *method* (the method is the entry point; the module function is only stale-imported by one test). Resolve later: remove the duplicate, or de-dup by having the method call it.
+- **Module-level `finalize_track_hits`** — removed (duplicate of the `DetectorSimulator.finalize_track_hits` method).
 
 ---
 
