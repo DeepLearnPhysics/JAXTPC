@@ -23,6 +23,52 @@ python3 production/run_batch.py --data events.h5 \
 
 `--data` accepts files, directories (globbed `*.h5`), or several of each.
 
+## Profiling your own edep-sim / Geant4 setup
+
+A production config is only valid for the sample it was profiled on. Re-profile
+when any of these change:
+
+| You changed | What moves |
+|---|---|
+| Step length or voxel size | `total_pad`, `maxg`, `max_keys`, and the `max_keys` overlap knobs |
+| Energy, generator, pile-up per event | `total_pad`, `maxg`, `max_keys`, `maxg_medium` |
+| Detector YAML (pitch, drift, readout window, response) | `max_keys`, box dims, chunks |
+| Group definition (`--group-size`, `--gap-threshold`) | `maxg`, box dims; pass the same values to `run_batch` |
+
+The input is the edep-sim HDF5 schema read by `tools/loader.py`
+(`pstep/lar_vol`, one entry per event). Convert other Geant4 output to it first;
+`x`/`y`/`z` (or `position`) and `dx` in mm, `de` in MeV, `t` in ns, plus `theta`,
+`phi`, `track_id`, `pdg` and `ancestor_track_id`. A missing field is filled with a
+default (zeros; ones for `track_id`), not reported. Positions must be in the detector YAML's frame: deposits
+outside every volume are dropped without a message.
+
+1. **Scan and benchmark** on files spread over the whole sample, not the first
+   few (capacities are set by rare large events):
+   ```bash
+   python3 -m profiler.setup_production --data fileA.h5 fileB.h5 ... \
+       --config config/my_detector.yaml -o config/production_my_sample.yaml \
+       --workers 24 --headroom 1.1
+   ```
+2. **Check `max_keys` with the real simulation.** The overlap knobs (pixel
+   `c*=2.5`, wire `/3.79`) were calibrated on doraemon and depend on step length:
+   ```bash
+   python3 -m profiler.compare_max_keys --data fileA.h5 fileB.h5 ... \
+       --config config/my_detector.yaml --rank-validate --rank-by estimate --top-k 25 \
+       --maxg <maxg> --total-pad <total_pad> --hits-chunk <hits_chunk> \
+       --response-chunk <response_chunk> --probe-max-keys <2x estimate>
+   ```
+   Pass the box dims the simulator prints at start-up (`--box-bpy/-bpz/-bt` or
+   `--box-bw/-btw`). Set `max_keys` from the largest ACTUAL plus margin. If
+   EST/ACTUAL is far from the knob's value, rerun step 1 with `--cstar`/`--divisor`.
+3. **Set `maxg` from the largest group count seen (p100) plus margin.** The
+   suggestion is p99.95, so it skips the tail. `maxg_medium` makes this cheap:
+   events at or below it run in the smaller simulator.
+4. **Check the memory.** Pixel needs `maxg x box_bpy x box_bpz x box_bt x 4`
+   bytes, and the cell count must stay below 2^31 (the simulator refuses it
+   otherwise).
+5. **Review the thresholds.** `--run-thresholds` values are a data-volume choice,
+   not a capacity.
+
 ## The pipeline (`setup_production`)
 
 | Step | Output | Cost |
