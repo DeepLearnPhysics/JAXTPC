@@ -263,6 +263,16 @@ def generate_dkernel_table(sigma_trans_max, sigma_long_max,
     return vmap(make_level)(s_levels)
 
 
+def _sigma_for_plane(sigma, plane):
+    """Transverse sigma of one plane: each plane has its own wire pitch.
+
+    Planes absent from the detector still get a table (never read); any sigma does.
+    """
+    if not isinstance(sigma, dict):
+        return sigma
+    return sigma.get(plane, next(iter(sigma.values())))
+
+
 def create_diffusion_kernel_array(planes=['U', 'V', 'Y'], num_s=32, kernel_dir=None,
                                  time_spacing=0.5,
                                  max_sigma_trans_unitless=None, max_sigma_long_unitless=None):
@@ -280,7 +290,7 @@ def create_diffusion_kernel_array(planes=['U', 'V', 'Y'], num_s=32, kernel_dir=N
         Directory containing kernel files.
     time_spacing : float
         Time spacing in us.
-    max_sigma_trans_unitless : float, optional
+    max_sigma_trans_unitless : float or dict {plane: float}, optional
         Maximum transverse diffusion sigma in WIRE-PITCH units (same units as
         the kernel's wire-axis spacing dx). (Name kept for back-compat; not a
         dimensionless quantity.)
@@ -312,7 +322,7 @@ def create_diffusion_kernel_array(planes=['U', 'V', 'Y'], num_s=32, kernel_dir=N
 
             # max_sigma_trans_unitless is in physical units (wire pitches)
             # max_sigma_long_unitless is in grid bins, convert to us
-            sigma_trans_max = max_sigma_trans_unitless
+            sigma_trans_max = _sigma_for_plane(max_sigma_trans_unitless, plane)
             sigma_long_max = max_sigma_long_unitless * time_spacing
 
             DKernel = generate_dkernel_table(
@@ -512,7 +522,7 @@ def load_response_kernels(response_path=None, num_s=32,
         Number of diffusion levels to create.
     time_spacing : float
         Simulation time spacing in microseconds.
-    max_sigma_trans_unitless : float, optional
+    max_sigma_trans_unitless : float or dict {plane: float}, optional
         Maximum transverse diffusion sigma in WIRE-PITCH units (same units as
         the kernel's wire-axis spacing dx). (Name kept for back-compat; not a
         dimensionless quantity.)
@@ -565,7 +575,7 @@ def load_response_kernels(response_path=None, num_s=32,
         wire_zero_bin_out = wire_zero_bin // bins_per_wire
 
         # Compute static conv filter sizes for differentiable path
-        sigma_w_bins = (max_sigma_trans_unitless * wire_spacing) / dx
+        sigma_w_bins = (_sigma_for_plane(max_sigma_trans_unitless, plane) * wire_spacing) / dx
         sigma_t_bins = (max_sigma_long_unitless * time_spacing) / dy
         ks_w = int(2 * ((sigma_w_bins * 2 * _N_SIGMAS_BLUR) // 2) + 1)
         ks_t = int(2 * ((sigma_t_bins * 2 * _N_SIGMAS_BLUR) // 2) + 1)

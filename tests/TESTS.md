@@ -162,7 +162,7 @@ The modules above are documented test-by-test; the remaining suites are listed h
 | test_electronics.py | 21 | RC⊗RC electronics shaping (`tools/electronics.py`) and ADC digitization |
 | test_output.py | 8 | Output format conversion (`tools/output.py`): dense ↔ sparse ↔ bucketed, threshold application |
 | test_pipeline.py | 20 | Production path (`process_event`) on a compact detector: output layout, track-hit charge per track = attenuated charge, `qs_fractions`, velocity response, default SimParams, compile-cache counts, mirror symmetry of the volumes, dense == bucketed; plus hand-placed deposits on the full detector |
-| test_pipeline_forward.py | 22 (4 xfail) | Differentiable path: relative L2 against production per plane at uniform pitch, and at mixed pitch (V, Y strict xfail: production uses plane 0's pitch for every plane's transverse diffusion); `forward_segments` == `forward`; XLA compile counts; every EMB SimParams gradient vs float64 finite differences |
+| test_pipeline_forward.py | 22 | Differentiable path: relative L2 against production per plane at uniform pitch, at uniform and mixed pitch; `forward_segments` == `forward`; XLA compile counts; every EMB SimParams gradient vs float64 finite differences |
 | test_pipeline_forward_slow.py | 4 | EMB / Modified Box signal ratio = survival ratio, Modified Box gradients, gradients through deposit positions (marked `slow`) |
 | test_pixel_post_response_truth.py | 16 | Pixel readout post-response truth (`tools/track_hits.py` pixel path) |
 | test_pixel_kernel_grid.py | 2 | Pixel kernel lookup on the bin-centre grid: total charge over output pixels equals the pad-sum at every sub-pixel offset |

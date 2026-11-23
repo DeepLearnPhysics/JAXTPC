@@ -64,20 +64,13 @@ class TestForwardVsProduction:
         assert np.abs(prod).max() > 1.0   # electrons; not a comparison of zeros
         assert _rel_l2(prod, diff) < 1e-5
 
-    @pytest.mark.parametrize("vol,plane", [
-        pytest.param(v, p, marks=[] if p == 0 else pytest.mark.xfail(
-            strict=True, raises=AssertionError,
-            reason="production scales every plane's transverse diffusion by "
-                   "wire_spacings_cm[0] (tools/simulation.py): sigma_T on Y is "
-                   "0.363 cm, analytic 0.180 cm. Relative L2 vs forward() is "
-                   + {1: "0.28-0.31 on V", 2: "0.39-0.42 on Y"}[p]))
-        for v, p in PLANES])
+    @pytest.mark.parametrize("vol,plane", PLANES)
     def test_mixed_pitch(self, mixed, vol, plane):
         _, _, sig_prod, sig_diff = mixed
         prod = np.asarray(sig_prod[(vol, plane)])
         diff = np.asarray(sig_diff[PLANES.index((vol, plane))])
-        if prod.shape != diff.shape or np.abs(prod).max() <= 1.0:
-            pytest.fail("unexpected shape or empty plane")   # not the known bug
+        assert prod.shape == diff.shape
+        assert np.abs(prod).max() > 1.0
         assert _rel_l2(prod, diff) < 1e-5
 
 
