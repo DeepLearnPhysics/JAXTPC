@@ -110,6 +110,12 @@ compiled function runs. In the differentiable path
 ([`forward`](execution-paths.md)), these scalars are exactly the parameters that
 carry gradients.
 
+!!! warning "Production diffusion is fixed at construction"
+    The production path (`process_event`) builds its diffusion table once, from
+    the detector config. Changing the diffusion coefficients or velocity in
+    `SimParams` does not change the diffusion blur there: build a new simulator.
+    `forward` recomputes the table from `SimParams`.
+
 !!! note "Rule of thumb"
     If a value changes an **array shape or a code branch**, it belongs in
     `SimConfig` (and costs a recompile). If it is a **physics number** the model

@@ -138,7 +138,7 @@ For each event, `run_batch.py` performs:
 4. **Save** to three HDF5 file types (offloaded to worker threads):
    - `sensor/`: sparse thresholded raw readout
    - `step/`: compact 3D truth deposits
-   - `hits/`: per-particle sensor decomposition (group-level 3D-to-2D mapping)
+   - `hits/`: per-particle charge per readout cell (wire: pre-response charge; pixel: the sensor signal)
 
 The canonical layout in ``docs/DATASET_DESIGN.md`` (in
 ``particle-imaging-models/``) defines a fourth directory, ``labl/``,
@@ -179,7 +179,7 @@ dense_signals, attrs, pedestals = load_event_sensor(sensor_path, event_idx=0)
 # To get signed ADC: signal = dense_signals[(v,p)].astype(int) - pedestals[(v,p)]
 step = load_event_step(step_path, event_idx=0)       # list of per-volume dicts
 track_hits, truth_dense, g2t, d2g, qs = load_event_hits(
-    hits_path, event_idx=0, num_time_steps=2701)
+    hits_path, event_idx=0)
 # g2t, d2g, qs are lists of per-volume arrays (deposit_to_group is the
 # per-deposit group id, qs_fractions is the per-deposit charge weight).
 ```
@@ -193,7 +193,7 @@ Three file types per batch, split by `events_per_file`:
 ```
 {dataset}_sensor_{NNNN}.h5  — raw sensor readout (sparse wire/pixel signals)
 {dataset}_step_{NNNN}.h5    — 3D truth deposits (energy deposit data)
-{dataset}_hits_{NNNN}.h5    — per-particle sensor decomposition
+{dataset}_hits_{NNNN}.h5    — per-particle charge per readout cell
 ```
 
 ### 1. Sensor File (`_sensor_`)

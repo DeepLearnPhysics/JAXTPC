@@ -143,7 +143,8 @@ recompilation. Contrast `SimParams`. See
 
 **`SimParams`** — The **dynamic** physics parameters passed as a JIT argument
 (velocity, lifetime, diffusion, recombination scalars, optional NN/SCE models).
-Changeable without recompiling. See
+Changeable without recompiling (the production path fixes its diffusion table at
+construction). See
 [config vs params](../architecture/config-vs-params.md).
 
 ## T

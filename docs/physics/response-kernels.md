@@ -134,5 +134,16 @@ at 0; within half a bin of the centre the mirror neighbour of bin 0 is bin 0
 itself. For the same reason the 3-D table builder pads the spatial axes with
 `mode='symmetric'`, which repeats bin 0 when it mirrors the table about the centre.
 
+### Using the table at another pixel pitch
+
+The shipped table has 0.0372 cm bins: 10 per 3.72 mm pixel, with the pad filling the
+cell. At another pitch those bins no longer tile the cell, and charge between pads is
+lost. `response_pixel_bin` in the volume's `readout` block sets the bin size instead;
+`pitch / 10` scales the pad with the cell (`cubic_pixel_config`: 0.0432 cm). Time is
+not scaled: the pulse length follows from the depth in front of the pads and the drift
+speed, which a change of pitch does not set. This is a scaling of a 3.72 mm
+calculation, not a field calculation for the new pitch: charge is exact, pulse shapes
+near pad edges are approximate.
+
 For the full unit accounting and threshold semantics, see [units](units.md). For
 the readout-path differences, see [wire vs pixel](../detector/wire-vs-pixel.md).

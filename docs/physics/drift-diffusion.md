@@ -84,7 +84,8 @@ as `√t`:
 `D_trans` and `D_long` are the transverse/longitudinal diffusion coefficients
 (YAML `transverse_diffusion` / `longitudinal_diffusion`, converted to cm²/µs and
 carried in `SimParams` and `DiffusionConfig`). Because `t ∝` drift distance, the
-spread grows with how far a deposit drifts.
+spread grows with how far a deposit drifts. The transverse spread is converted to
+wire pitches with **each plane's own** spacing.
 
 ### Kernel-based diffusion (the production path)
 

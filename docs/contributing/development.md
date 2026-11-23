@@ -30,7 +30,7 @@ is deferred, so a non-editable wheel is not yet the supported path.
 
 ## Running the tests
 
-The suite is **264 tests**, all CPU-only on synthetic data (no external files,
+The suite is **299 tests**, all CPU-only on synthetic data (no external files,
 no kernels required for the fast tier). `pytest.ini` puts the repo root on
 `sys.path`, so bare `pytest` works from the repo root without any install step.
 
@@ -70,7 +70,7 @@ Shared fixtures live in `tests/conftest.py` — `jax_key`, a
 also forces `JAX_PLATFORM_NAME=cpu` at collection time, so a plain `pytest`
 invocation still runs on CPU.
 
-For the full module-by-module breakdown (what each of the 264 tests checks), see
+For the full module-by-module breakdown (what each of the 299 tests checks), see
 [`tests/TESTS.md`](https://github.com/DeepLearnPhysics/JAXTPC/blob/main/tests/TESTS.md).
 
 ## Notebooks: keep diffs clean

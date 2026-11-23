@@ -28,7 +28,7 @@ events of **all** inputs, in input order, go into one file set instead:
 |---|---|---|---|
 | **sensor** | `_sensor_` | Sparse thresholded raw readout after full detector sim; delta-encoded, `uint16` if digitized | `run_batch.py` |
 | **step** | `_step_` | 3D truth deposits — positions + `de`/`dx`/`theta`/`phi`/`t0_us` + `charge`/`photons`; pure physics, no track or instance info | `run_batch.py` |
-| **hits** | `_hits_` | Per-particle sensor decomposition + group machinery — `deposit_to_group`, `qs_fractions`, `group_to_track` per volume, per-plane CSR-encoded entries | `run_batch.py` (with track-hits on) |
+| **hits** | `_hits_` | Per-particle charge per readout cell (wire: before the detector response, so it does not sum to the sensor; pixel: the sensor signal) + group machinery — `deposit_to_group`, `qs_fractions`, `group_to_track` per volume, per-plane CSR-encoded entries | `run_batch.py` (with track-hits on) |
 | **labl** | `_labl_` | Per-track labels + per-deposit → `track_id` foreign key | `production/make_labl.py` (separate, temporary stand-in) |
 
 Every event lives under an `entry_{NNNNNN}` group, and every event is split by

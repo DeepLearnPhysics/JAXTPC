@@ -48,7 +48,7 @@ JAXTPC/
 │   ├── scan_values.py         # CPU-only values + config patch + plots
 │   ├── find_optimal_chunks.py # Two-pass timing → response_chunk, hits_chunk
 │   └── threshold_analysis.py  # Post-sim sweep → threshold_adc, corr_threshold
-├── tests/                     # Pytest suite (264 tests, CPU-only, synthetic data)
+├── tests/                     # Pytest suite (299 tests, CPU-only, synthetic data)
 │   └── conftest.py            # Fixtures: jax_key, minimal_detector_config, ...
 ├── viewer/                    # Interactive 3D/2D HTML viewer + GIF export
 │   ├── serve_viewer.py        # Local HTTP server with byte-range HDF5 support
@@ -100,7 +100,7 @@ Deposits are split by x-position into volumes during loading (`build_deposit_dat
 Two parameter bundles control the simulation:
 
 - **`SimConfig`** (static, closure-captured) — Array dimensions, mode flags, volume geometry, plane names. Changing any value requires JIT recompilation.
-- **`SimParams`** (dynamic, JIT argument) — Physics scalars (velocity, lifetime, diffusion coefficients, recombination parameters) and optional NN/SCE models. Can be changed without recompilation.
+- **`SimParams`** (dynamic, JIT argument) — Physics scalars (velocity, lifetime, diffusion coefficients, recombination parameters) and optional NN/SCE models. Can be changed without recompilation. In the production path (`process_event`) the diffusion table is built at construction from the config, so changing the diffusion coefficients or velocity in `SimParams` does not change the diffusion blur there; build a new simulator. `forward` recomputes it.
 
 Detector geometry is defined in YAML (`config/cubic_wireplane_config.yaml`):
 ```yaml
@@ -221,9 +221,11 @@ The profiler scans data (CPU) and benchmarks the sim (GPU, chunks + maxg_medium 
 Produces three HDF5 file types per batch:
 - `{dataset}_sensor_{NNNN}.h5` — sparse thresholded raw readout (delta-encoded, uint16 if digitized)
 - `{dataset}_step_{NNNN}.h5` — 3D truth deposits (pure physics: positions + de/dx/theta/phi/t0_us + charge/photons; no instance or track info)
-- `{dataset}_hits_{NNNN}.h5` — per-particle sensor decomposition + group machinery (deposit_to_group, qs_fractions, group_to_track per volume; per-plane CSR-encoded pixel entries)
+- `{dataset}_hits_{NNNN}.h5` — per-particle charge per wire/pixel cell (wire: drifted charge with diffusion, *before* the detector response, so it does not sum to the sensor; pixel: the sensor signal itself) + group machinery (deposit_to_group, qs_fractions, group_to_track per volume; per-plane CSR-encoded pixel entries)
 
 A fourth file, `{dataset}_labl_{NNNN}.h5`, carries per-track labels and the per-deposit → track_id foreign key. It is produced separately via `production/make_labl.py` (temp stand-in; reads hits + edepsim). See `production/README.md` for the labl schema and workflow.
+
+Events are stored as `entry_NNNNNN` groups (`/config` attr `format_version = 2`; older files use `event_NNN`). Use `production/entries.py` rather than building names; `production/load.py` reads both.
 
 Threaded save architecture: reader prefetch thread loads the next event's HDF5 while GPU sim runs; main thread dispatches sim; save worker threads (default 2) encode CSR + write HDF5 in parallel with per-file locks (`sen_lock`, `step_lock`, `hits_lock`) so sensor/step/hits writes overlap across workers. Enable `JAXTPC_PROFILE_SAVE=1` to see per-phase timings (encode/lockwait/write-sensor/write-step/write-hits) in the save log.
 
@@ -236,7 +238,7 @@ from production.load import build_viz_config, load_event_sensor, load_event_step
 viz_config = build_viz_config('output/sensor/sim_sensor_0000.h5')
 dense_signals, attrs, pedestals = load_event_sensor(sensor_path, event_idx=0)
 volumes = load_event_step(step_path, event_idx=0)
-track_hits, truth_dense, g2t = load_event_hits(hits_path, event_idx=0, num_time_steps=2701)
+track_hits, truth_dense, g2t, d2g, qs = load_event_hits(hits_path, event_idx=0)
 ```
 
 ### Tests

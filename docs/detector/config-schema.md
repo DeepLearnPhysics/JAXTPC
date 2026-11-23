@@ -150,6 +150,7 @@ A volume becomes a pixel volume when its `readout.type` is `pixel`. It then has
 |---|---|---|---|
 | `type` | **yes** | `pixel` | Selects pixel readout for this volume. |
 | `pixel_pitch` | **yes** | cm | Square pixel pitch; used as the transverse spatial reference for diffusion. |
+| `response_pixel_bin` | no (default: the NPZ's bin) | cm | Bin size at which to read the response table. Set it to `pixel_pitch / 10` when the pitch differs from the one the table was computed for (3.72 mm). Scales the transverse axes only. |
 | `pixel_shape` | **yes** | `[num_py, num_pz]` | Pixel grid dimensions in (y, z). |
 
 The pixel-grid origin is derived in the **local, yz-centered** frame
