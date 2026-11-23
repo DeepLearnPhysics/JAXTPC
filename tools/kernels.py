@@ -695,11 +695,18 @@ def interpolate_pixel_response_kernel(DKernel, s_observed,
             interpolated = t_alpha * v_interp[:-1] + (1 - t_alpha) * v_interp[1:]
             output_fine = output_fine.at[ipy, ipz, :].set(interpolated)
 
+    # The sub-bin interpolation above delays the trace by (t_alpha - 1) NPZ
+    # bins; delay it by t_sub_bin more whole bins (zero-filled, no wrap) so the
+    # arrival lands t_offset * rebin_factor NPZ bins into the rebin group that
+    # holds it (see time_zero_bin in load_pixel_response_kernel).
+    Ht_sim = Ht_interp // rebin_factor
+    fine_idx = jnp.arange(Ht_interp)
+    shifted = jnp.where(fine_idx >= t_sub_bin,
+                        jnp.roll(output_fine, t_sub_bin, axis=-1), 0.0)
+
     # Rebin time axis: average groups of rebin_factor NPZ bins → simulation bins
     # Kernel stores signal rate (current per unit time). Averaging preserves
     # the rate when changing bin width — matches pixlar's slice_and_merge.
-    Ht_sim = Ht_interp // rebin_factor
-    shifted = jnp.roll(output_fine, -t_sub_bin, axis=-1)
     truncated = shifted[:, :, :Ht_sim * rebin_factor]
     output = truncated.reshape(num_py, num_pz, Ht_sim, rebin_factor).mean(axis=-1)
 
@@ -789,14 +796,28 @@ def load_pixel_response_kernel(npz_path, num_s=32, time_spacing=0.5,
     npz_pixel_bin = float(data['pixel_bin_size'])
     npz_time_bin = float(data['time_bin_size'])
 
-    Hpy, Hpz, Ht = response.shape
-
     # pixel_spacing: NPZ bin / pixel pitch (unitless ratio, like wire_spacing)
     # bins_per_pixel = 1 / pixel_spacing ≈ pixel_pitch / npz_bin
     pixel_spacing = npz_pixel_bin / pixel_pitch_cm
 
     # Rebin factor: how many NPZ time bins per simulation time step
     rebin_factor = int(round(time_spacing / npz_time_bin))
+
+    # Time zero: the charge arrives at the start of NPZ bin time_zero_bin_npz.
+    # After the sub-bin time interpolation (-1, same as wire) and the whole-bin
+    # delay in interpolate_pixel_response_kernel, a deposit with time offset f
+    # arrives at fine index (time_zero_bin_npz - 1) + f * rebin_factor.
+    # Prepend zero time bins so that time_zero_bin_npz - 1 is a multiple of
+    # rebin_factor: the rebin groups then line up with the simulation ticks and
+    # the arrival falls exactly f into output bin time_zero_bin_out.
+    t_start_us = float(data['drift_time'])
+    time_zero_bin_npz = int(round(t_start_us / npz_time_bin))
+    t_pad = (1 - time_zero_bin_npz) % rebin_factor
+    response = jnp.pad(response, ((0, 0), (0, 0), (t_pad, 0)))
+    time_zero_bin_npz += t_pad
+    time_zero_bin_out = (time_zero_bin_npz - 1) // rebin_factor
+
+    Hpy, Hpz, Ht = response.shape
 
     s_levels = jnp.linspace(0.0, 1.0, num_s)
 
@@ -828,12 +849,6 @@ def load_pixel_response_kernel(npz_path, num_s=32, time_spacing=0.5,
     # Spatial zero bins (kernel center in output pixel units)
     py_zero_bin = num_py_out // 2
     pz_zero_bin = num_pz_out // 2
-
-    # Time zero bin: convert from NPZ bins to simulation time steps
-    t_start_us = float(data['drift_time'])
-    time_zero_bin_npz = int(round(t_start_us / npz_time_bin))
-    # -1 for time interpolation (same as wire), then convert to sim bins
-    time_zero_bin_out = (time_zero_bin_npz - 1) // rebin_factor
 
     return PixelResponseKernel(
         DKernel=DKernel,
