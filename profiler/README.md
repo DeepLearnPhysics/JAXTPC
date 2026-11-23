@@ -4,7 +4,7 @@ Tools for sizing simulation capacities and generating production configs.
 
 The production sim's capacities (`total_pad`, `max_keys`, `maxg`, box dims, chunk
 sizes, thresholds) must be sized for the data — otherwise the sim raises
-`RuntimeError` (`total_pad`), reprocesses (`maxg`), or truncates+logs (`max_keys`)
+`RuntimeError` (`total_pad`), reprocesses (`maxg`), or or refuses the event (`max_keys`)
 at runtime. The profiler scans the data and benchmarks the sim to set them.
 
 ## Quick start
@@ -193,8 +193,8 @@ See `CLAUDE.md` "Units convention".
 
 - **`total_pad`** — deposits exceed capacity → `RuntimeError` at load.
 - **`maxg`** — n_groups exceeds capacity → logged; sized at p99.95 so reprocess the rare tail.
-- **`max_keys`** — box-cell count exceeds capacity → the count is still correct but stored
-  keys truncate + log. Size with `compare_max_keys` on the tail.
+- **`max_keys`** — box-cell count exceeds capacity → `RuntimeError`; `run_batch` logs and
+  skips the event. Size with `compare_max_keys` on the tail.
 
 ## Contents
 

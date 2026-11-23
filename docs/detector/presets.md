@@ -51,8 +51,10 @@ continuous rectangular model does not capture per-APA wire segmentation.
 
 **`cubic_pixel_config.yaml`** — the same dual-cube geometry as
 `cubic_wireplane_config`, but each volume uses pixel readout: 4.32 mm pitch,
-1000×1000 pixels covering the 432 cm y/z span. The direct wire↔pixel comparison
-config.
+1000×1000 pixels covering the 432 cm y/z span, and the same readout window as wire
+(0.3/0.3 of the max drift time, 4321 ticks). The response table was computed for
+3.72 mm pads; `response_pixel_bin: 0.0432` scales it to this pitch. The direct
+wire↔pixel comparison config.
 
 **`dune_ndlar_config.yaml`** — DUNE ND-LAr / ArgonCube, the largest preset. 35
 modules in a 5×7 grid, each dual-drift → **70** pixel volumes. LArPix readout at

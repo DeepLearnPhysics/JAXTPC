@@ -11,7 +11,7 @@ shapes, and which post-processing stages run.
 | | **Wire** | **Pixel** |
 |---|---|---|
 | Sensor geometry | 3 angled 1-D wire planes (U/V/Y) | Single 2-D pixel grid (y×z) |
-| Config | `planes[]` list (`angle`, `wire_spacing`, `distance_from_anode`) | `readout: {type: pixel, pixel_pitch, pixel_shape}` |
+| Config | `planes[]` list (`angle`, `wire_spacing`, `distance_from_anode`) | `readout: {type: pixel, pixel_pitch, pixel_shape}`, optional `response_pixel_bin` |
 | Kernel | Dimensionless field-impulse fraction | Chip gain (ADC/e⁻) baked in |
 | Hits-stage units | **ENC** (electrons) | **ADC** |
 | Sensor-signal units | **ADC** (post-digitize) | **ADC** (same pass) |

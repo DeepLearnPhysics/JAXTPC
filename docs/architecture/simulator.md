@@ -124,7 +124,8 @@ The construction/call split maps exactly onto two NamedTuples:
 | **Changing it** | Requires a new closure → **JIT recompile** | Free — **no recompile** |
 
 Because `SimParams` is the sole traced argument, you can sweep velocity,
-lifetime, diffusion, or recombination values across events without recompiling.
+lifetime, or recombination values across events without recompiling. Diffusion is
+the exception in the production path: its table is fixed at construction.
 Changing anything structural (a mode flag, `total_pad`, geometry) means building
 a new `DetectorSimulator`. See [config vs params](config-vs-params.md).
 
