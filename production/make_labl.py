@@ -17,7 +17,7 @@ Output layout (matches pimm-data's ``JAXTPCLablReader``)::
 
     {outdir}/labl/{dataset}_labl_{NNNN}.h5
         /config/ attrs
-        /event_NNN/volume_N/
+        /entry_NNNNNN/volume_N/   (same entry names and identity attrs as hits)
             # Per-deposit (N,) foreign key row-aligned with step rows
             deposit_to_track    (N,) int32
 
@@ -61,6 +61,7 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools.loader import ParticleStepExtractor, compute_interaction_ids
+from production.entries import DPROD_ID_ATTRS, entry_keys, source_files
 
 
 def _build_track_lookup(extractor, source_event_idx):
@@ -157,12 +158,39 @@ def _volume_labels(hits_vol_group, track_lookup):
 
 
 def make_labl(hits_path, labl_path, source_file, dataset_name, file_index):
-    """Generate a labl file from hits + edepsim source."""
+    """Generate a labl file from hits + edepsim source(s).
+
+    *source_file* overrides the edep-sim input of a single-input hits file;
+    None takes each entry's input from the hits file (config/source_files and
+    the entry's source_index), which is how a merged file is read.
+    """
+    extractors = {}
+
+    def _extractor(path):
+        if path not in extractors:
+            extractors[path] = ParticleStepExtractor(path).__enter__()
+        return extractors[path]
+
+    try:
+        _make_labl(hits_path, labl_path, source_file, dataset_name, file_index,
+                   _extractor)
+    finally:
+        for ex in extractors.values():
+            ex.__exit__(None, None, None)
+
+
+def _make_labl(hits_path, labl_path, source_file, dataset_name, file_index,
+               _extractor):
     with h5py.File(hits_path, 'r') as f_hits, \
-            h5py.File(labl_path, 'w') as f_labl, \
-            ParticleStepExtractor(source_file) as extractor:
+            h5py.File(labl_path, 'w') as f_labl:
 
         hits_cfg = f_hits['config']
+        sources = source_files(f_hits)
+        if source_file is not None:
+            if len(sources) > 1:
+                raise ValueError(f'{hits_path} merges {len(sources)} inputs; '
+                                 f'take them from the file (no --source)')
+            sources = [source_file]
         n_events = int(hits_cfg.attrs['n_events'])
         n_volumes = int(hits_cfg.attrs.get('n_volumes', 1))
 
@@ -174,26 +202,28 @@ def make_labl(hits_path, labl_path, source_file, dataset_name, file_index):
         g_cfg.attrs['label_names'] = np.array(
             ['track_pdg', 'track_cluster', 'track_interaction',
              'track_ancestor'], dtype=object)
-        g_cfg.attrs['source'] = f'dummy-from-edepsim:{os.path.basename(source_file)}'
+        g_cfg.attrs['source'] = 'dummy-from-edepsim:' + ','.join(
+            os.path.basename(p) for p in sources)
         g_cfg.attrs['generator'] = 'production/make_labl.py'
-        for key in ('source_file', 'global_event_offset', 'group_size',
-                    'gap_threshold_mm', 'production_version', 'run_id',
+        for key in ('format_version', 'n_sources', 'source_file', 'global_event_offset',
+                    'group_size', 'gap_threshold_mm', 'production_version', 'run_id',
                     'batch_timestamp', 'git_commit', 'git_dirty', 'git_repo'):
             if key in hits_cfg.attrs:
                 g_cfg.attrs[key] = hits_cfg.attrs[key]
+        if 'source_files' in hits_cfg:
+            g_cfg.create_dataset('source_files', data=hits_cfg['source_files'][()])
 
-        for i in range(n_events):
-            evt_key = f'event_{i:03d}'
-            if evt_key not in f_hits:
-                continue
+        for i, evt_key in enumerate(entry_keys(f_hits)):
             hits_evt = f_hits[evt_key]
             source_event_idx = int(hits_evt.attrs.get('source_event_idx', i))
+            src = sources[int(hits_evt.attrs.get('source_index', 0))]
 
-            track_lookup = _build_track_lookup(extractor, source_event_idx)
+            track_lookup = _build_track_lookup(_extractor(src), source_event_idx)
 
             labl_evt = f_labl.create_group(evt_key)
-            if 'event_id' in hits_evt.attrs:
-                labl_evt.attrs['event_id'] = hits_evt.attrs['event_id']
+            for key in ('source_index', 'source_event_idx') + DPROD_ID_ATTRS:
+                if key in hits_evt.attrs:
+                    labl_evt.attrs[key] = hits_evt.attrs[key]
             for v in range(n_volumes):
                 vol_key = f'volume_{v}'
                 if vol_key not in hits_evt:
@@ -236,23 +266,23 @@ def main():
 
     for hits_path in hits_files:
         basename = os.path.basename(hits_path)
-        stem = basename.rsplit('.', 1)[0]
-        file_index = int(stem.rsplit('_', 1)[-1])
-        labl_path = os.path.join(
-            labl_dir, f'{args.dataset}_labl_{file_index:04d}.h5')
-
-        if args.source:
-            source = args.source
-        else:
-            with h5py.File(hits_path, 'r') as f:
-                source = str(f['config'].attrs.get('source_file', 'out.h5'))
-        if not os.path.exists(source):
-            sys.exit(f"edepsim source not found: {source} (use --source to override)")
+        # {dataset}_hits_{suffix}.h5 -> {dataset}_labl_{suffix}.h5 (suffix: NNNN,
+        # or the --merge-output name of a merged file)
+        suffix = basename[len(f'{args.dataset}_hits_'):-len('.h5')]
+        labl_path = os.path.join(labl_dir, f'{args.dataset}_labl_{suffix}.h5')
+        with h5py.File(hits_path, 'r') as f:
+            file_index = int(f['config'].attrs.get('file_index', 0))
+            sources = [args.source] if args.source else source_files(f)
+        missing = [s for s in sources if not os.path.exists(s)]
+        if not sources or missing:
+            sys.exit(f"edepsim source not found: {missing or '(none recorded)'} "
+                     f"(use --source to override)")
 
         t0 = time.time()
-        make_labl(hits_path, labl_path, source, args.dataset, file_index)
+        make_labl(hits_path, labl_path, args.source, args.dataset, file_index)
         print(f'{basename} -> {os.path.basename(labl_path)} '
-              f'[{time.time() - t0:.2f}s] (source={os.path.basename(source)})')
+              f'[{time.time() - t0:.2f}s] '
+              f'(source={",".join(os.path.basename(s) for s in sources)})')
 
     print(f'\nDone. {len(hits_files)} labl file(s) written to {labl_dir}/')
 

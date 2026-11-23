@@ -15,6 +15,15 @@ events each and written into per-type subdirectories:
 {outdir}/labl/{dataset}_labl_{NNNN}.h5     # produced separately, see below
 ```
 
+(in per-input `run_{run_id}/` subdirectories). With `--merge-output NAME` the
+events of **all** inputs, in input order, go into one file set instead:
+
+```text
+{outdir}/sensor/{dataset}_sensor_{NAME}.h5
+{outdir}/step/{dataset}_step_{NAME}.h5
+{outdir}/hits/{dataset}_hits_{NAME}.h5
+```
+
 | File | Prefix | Contents | Written by |
 |---|---|---|---|
 | **sensor** | `_sensor_` | Sparse thresholded raw readout after full detector sim; delta-encoded, `uint16` if digitized | `run_batch.py` |
@@ -22,10 +31,28 @@ events each and written into per-type subdirectories:
 | **hits** | `_hits_` | Per-particle sensor decomposition + group machinery — `deposit_to_group`, `qs_fractions`, `group_to_track` per volume, per-plane CSR-encoded entries | `run_batch.py` (with track-hits on) |
 | **labl** | `_labl_` | Per-track labels + per-deposit → `track_id` foreign key | `production/make_labl.py` (separate, temporary stand-in) |
 
-Every event lives under an `event_{NNN}` group (`NNN` = index within the file,
-zero-padded to 3 digits), and every event is split by volume into
-`volume_{v}` subgroups. Wire planes are labelled `U`/`V`/`Y`; pixel volumes use
-a single `Pixel` plane.
+Every event lives under an `entry_{NNNNNN}` group, and every event is split by
+volume into `volume_{v}` subgroups. Wire planes are labelled `U`/`V`/`Y`; pixel
+volumes use a single `Pixel` plane.
+
+!!! info "Entries and event identity (format 2)"
+    `NNNNNN` is only the entry's position in the file (0-based, input order; an
+    event skipped for exceeding a limit leaves a gap). **What** the event is lives
+    in the entry's attributes, the same in the sensor, step and hits files:
+
+    | attribute | meaning |
+    |---|---|
+    | `source_index` | which input it came from: index into `/config/source_files` |
+    | `source_event_idx` | its index within that input file |
+    | `event_id` | its identifier. For inputs from a dprod production (an edep-sim file with `/dprod/events`) this is copied from the input and is **unique within the production campaign**; otherwise edep-sim's own event id (`--edepsim-ids`) or `event_id_offset + source_event_idx` |
+    | `job_id`, `job_event` | dprod inputs only: the production job that generated the event, and its number within that job |
+
+    `/config/source_files` lists the input file(s), and `/config.attrs['format_version']`
+    is `2`. Files without `format_version` (format 1) name their groups
+    `event_{NNN}`, have one input (`/config.attrs['source_file']`) and no
+    `source_index`. Use `production/entries.py` (`entry_keys(f)`,
+    `find_entry(f, i)`, `source_files(f)`) rather than building group names;
+    `production/load.py` reads both formats.
 
 !!! info "Files each carry their own `/config` group"
     Metadata (num time steps, sampling, pedestals, `num_wires` per
@@ -85,19 +112,22 @@ optional electronics → noise → digitize). Only elements clearing
 
 ```text
 /config/
-    attrs: dataset_name, file_index, source_file, n_events,
+    attrs: format_version (2), dataset_name, file_index, n_sources,
+           source_file (single input only), n_events,
            global_event_offset, num_time_steps, time_step_us,
            pre_window_us, post_window_us, electrons_per_adc,
            velocity_cm_us, lifetime_us, recombination_model,
            include_intrinsic_noise, include_coherent_noise,
            include_electronics, include_digitize, threshold_adc,
            n_volumes, readout_type, n_bits (if digitized)
+    source_files     (n_sources,)            str       the input file(s)
     num_wires        (n_volumes, max_planes) int32
     volume_ranges    (n_volumes, 3, 2)       float32   mm, [vol][axis][min,max]
     pedestals        (n_volumes, max_planes) int32     if digitized
 
-/event_{NNN}/
-    attrs: source_event_idx, n_volumes, n_vol0, n_vol1, ...   (deposit counts)
+/entry_{NNNNNN}/
+    attrs: source_index, source_event_idx, event_id [, job_id, job_event],
+           n_volumes, n_vol0, n_vol1, ...   (deposit counts)
     volume_{v}/{plane}/                     plane ∈ {U,V,Y} (wire) or Pixel
         # wire readout:
         delta_wire    (P,) int16
@@ -154,14 +184,16 @@ Positions are voxelised to `uint16` at `pos_step_mm`; physics scalars are
 
 ```text
 /config/
-    attrs: dataset_name, file_index, source_file, n_events,
+    attrs: format_version (2), dataset_name, file_index, n_sources,
+           source_file (single input only), n_events,
            global_event_offset, group_size, gap_threshold_mm,
            n_volumes, readout_type
     num_wires        (n_volumes, max_planes) int32
     volume_ranges    (n_volumes, 3, 2)       float32   mm
 
-/event_{NNN}/
-    attrs: source_event_idx, n_volumes
+/entry_{NNNNNN}/
+    attrs: source_index, source_event_idx, event_id [, job_id, job_event],
+           n_volumes
     volume_{v}/
         attrs: n_actual, pos_origin_x/y/z, pos_step_mm
         positions   (N, 3) uint16    voxelised at pos_step_mm
@@ -203,15 +235,17 @@ enabled (it is on by default; `--no-track-hits` skips this file). See
 
 ```text
 /config/
-    attrs: dataset_name, file_index, source_file, n_events,
+    attrs: format_version (2), dataset_name, file_index, n_sources,
+           source_file (single input only), n_events,
            global_event_offset, group_size, gap_threshold_mm,
            num_time_steps, pre_window_us, post_window_us,
            n_volumes, readout_type
     num_wires        (n_volumes, max_planes) int32
     volume_ranges    (n_volumes, 3, 2)       float32
 
-/event_{NNN}/
-    attrs: source_event_idx, n_volumes, threshold
+/entry_{NNNNNN}/
+    attrs: source_index, source_event_idx, event_id [, job_id, job_event],
+           n_volumes, threshold
     volume_{v}/
         attrs: n_actual, n_groups
         deposit_to_group  (N,) int32     per-deposit group id; row-aligned
@@ -322,7 +356,7 @@ metadata; it is not JIT-compiled and is out of the simulation pipeline).
     attrs: dataset_name, source_file, n_events, n_volumes,
            label_names, source, generator, ...
 
-/event_{NNN}/
+/entry_{NNNNNN}/                    same names and identity attrs as hits
     volume_{v}/
         deposit_to_track  (N,) int32   per-deposit → Geant4 track_id
                                         (row-aligned with step deposits in v)

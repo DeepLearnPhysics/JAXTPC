@@ -20,6 +20,13 @@ function readAttr(grp, name) {
   return typeof v === 'bigint' ? Number(v) : v;
 }
 
+// Entry group name of event idx: entry_NNNNNN (format 2), event_NNN (format 1).
+function entryKey(f, idx) {
+  const k2 = 'entry_' + String(idx).padStart(6, '0');
+  if (f && f.get(k2)) return k2;
+  return 'event_' + String(idx).padStart(3, '0');
+}
+
 function readF16(ds) {
   const meta = ds.metadata, nEl = meta.total_size, nb = meta.size * nEl;
   const ptr = mod._malloc(nb);
@@ -89,7 +96,7 @@ function aggregateDisplay(pk, ch, mod2) {
 }
 
 function decodeEvent(idx) {
-  const key = 'event_' + String(idx).padStart(3, '0');
+  const key = entryKey(stepF, idx);
   const sEvt = stepF.get(key);
   const cEvt = hitsF.get(key);
   const lEvt = hasLabl ? lablF.get(key) : null;
@@ -297,7 +304,7 @@ function decodeSensor(idx) {
   // Pixel without sensor file: return inst-derived signal
   if (isPixel && !hasSensor && cachedInstSensor) return cachedInstSensor;
 
-  const key = 'event_' + String(idx).padStart(3, '0');
+  const key = entryKey(sensorF, idx);
   const rEvt = sensorF.get(key);
   const nVol = readAttr(rEvt, 'n_volumes') || nVolumes;
   const labels = isPixel ? PIXEL_LABELS : WIRE_LABELS;
@@ -413,7 +420,7 @@ function decodeSensor(idx) {
 
 function decodeLight(idx, activityThresh, gapNs) {
   if (!optF) return { stitched: null };
-  const key = 'event_' + String(idx).padStart(3, '0');
+  const key = entryKey(optF, idx);
   const evt = optF.get(key);
   if (!evt) return { stitched: null };
 
@@ -635,7 +642,7 @@ self.onmessage = async function(e) {
     if (isPixel) {
       nPlanes = 3; // 3 projections: Y-T, Z-T, Y-Z
       // Infer pixel grid from inst or sensor data
-      const probeEvt = hasSensor ? sensorF.get('event_000') : hitsF.get('event_000');
+      const probeEvt = hasSensor ? sensorF.get(entryKey(sensorF, 0)) : hitsF.get(entryKey(hitsF, 0));
       let maxPyVal = 100, maxPzVal = 100;
       for (let v = 0; v < nVolumes; v++) {
         const pg = hasSensor

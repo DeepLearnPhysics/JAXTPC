@@ -9,6 +9,7 @@ production/
 ├── run_batch.py              # Main batch simulation script
 ├── save.py                   # HDF5 save functions (sensor/step/hits encoding)
 ├── load.py                   # HDF5 load/decode functions
+├── entries.py                # entry naming + event identity attributes (format 2)
 ├── view_production.ipynb     # Visualize production output (no simulation needed)
 └── README.md                 # This file
 ```
@@ -41,6 +42,24 @@ python3 production/run_batch.py \
     --electronics \
     --no-track-hits
 ```
+
+### Several inputs into one file set
+
+`--merge-output NAME` writes the events of all `--data` inputs, in input order,
+into one `{outdir}/{sensor,step,hits}/{dataset}_{sensor,step,hits}_NAME.h5` set
+(no `run_*/` subdirectories, no `--events-per-file` split; not combinable with
+`--skip-existing` or `--per-worker-files`). Each entry records which input it
+came from (`source_index` into `/config/source_files`, `source_event_idx`):
+
+```bash
+python3 production/run_batch.py --data edepsim_j000120-000120.h5 ... edepsim_j000124-000124.h5 \
+    --config config/cubic_wireplane_config.yaml --dataset sim_wire \
+    --merge-output jaxtpc_wire_j000120-000124
+```
+
+Inputs written by a dprod production carry `/dprod/events` (`job_id`, `job_event`
+and the campaign-unique `event_id` per event); run_batch copies these into every
+entry, so the same event has the same `event_id` in every file of the production.
 
 ### Production Config
 
@@ -183,7 +202,7 @@ Sparse thresholded raw readout after full detector simulation.
 
 ```
 /config/
-    attrs: dataset_name, source_file, n_events, global_event_offset,
+    attrs: format_version, dataset_name, n_sources, source_file (single input), n_events, global_event_offset,
            num_time_steps, time_step_us, electrons_per_adc,
            velocity_cm_us, lifetime_us, recombination_model,
            include_noise, include_electronics, include_digitize,
@@ -191,8 +210,9 @@ Sparse thresholded raw readout after full detector simulation.
     num_wires           (2, 3) int32
     pedestals           (2, 3) int32    per-plane pedestal (if digitized)
 
-/event_{NNN}/
-    attrs: source_event_idx, n_volumes, n_vol0, n_vol1, ...
+/entry_{NNNNNN}/                     (format 2; see production/entries.py)
+    attrs: source_index, source_event_idx, event_id [, job_id, job_event],
+           n_volumes, n_vol0, n_vol1, ...
     volume_N/{plane}/                  per-volume groups; plane labels
                                        come from cfg.plane_names (e.g.
                                        U/V/Y for wire, "Pixel" for pixel)
@@ -222,12 +242,12 @@ regression; any labeling / correspondence goes through ``labl/`` or
 
 ```
 /config/
-    attrs: dataset_name, source_file, n_events, global_event_offset,
+    attrs: format_version, dataset_name, n_sources, source_file (single input), n_events, global_event_offset,
            group_size, gap_threshold_mm
     num_wires           (2, 3) int32
 
-/event_{NNN}/
-    attrs: source_event_idx
+/entry_{NNNNNN}/
+    attrs: source_index, source_event_idx, event_id [, job_id, job_event]
     volume_N/
         attrs: n_actual, pos_origin_x/y/z, pos_step_mm
         positions   (N, 3) uint16    voxelized at pos_step_mm
@@ -260,12 +280,12 @@ entries (which groups contributed to which pixels).
 
 ```
 /config/
-    attrs: dataset_name, source_file, n_events, global_event_offset,
+    attrs: format_version, dataset_name, n_sources, source_file (single input), n_events, global_event_offset,
            group_size, gap_threshold_mm, num_time_steps, threshold
     num_wires           (2, 3) int32
 
-/event_{NNN}/
-    attrs: source_event_idx, threshold
+/entry_{NNNNNN}/
+    attrs: source_index, source_event_idx, event_id [, job_id, job_event], threshold
     volume_N/
         attrs: n_actual, n_groups
         deposit_to_group  (N,) int32     per-deposit: which group each
@@ -329,7 +349,7 @@ stop-gap script `make_labl.py`, see below). Lives under
     attrs: dataset_name, source_file, n_events, n_volumes,
            label_names, source, generator, ...
 
-/event_{NNN}/
+/entry_{NNNNNN}/
     volume_N/
         # Per-deposit FK (N,) — row-aligned with step deposits for vol N
         deposit_to_track     (N,) int32    deposit i -> Geant4 track_id

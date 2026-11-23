@@ -13,6 +13,8 @@ import numpy as np
 import h5py
 from collections import namedtuple
 
+from production.entries import entry_keys, find_entry  # noqa: F401 (re-exported)
+
 # Register blosc/zstd/lz4 HDF5 filters so output written with run_batch
 # --codec (default blosc-zstd) is transparently readable. No-op if absent.
 try:
@@ -131,8 +133,6 @@ def load_event_sensor(sensor_path, event_idx, as_sparse=False):
         {(vol, plane): pedestal} when digitized (subtract from ``values`` for
         signal), else None.
     """
-    event_key = f'event_{event_idx:03d}'
-
     with h5py.File(sensor_path, 'r') as f:
         cfg_grp = f['config']
         num_time_steps = int(cfg_grp.attrs['num_time_steps'])
@@ -140,7 +140,7 @@ def load_event_sensor(sensor_path, event_idx, as_sparse=False):
         n_vol = num_wires_arr.shape[0]
         n_planes = num_wires_arr.shape[1]
 
-        evt = f[event_key]
+        evt = f[find_entry(f, event_idx)]
         event_attrs = dict(evt.attrs)
 
         dense_signals = {}
@@ -273,10 +273,8 @@ def load_event_step(step_path, event_idx):
         positions_mm (N, 3), de (N,), dx (N,), theta (N,), phi (N,),
         t0_us (N,), charge (N,), photons (N,), n_actual (int).
     """
-    event_key = f'event_{event_idx:03d}'
-
     with h5py.File(step_path, 'r') as f:
-        evt = f[event_key]
+        evt = f[find_entry(f, event_idx)]
         n_volumes = int(evt.attrs.get('n_volumes', 2))
 
         volumes = []
@@ -404,6 +402,7 @@ def load_event_hits(hits_path, event_idx, num_time_steps=None,
     ----------
     hits_path : str
     event_idx : int
+        Entry index within the file (entry_NNNNNN; event_NNN in format-1 files).
     num_time_steps : int, optional
         If ``None``, read from hits ``/config`` attrs.
     n_volumes : int, optional
@@ -424,7 +423,6 @@ def load_event_hits(hits_path, event_idx, num_time_steps=None,
     """
     from tools.track_hits import label_from_groups
 
-    event_key = f'event_{event_idx:03d}'
     track_hits = {}
     truth_dense = {}
 
@@ -433,7 +431,7 @@ def load_event_hits(hits_path, event_idx, num_time_steps=None,
             num_time_steps = int(f['config'].attrs['num_time_steps'])
         if n_volumes is None:
             n_volumes = int(f['config'].attrs['n_volumes'])
-        evt = f[event_key]
+        evt = f[find_entry(f, event_idx)]
         nw_arr = f['config']['num_wires'][:]
 
         g2t_per_vol = []
@@ -525,6 +523,7 @@ def load_correspondence(hits_path, event_idx, v, num_time_steps=None):
     ----------
     hits_path : str
     event_idx : int
+        Entry index within the file (entry_NNNNNN; event_NNN in format-1 files).
     v : int
         Volume index.
     num_time_steps : int, optional
@@ -542,7 +541,7 @@ def load_correspondence(hits_path, event_idx, v, num_time_steps=None):
     with h5py.File(hits_path, 'r') as f:
         if num_time_steps is None:
             num_time_steps = int(f['config'].attrs['num_time_steps'])
-        evt = f[f'event_{event_idx:03d}']
+        evt = f[find_entry(f, event_idx)]
         vg_key = f'volume_{v}'
         if vg_key not in evt:
             return None

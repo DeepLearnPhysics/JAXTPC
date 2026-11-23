@@ -12,6 +12,9 @@ blosc-zstd; see ``codec_kwargs``). Readers must ``import hdf5plugin`` for
 non-gzip codecs.
 """
 
+import os
+
+import h5py
 import numpy as np
 
 
@@ -106,6 +109,34 @@ def _write_provenance(g, provenance):
             g.attrs[key] = val
 
 
+def _write_sources(g, source_file):
+    """Format version and input file(s) of a config group.
+
+    *source_file* is one path or a list of paths (a file merging several
+    inputs).  ``source_files`` is always written; the single-input
+    ``source_file`` attribute only when there is one input.
+    """
+    from production.entries import FORMAT_VERSION
+    srcs = ([source_file] if isinstance(source_file, (str, bytes, os.PathLike))
+            else list(source_file))
+    srcs = [os.fspath(s) if not isinstance(s, bytes) else s.decode() for s in srcs]
+    g.attrs['format_version'] = FORMAT_VERSION
+    g.create_dataset('source_files', data=np.array(srcs, dtype=h5py.string_dtype()))
+    g.attrs['n_sources'] = len(srcs)
+    if len(srcs) == 1:
+        g.attrs['source_file'] = srcs[0]
+
+
+def _write_entry_attrs(evt, source_event_idx, event_id, attrs):
+    """Identity attributes of one entry (see production/entries.py)."""
+    evt.attrs['source_event_idx'] = source_event_idx
+    if event_id is not None:
+        evt.attrs['event_id'] = event_id
+    for k, v in (attrs or {}).items():
+        if v is not None:
+            evt.attrs[k] = v
+
+
 def write_config_sensor(f, cfg, params, recomb_model, dataset_name, file_index,
                         source_file, n_events, global_offset, threshold_adc,
                         digitization_config=None, provenance=None):
@@ -116,7 +147,7 @@ def write_config_sensor(f, cfg, params, recomb_model, dataset_name, file_index,
     _write_provenance(g, provenance)
     g.attrs['dataset_name'] = dataset_name
     g.attrs['file_index'] = file_index
-    g.attrs['source_file'] = source_file
+    _write_sources(g, source_file)
     g.attrs['n_events'] = n_events
     g.attrs['global_event_offset'] = global_offset
     g.attrs['num_time_steps'] = cfg.num_time_steps
@@ -172,7 +203,7 @@ def write_config_step(f, cfg, dataset_name, file_index, source_file,
     _write_provenance(g, provenance)
     g.attrs['dataset_name'] = dataset_name
     g.attrs['file_index'] = file_index
-    g.attrs['source_file'] = source_file
+    _write_sources(g, source_file)
     g.attrs['n_events'] = n_events
     g.attrs['global_event_offset'] = global_offset
     g.attrs['group_size'] = group_size
@@ -203,7 +234,7 @@ def write_config_hits(f, cfg, dataset_name, file_index, source_file,
     _write_provenance(g, provenance)
     g.attrs['dataset_name'] = dataset_name
     g.attrs['file_index'] = file_index
-    g.attrs['source_file'] = source_file
+    _write_sources(g, source_file)
     g.attrs['n_events'] = n_events
     g.attrs['global_event_offset'] = global_offset
     g.attrs['group_size'] = group_size
@@ -329,7 +360,7 @@ def _save_pixel_plane(g, sparse_dict):
 
 def save_event_sensor(f, event_key, response_signals, threshold_adc,
                       source_event_idx, deposits, cfg=None,
-                      digitized=False, event_id=None):
+                      digitized=False, event_id=None, attrs=None):
     """Save one event's raw sensor readout (sparse, delta-encoded).
 
     Handles both wire (2D) and pixel (3D) output formats.
@@ -341,9 +372,7 @@ def save_event_sensor(f, event_key, response_signals, threshold_adc,
     from /config/pedestals to decode on load.
     """
     evt = f.create_group(event_key)
-    evt.attrs['source_event_idx'] = source_event_idx
-    if event_id is not None:
-        evt.attrs['event_id'] = event_id
+    _write_entry_attrs(evt, source_event_idx, event_id, attrs)
     evt.attrs['n_volumes'] = len(deposits.volumes)
     for v in range(len(deposits.volumes)):
         evt.attrs[f'n_vol{v}'] = deposits.volumes[v].n_actual
@@ -372,7 +401,7 @@ def save_event_sensor(f, event_key, response_signals, threshold_adc,
 
 
 def save_event_step(f, event_key, deposits, source_event_idx, pos_step_mm=0.3,
-                    cfg=None, event_id=None):
+                    cfg=None, event_id=None, attrs=None):
     """Save one event's 3D truth deposits — physics only.
 
     Per-volume contents: positions, de/dx/theta/phi/t0_us, charge, photons.
@@ -388,9 +417,7 @@ def save_event_step(f, event_key, deposits, source_event_idx, pos_step_mm=0.3,
     back to global before saving.
     """
     evt = f.create_group(event_key)
-    evt.attrs['source_event_idx'] = source_event_idx
-    if event_id is not None:
-        evt.attrs['event_id'] = event_id
+    _write_entry_attrs(evt, source_event_idx, event_id, attrs)
     evt.attrs['n_volumes'] = len(deposits.volumes)
 
     for v in range(len(deposits.volumes)):
@@ -595,7 +622,8 @@ def encode_correspondence_csr_pixel(gp_sk, gp_tk, gp_gid, gp_ch, gp_count,
 
 
 def save_event_hits(f, event_key, hits_data, deposits, source_event_idx,
-                    hits_threshold=0.0, cfg=None, event_id=None):
+                    hits_threshold=0.0, cfg=None, event_id=None,
+                    attrs=None):
     """Save one event's per-particle charge attribution at sensor elements.
 
     Writes the hits file's event group with the full schema:
@@ -615,7 +643,7 @@ def save_event_hits(f, event_key, hits_data, deposits, source_event_idx,
     ----------
     f : h5py.File
     event_key : str
-        e.g. ``f'event_{i:03d}'``.
+        e.g. ``entry_key(i)`` (see production/entries.py).
     hits_data : dict
         ``{(vol_idx, plane_idx): csr_dict}`` — pre-encoded CSR per plane
         from :func:`encode_correspondence_csr` (wire) or
@@ -633,12 +661,13 @@ def save_event_hits(f, event_key, hits_data, deposits, source_event_idx,
     cfg : SimConfig, optional
         Used for plane label lookup via ``cfg.plane_names``.
     event_id : int, optional
-        Globally unique event identifier within the run.
+        The event's identifier (see production/entries.py).
+    attrs : dict, optional
+        Further identity attributes of the entry, e.g. ``source_index``,
+        ``job_id``, ``job_event``.
     """
     evt = f.create_group(event_key)
-    evt.attrs['source_event_idx'] = source_event_idx
-    if event_id is not None:
-        evt.attrs['event_id'] = event_id
+    _write_entry_attrs(evt, source_event_idx, event_id, attrs)
     evt.attrs['n_volumes'] = len(deposits.volumes)
     evt.attrs['threshold'] = hits_threshold
 

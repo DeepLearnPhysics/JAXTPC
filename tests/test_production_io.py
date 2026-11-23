@@ -530,3 +530,65 @@ class TestStepRoundtrip:
             assert not np.array_equal(vol0[0]['de'], vol1[0]['de'][:10])
         finally:
             os.unlink(tmp_path)
+
+
+class TestEntriesFormat2:
+    """entry_NNNNNN groups, identity attributes and multi-input config (format 2)."""
+
+    def _write(self, path, mock_sim_config, sources, n):
+        import h5py
+        from production.entries import entry_key
+        cfg, params = mock_sim_config
+        signals = {(s, p): np.zeros((cfg.volumes[s].num_wires[p], cfg.num_time_steps),
+                                    dtype=np.float32) for s in range(2) for p in range(3)}
+        signals[(0, 0)][3, 4] = 5.0
+        with h5py.File(path, 'w') as f:
+            write_config_sensor(f, cfg, params, 'emb', 'test', 0, sources, n, 0, 1.0)
+            for i in range(n):
+                k, e = divmod(i, 2)
+                save_event_sensor(f, entry_key(i), signals, 1.0, e, _mock_deposits(),
+                                  event_id=100 + i,
+                                  attrs={'source_index': k, 'job_id': 7 + k, 'job_event': e})
+
+    def test_merged_config_and_entries(self, mock_sim_config, tmp_path):
+        import h5py
+        from production.entries import entry_keys, find_entry, source_files, FORMAT_VERSION
+        p = str(tmp_path / 'merged.h5')
+        self._write(p, mock_sim_config, ['/in/a.h5', '/in/b.h5'], 4)
+        with h5py.File(p, 'r') as f:
+            assert int(f['config'].attrs['format_version']) == FORMAT_VERSION == 2
+            assert int(f['config'].attrs['n_sources']) == 2
+            assert 'source_file' not in f['config'].attrs    # several inputs
+            assert source_files(f) == ['/in/a.h5', '/in/b.h5']
+            assert entry_keys(f) == ['entry_000000', 'entry_000001', 'entry_000002',
+                                     'entry_000003']
+            a = f[find_entry(f, 3)].attrs
+            assert (a['source_index'], a['source_event_idx'], a['event_id'],
+                    a['job_id'], a['job_event']) == (1, 1, 103, 8, 1)
+        dense, attrs, _ = load_event_sensor(p, 2)
+        assert attrs['job_id'] == 8 and attrs['source_event_idx'] == 0
+        assert dense[(0, 0)][3, 4] == pytest.approx(5.0)
+
+    def test_single_input_keeps_source_file(self, mock_sim_config, tmp_path):
+        import h5py
+        from production.entries import source_files
+        p = str(tmp_path / 'one.h5')
+        self._write(p, mock_sim_config, '/in/a.h5', 1)
+        with h5py.File(p, 'r') as f:
+            assert f['config'].attrs['source_file'] == '/in/a.h5'
+            assert source_files(f) == ['/in/a.h5']
+
+    def test_format1_names_still_read(self, tmp_path):
+        import h5py
+        from production.entries import entry_keys, find_entry, source_files
+        p = str(tmp_path / 'v1.h5')
+        with h5py.File(p, 'w') as f:
+            f.create_group('config').attrs['source_file'] = 'x.h5'
+            for i in (0, 1, 10):
+                f.create_group(f'event_{i:03d}')
+        with h5py.File(p, 'r') as f:
+            assert entry_keys(f) == ['event_000', 'event_001', 'event_010']
+            assert find_entry(f, 10) == 'event_010'
+            assert source_files(f) == ['x.h5']
+            with pytest.raises(KeyError):
+                find_entry(f, 2)

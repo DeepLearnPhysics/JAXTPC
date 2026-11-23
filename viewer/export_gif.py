@@ -162,6 +162,14 @@ def _per_deposit_labels(labl_vol_group, n):
     }
 
 
+def _find_entry(f, idx):
+    """entry_NNNNNN (format 2) or event_NNN (format 1); see production/entries.py."""
+    for k in (f'entry_{idx:06d}', f'event_{idx:03d}'):
+        if k in f:
+            return k
+    raise KeyError(f'no entry {idx} in {f.filename}')
+
+
 def load_step_data(step_path, event_idx, labl_path=None):
     """Load 3D deposits from step, joined with per-track labels from labl
     if available. ``labl_path=None`` triggers auto-detection."""
@@ -169,9 +177,8 @@ def load_step_data(step_path, event_idx, labl_path=None):
         labl_path = _default_labl_path(step_path)
     has_labl = labl_path is not None and os.path.isfile(labl_path)
 
-    event_key = f'event_{event_idx:03d}'
-
     with h5py.File(step_path, 'r') as f:
+        event_key = _find_entry(f, event_idx)
         evt = f[event_key]
         n_volumes = int(evt.attrs.get('n_volumes', 2))
 

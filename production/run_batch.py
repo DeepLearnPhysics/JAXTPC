@@ -7,6 +7,12 @@ docs/DATASET_DESIGN.md in particle-imaging-models):
     {dataset}_step_{NNNN}.h5    — 3D truth energy deposits (per-volume)
     {dataset}_hits_{NNNN}.h5    — per-particle charge attribution at sensor elements
 
+One file set per input file, or with --merge-output NAME one set for all
+inputs ({dataset}_{sensor,step,hits}_NAME.h5). Events are stored as entries
+entry_NNNNNN; what each entry is (input file, event ids) is in its attributes,
+see production/entries.py. Inputs carrying /dprod/events (dprod productions)
+give each entry its campaign-unique event_id, job_id and job_event.
+
 See README.md for pipeline details, output schema, and threading architecture.
 
 Usage (from project root):
@@ -55,6 +61,7 @@ from production.save import (
     encode_correspondence_csr, encode_correspondence_csr_pixel,
     set_codec,
 )
+from production.entries import entry_key
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -85,6 +92,25 @@ def _parse_edepsim_path(data_path):
     if m:
         return m.group(1), int(m.group(2)), int(m.group(3))
     return None, None, None
+
+
+def _read_dprod_ids(data_path, n_events):
+    """The event identity a dprod production attached to an edep-sim file.
+
+    ``/dprod/events/{job_id,event_id,job_event}``, one row per event in file
+    order; event_id is unique within the production campaign.  Returns a dict
+    of arrays, or None if the file has no /dprod/events.
+    """
+    with h5py.File(data_path, 'r') as f:
+        g = f.get('dprod/events')
+        if g is None:
+            return None
+        ids = {k: g[k][:] for k in ('job_id', 'event_id', 'job_event')}
+    for k, v in ids.items():
+        if len(v) != n_events:
+            raise ValueError(f'{data_path}: /dprod/events/{k} has {len(v)} rows '
+                             f'but the file has {n_events} events')
+    return ids
 
 
 def _read_edepsim_event_table(data_path):
@@ -330,11 +356,23 @@ def main():
                              'globally unique event_id within a run '
                              '(e.g. edepsim_file_idx * events_per_file). '
                              'Auto-computed from filename if not set.')
+    parser.add_argument('--merge-output', metavar='NAME', default=None,
+                        help='Write the events of ALL inputs, in input order, '
+                             'into one file set {outdir}/{sensor,step,hits}/'
+                             '{dataset}_{sensor,step,hits}_NAME.h5 (no run_ '
+                             'subdirectories, no --events-per-file split). '
+                             'Entries record which input they came from.')
     parser.add_argument('--edepsim-ids', action='store_true',
                         help='Read run_id and event_id from the input file\'s '
                              'event/geant4 dataset instead of CLI/path. '
                              'Use when edep-sim files carry meaningful IDs.')
     args = parser.parse_args()
+    if args.merge_output is not None:
+        if not re.fullmatch(r'[A-Za-z0-9._-]+', args.merge_output):
+            parser.error('--merge-output NAME: letters, digits, ".", "_" and "-" only')
+        if args.skip_existing or args.per_worker_files:
+            parser.error('--merge-output cannot be combined with --skip-existing '
+                         'or --per-worker-files')
 
     # Production config fills any field NOT explicitly given on the CLI. Precedence:
     # explicit CLI args > production config > argparse defaults. `explicit` is the
@@ -581,7 +619,7 @@ def main():
         # to_sparse runs here (off the main thread), pulling the dense device
         # result to host and thresholding it.
         (event_key, response_payload, track_hits_raw, deposits,
-         source_idx, ev_id) = item
+         source_idx, ev_id, entry_attrs) = item
         if _PROFILE_SAVE:
             _tid = threading.get_ident() & 0xFFFF
             _t_enter = time.time()
@@ -628,7 +666,8 @@ def main():
                 _lw_sen = time.time() - _t0; _t0 = time.time()
             save_event_sensor(f_sensor, event_key, response_np, threshold_adc,
                             source_idx, deposits, cfg=cfg,
-                            digitized=include_digitize, event_id=ev_id)
+                            digitized=include_digitize, event_id=ev_id,
+                            attrs=entry_attrs)
             if _PROFILE_SAVE: _t_sen = time.time() - _t0
 
         if _PROFILE_SAVE: _t0 = time.time()
@@ -636,7 +675,7 @@ def main():
             if _PROFILE_SAVE:
                 _lw_step = time.time() - _t0; _t0 = time.time()
             save_event_step(f_step, event_key, deposits, source_idx, cfg=cfg,
-                            event_id=ev_id)
+                            event_id=ev_id, attrs=entry_attrs)
             if _PROFILE_SAVE: _t_step = time.time() - _t0
 
         if hits_data is not None and f_hits is not None:
@@ -647,7 +686,7 @@ def main():
                 save_event_hits(f_hits, event_key, hits_data, deposits,
                                 source_idx,
                                 hits_threshold=args.hits_threshold, cfg=cfg,
-                                event_id=ev_id)
+                                event_id=ev_id, attrs=entry_attrs)
                 if _PROFILE_SAVE: _t_hits = time.time() - _t0
         elif _PROFILE_SAVE:
             _lw_hits = 0.0; _t_hits = 0.0
@@ -678,35 +717,33 @@ def main():
     tier_medium_count = 0
     tier_high_count = 0
     by_error = defaultdict(int)
+    per_worker = args.per_worker_files and num_workers > 1
 
-    for src_pos, source_path in enumerate(source_files):
-        print('#' * 60)
-        print(f' Source {src_pos + 1}/{len(source_files)}: {source_path}')
-        print('#' * 60)
-
-        # Parse run_id / file_idx / production_version from path
+    def _prepare_source(src_pos, source_path):
+        """Identifiers and event count of one input file; None if it can't be opened."""
         prod_version, run_id, src_file_idx = _parse_edepsim_path(
             os.path.abspath(source_path))
         if args.production_version is not None:
             prod_version = args.production_version
         if args.run_id is not None:
             run_id = args.run_id
-
-        # Number of events in this source
         try:
             total_events = get_num_events(source_path)
         except Exception as e:
             print(f'  ERROR opening {source_path}: {e}')
             _log_overflow(overflow_csv, source_path, src_file_idx, -1, -1, -1,
                           'file_open_error', str(e))
-            continue
+            return None
         num_events = min(args.events, total_events) if args.events else total_events
-        num_out_files = (num_events + events_per_file - 1) // events_per_file
-
-        # Per-source event_id_offset / edepsim table
+        # Event identity. A dprod input (an edep-sim file carrying /dprod/events)
+        # names every event itself: copy its ids, derive nothing.
+        dprod_ids = _read_dprod_ids(source_path, total_events)
         edepsim_event_table = None
         event_id_offset = args.event_id_offset
-        if args.edepsim_ids:
+        if dprod_ids is not None:
+            if args.run_id is None and len(dprod_ids['job_id']):
+                run_id = int(dprod_ids['job_id'][0])     # job 0 is a valid run id here
+        elif args.edepsim_ids:
             edepsim_event_table = _read_edepsim_event_table(source_path)
             if edepsim_event_table is not None:
                 file_run_id = int(edepsim_event_table[0]['run_id'])
@@ -717,8 +754,299 @@ def main():
                 event_id_offset = src_file_idx * total_events
             else:
                 event_id_offset = 0
+        return {'pos': src_pos, 'path': source_path, 'prod_version': prod_version,
+                'run_id': run_id, 'src_file_idx': src_file_idx,
+                'total_events': total_events, 'num_events': num_events,
+                'dprod_ids': dprod_ids, 'edepsim_event_table': edepsim_event_table,
+                'event_id_offset': event_id_offset}
+
+    def _identity(src, idx, source_index):
+        """(event_id, further entry attributes) of event *idx* of input *src*."""
+        attrs = {'source_index': source_index}
+        ids = src['dprod_ids']
+        if ids is not None:
+            attrs['job_id'] = int(ids['job_id'][idx])
+            attrs['job_event'] = int(ids['job_event'][idx])
+            return int(ids['event_id'][idx]), attrs
+        if src['edepsim_event_table'] is not None:
+            return int(src['edepsim_event_table'][idx]['event_id']), attrs
+        return src['event_id_offset'] + idx, attrs
+
+    def _provenance(prod_version, run_id):
+        return {'production_version': prod_version, 'run_id': run_id,
+                'batch_timestamp': batch_timestamp, 'git_info': git_info}
+
+    def _open_outputs(paths, sources, n_events, event_start, file_index, provenance):
+        """Open one output file set (plus the per-worker extras) and write the
+        headers. Returns [(sensor, step, hits)]: the canonical set first."""
+        sensor_path, step_path, hits_path = paths
+        names = [paths]
+        if per_worker:
+            names += [(sensor_path[:-3] + f'_w{w:02d}.h5', step_path[:-3] + f'_w{w:02d}.h5',
+                       hits_path[:-3] + f'_w{w:02d}.h5' if hits_path else None)
+                      for w in range(1, num_workers)]
+        wsets = []
+        try:
+            for ps, pe, ph in names:
+                trio = [h5py.File(ps, 'w')]
+                wsets.append(trio)
+                trio.append(h5py.File(pe, 'w'))
+                trio.append(h5py.File(ph, 'w') if ph else None)
+                fs, fe, fh = trio
+                write_config_sensor(
+                    fs, cfg, params, simulator.recomb_model, dataset_name,
+                    file_index, sources, n_events, event_start, threshold_adc,
+                    digitization_config=dig_config, provenance=provenance)
+                write_config_step(
+                    fe, cfg, dataset_name, file_index, sources, n_events,
+                    event_start, args.group_size, args.gap_threshold,
+                    provenance=provenance)
+                if fh:
+                    write_config_hits(
+                        fh, cfg, dataset_name, file_index, sources, n_events,
+                        event_start, args.group_size, args.gap_threshold,
+                        provenance=provenance)
+        except BaseException:
+            _close_outputs(wsets)
+            raise
+        return [tuple(t) for t in wsets]
+
+    def _close_outputs(wsets):
+        for trio in wsets:
+            for fh in trio:
+                if fh is not None:
+                    fh.close()
+
+    def _start_workers(wsets):
+        if num_workers == 0:
+            return None, []
+        save_queue = queue.Queue(maxsize=num_workers + 2)
+        workers = []
+        for w in range(num_workers):
+            fs, fe, fh = wsets[w] if per_worker else wsets[0]
+            wl = ((threading.Lock(), threading.Lock(), threading.Lock()) if per_worker
+                  else (sen_lock, step_lock, hits_lock))
+            t = threading.Thread(target=save_worker, args=(fs, fe, fh, save_queue, wl))
+            t.daemon = True
+            t.start()
+            workers.append(t)
+        return save_queue, workers
+
+    def _stop_workers(save_queue, workers):
+        if save_queue is None:
+            return
+        for _ in workers:
+            save_queue.put(None)
+        for t in workers:
+            t.join()
+
+    def _print_sizes(paths):
+        sensor_path, step_path, hits_path = paths
+        try:
+            def _tot_mb(p):
+                files = [p] + (glob.glob(p[:-3] + '_w*.h5') if args.per_worker_files else [])
+                return sum(os.path.getsize(f) for f in files
+                           if os.path.exists(f)) / (1024 * 1024)
+            msg = f'  → sensor: {_tot_mb(sensor_path):.1f} MB, step: {_tot_mb(step_path):.1f} MB'
+            if hits_path and os.path.exists(hits_path):
+                msg += f', hits: {_tot_mb(hits_path):.1f} MB'
+            print(msg)
+        except OSError:
+            pass
+
+    def _run_events(extractor, src, event_start, event_end, entry_base, source_index,
+                    wsets, save_queue):
+        """Simulate events [event_start, event_end) of input *src* and hand them
+        to the savers. Event idx becomes entry ``entry_base + idx - event_start``."""
+        nonlocal key, total_processed, total_skipped, tier_medium_count, tier_high_count
+        source_path = src['path']
+        n_in_file = event_end - event_start
+
+        # ── reader prefetch (parallel) ──────────────────
+        # N reader threads, each with its OWN extractor (h5py
+        # handle), split events round-robin. The heavy part
+        # (build_deposit_data grouping) is numpy and releases
+        # the GIL, so readers parallelize — keeps the main
+        # loop from going load-bound on dense events.
+        n_read = max(1, args.read_workers)
+        read_q = queue.Queue(maxsize=n_read + 2)
+
+        def _read_loop(ex, rank):
+            for r_idx in range(event_start + rank, event_end, n_read):
+                try:
+                    t0 = time.time()
+                    d = load_deposit(
+                        ex, r_idx, cfg,
+                        args.group_size, args.gap_threshold)
+                    read_q.put((r_idx, d, time.time() - t0))
+                except Exception as exc:
+                    read_q.put((r_idx, exc, 0.0))
+
+        def _reader(rank):
+            if rank == 0:
+                _read_loop(extractor, rank)
+            else:
+                with ParticleStepExtractor(source_path) as ex:
+                    _read_loop(ex, rank)
+            read_q.put(None)
+
+        reader_threads = []
+        for _rk in range(n_read):
+            rt = threading.Thread(target=_reader, args=(_rk,), daemon=True)
+            rt.start()
+            reader_threads.append(rt)
+
+        n_readers_done = 0
+        while True:
+            t_wait = time.time()
+            item = read_q.get()
+            t_wait = time.time() - t_wait
+            if item is None:
+                n_readers_done += 1
+                if n_readers_done >= n_read:
+                    break
+                continue
+            idx, deposits_or_exc, t_load_work = item
+            key, subkey = jax.random.split(key)
+            local_idx = idx - event_start
+            event_key = entry_key(entry_base + local_idx)
+            event_id, entry_attrs = _identity(src, idx, source_index)
+
+            n_deposits = -1
+            try:
+                if isinstance(deposits_or_exc, Exception):
+                    raise deposits_or_exc
+                deposits = deposits_or_exc
+                n_deposits = sum(v.n_actual for v in deposits.volumes)
+
+                if use_tiered:
+                    max_ng = max(len(g2t) for g2t in deposits.group_to_track)
+                    active_sim = sim_high if max_ng > args.maxg_medium else sim_medium
+                    tier_label = 'H' if max_ng > args.maxg_medium else 'M'
+                else:
+                    active_sim = simulator
+                    tier_label = ''
+
+                t_sim = time.time()
+                response_signals, track_hits, deposits = \
+                    active_sim.process_event(deposits, key=subkey)
+                # block here = per-event sync; the next sim
+                # then waits behind the workers' transfers.
+                for arr in response_signals.values():
+                    if isinstance(arr, dict):
+                        for a in arr.values():
+                            jax.block_until_ready(a)
+                    elif isinstance(arr, tuple):
+                        jax.block_until_ready(arr[0])
+                    else:
+                        jax.block_until_ready(arr)
+                t_sim = time.time() - t_sim
+
+                # Hand off the raw device result; the workers do
+                # to_sparse (the dense host pull) off the main thread.
+                item = (event_key, response_signals, track_hits,
+                        deposits, idx, event_id, entry_attrs)
+
+                t_save = time.time()
+                if num_workers > 0:
+                    _qd_before = save_queue.qsize() if _PROFILE_SAVE else 0
+                    save_queue.put(item)
+                else:
+                    _qd_before = 0
+                    save_one_event(*wsets[0], item, (sen_lock, step_lock, hits_lock))
+                t_save = time.time() - t_save
+
+                # Wall on main = wait(get) + sim + save(put). Reader's
+                # load_work runs in parallel; wait≈0 ⇒ prefetch hides it.
+                t_total = t_wait + t_sim + t_save
+                _qd_str = (f'  qd_before_put={_qd_before}/{save_queue.maxsize}'
+                           if _PROFILE_SAVE and num_workers > 0 else '')
+                _tier_str = f'  [{tier_label}]' if tier_label else ''
+                print(f'    [{local_idx+1:3d}/{n_in_file}] '
+                      f'event {idx:6d}  {n_deposits:6,} deps  '
+                      f'wait={t_wait:.2f}s (load_work={t_load_work:.2f}s)  '
+                      f'sim={t_sim:.2f}s  '
+                      f'save={t_save:.2f}s  '
+                      f'total={t_total:.1f}s{_tier_str}{_qd_str}')
+                total_processed += 1
+                if tier_label == 'M':
+                    tier_medium_count += 1
+                elif tier_label == 'H':
+                    tier_high_count += 1
+
+                del response_signals
+
+            except RuntimeError as e:
+                err_type = _classify_runtime_error(str(e))
+                by_error[err_type] += 1
+                total_skipped += 1
+                _log_overflow(
+                    overflow_csv, source_path, src['src_file_idx'],
+                    idx, event_id, n_deposits, err_type, str(e))
+                print(f'    [SKIP {idx:6d}] {err_type}: '
+                      f'{str(e)[:140]}')
+
+            # Per-event gc.collect() starves the GPU (full heap
+            # scan, growing over the run = the slowdown). Amortize
+            # it: collect every 50 events instead of every event.
+            if (local_idx + 1) % 50 == 0:
+                gc.collect()
+
+        for rt in reader_threads:
+            rt.join()
+
+    def _print_source(src):
+        print('#' * 60)
+        print(f' Source {src["pos"] + 1}/{len(source_files)}: {src["path"]}')
+        print('#' * 60)
+        print(f'  Run ID:        {src["run_id"]}')
+        print(f'  Events:        {src["num_events"]}/{src["total_events"]} '
+              f'(offset={src["event_id_offset"]}'
+              f'{", ids from /dprod/events" if src["dprod_ids"] is not None else ""})')
+
+    if args.merge_output:
+        # ---- All inputs into one sensor/step/hits file set ----
+        srcs = [_prepare_source(i, p) for i, p in enumerate(source_files)]
+        if any(s is None for s in srcs):
+            raise SystemExit('ERROR: --merge-output needs every input; see above')
+        paths = (os.path.join(base_sensor_dir, f'{dataset_name}_sensor_{args.merge_output}.h5'),
+                 os.path.join(base_step_dir, f'{dataset_name}_step_{args.merge_output}.h5'),
+                 os.path.join(base_hits_dir, f'{dataset_name}_hits_{args.merge_output}.h5')
+                 if base_hits_dir else None)
+        run_ids = {s['run_id'] for s in srcs}
+        provenance = _provenance(srcs[0]['prod_version'],
+                                 run_ids.pop() if len(run_ids) == 1 else None)
+        n_total = sum(s['num_events'] for s in srcs)
+        print(f'  Merged output: {len(srcs)} input(s), {n_total} events -> '
+              f'{os.path.basename(paths[0])} (+ step, hits)')
+        wsets = _open_outputs(paths, [s['path'] for s in srcs], n_total, 0, 0, provenance)
+        try:
+            save_queue, workers = _start_workers(wsets)
+            entry_base = 0
+            for src in srcs:
+                _print_source(src)
+                print(f'  Entries:       {entry_base}–{entry_base + src["num_events"] - 1}')
+                with ParticleStepExtractor(src['path']) as extractor:
+                    _run_events(extractor, src, 0, src['num_events'], entry_base,
+                                src['pos'], wsets, save_queue)
+                entry_base += src['num_events']
+            _stop_workers(save_queue, workers)
+        finally:
+            _close_outputs(wsets)
+        _print_sizes(paths)
+        print()
+
+    for src_pos, source_path in ([] if args.merge_output else enumerate(source_files)):
+        src = _prepare_source(src_pos, source_path)
+        if src is None:
+            continue
+        _print_source(src)
+        num_events = src['num_events']
+        num_out_files = (num_events + events_per_file - 1) // events_per_file
+        src_file_idx = src['src_file_idx']
 
         # Per-run output subdirs
+        run_id = src['run_id']
         run_subdir = (f'run_{run_id:010d}' if run_id is not None
                       else 'run_unknown')
         sensor_dir = os.path.join(base_sensor_dir, run_subdir)
@@ -731,17 +1059,7 @@ def main():
         done_run_dir = os.path.join(done_dir, run_subdir)
         if args.skip_existing:
             os.makedirs(done_run_dir, exist_ok=True)
-
-        provenance = {
-            'production_version': prod_version,
-            'run_id': run_id,
-            'batch_timestamp': batch_timestamp,
-            'git_info': git_info,
-        }
-
-        print(f'  Run ID:        {run_id}')
-        print(f'  Events:        {num_events}/{total_events} '
-              f'(offset={event_id_offset})')
+        provenance = _provenance(src['prod_version'], run_id)
         print(f'  Output dirs:   .../{{sensor,step,hits}}/{run_subdir}/')
 
         # Loop output files within this source (usually 1, depends on events_per_file)
@@ -760,13 +1078,10 @@ def main():
                     else:
                         suffix = f'{src_pos:04d}_{out_file_idx:02d}'
 
-                    sensor_path = os.path.join(
-                        sensor_dir, f'{dataset_name}_sensor_{suffix}.h5')
-                    step_path = os.path.join(
-                        step_dir, f'{dataset_name}_step_{suffix}.h5')
-                    hits_path = (os.path.join(
-                        hits_dir, f'{dataset_name}_hits_{suffix}.h5')
-                        if hits_dir else None)
+                    paths = (os.path.join(sensor_dir, f'{dataset_name}_sensor_{suffix}.h5'),
+                             os.path.join(step_dir, f'{dataset_name}_step_{suffix}.h5'),
+                             os.path.join(hits_dir, f'{dataset_name}_hits_{suffix}.h5')
+                             if hits_dir else None)
                     done_marker = os.path.join(
                         done_run_dir, f'{dataset_name}_{suffix}.done')
 
@@ -781,238 +1096,24 @@ def main():
 
                     cfg_file_idx = (src_file_idx if src_file_idx is not None
                                     else src_pos)
-
-                    with h5py.File(sensor_path, 'w') as f_sensor, \
-                         h5py.File(step_path, 'w') as f_step:
-
-                        f_hits_ctx = h5py.File(hits_path, 'w') if hits_path else None
-                        # --per-worker-files: each save worker gets its OWN output
-                        # file set (suffixed _wNN) so HDF5 writes run on separate
-                        # cores instead of serializing on one file's lock. The win
-                        # case is one GPU + many CPU workers (the GPU is the ceiling;
-                        # the save just has to keep up). Worker 0 keeps the canonical
-                        # name; workers 1..N-1 get extra files (read as a set).
-                        per_worker = args.per_worker_files and num_workers > 1
-                        extra_sets = []
-                        try:
-                            def _write_headers(fs, fe, fh):
-                                write_config_sensor(
-                                    fs, cfg, params, simulator.recomb_model,
-                                    dataset_name, cfg_file_idx, source_path,
-                                    n_in_file, event_start, threshold_adc,
-                                    digitization_config=dig_config,
-                                    provenance=provenance)
-                                write_config_step(
-                                    fe, cfg, dataset_name, cfg_file_idx,
-                                    source_path, n_in_file, event_start,
-                                    args.group_size, args.gap_threshold,
-                                    provenance=provenance)
-                                if fh:
-                                    write_config_hits(
-                                        fh, cfg, dataset_name, cfg_file_idx,
-                                        source_path, n_in_file, event_start,
-                                        args.group_size, args.gap_threshold,
-                                        provenance=provenance)
-
-                            _write_headers(f_sensor, f_step, f_hits_ctx)
-                            wsets = [(f_sensor, f_step, f_hits_ctx)]
-                            if per_worker:
-                                for w in range(1, num_workers):
-                                    fs = h5py.File(sensor_path[:-3] + f'_w{w:02d}.h5', 'w')
-                                    fe = h5py.File(step_path[:-3] + f'_w{w:02d}.h5', 'w')
-                                    fh = (h5py.File(hits_path[:-3] + f'_w{w:02d}.h5', 'w')
-                                          if hits_path else None)
-                                    _write_headers(fs, fe, fh)
-                                    extra_sets.append((fs, fe, fh))
-                                    wsets.append((fs, fe, fh))
-
-                            save_queue = None
-                            workers = []
-                            if num_workers > 0:
-                                save_queue = queue.Queue(maxsize=num_workers + 2)
-                                for w in range(num_workers):
-                                    fs, fe, fh = wsets[w] if per_worker else wsets[0]
-                                    wl = ((threading.Lock(), threading.Lock(),
-                                           threading.Lock()) if per_worker
-                                          else (sen_lock, step_lock, hits_lock))
-                                    t = threading.Thread(
-                                        target=save_worker,
-                                        args=(fs, fe, fh, save_queue, wl))
-                                    t.daemon = True
-                                    t.start()
-                                    workers.append(t)
-
-                            # ── reader prefetch (parallel) ──────────────────
-                            # N reader threads, each with its OWN extractor (h5py
-                            # handle), split events round-robin. The heavy part
-                            # (build_deposit_data grouping) is numpy and releases
-                            # the GIL, so readers parallelize — keeps the main
-                            # loop from going load-bound on dense events.
-                            n_read = max(1, args.read_workers)
-                            read_q = queue.Queue(maxsize=n_read + 2)
-
-                            def _read_loop(ex, rank):
-                                for r_idx in range(event_start + rank, event_end, n_read):
-                                    try:
-                                        t0 = time.time()
-                                        d = load_deposit(
-                                            ex, r_idx, cfg,
-                                            args.group_size, args.gap_threshold)
-                                        read_q.put((r_idx, d, time.time() - t0))
-                                    except Exception as exc:
-                                        read_q.put((r_idx, exc, 0.0))
-
-                            def _reader(rank):
-                                if rank == 0:
-                                    _read_loop(extractor, rank)
-                                else:
-                                    with ParticleStepExtractor(source_path) as ex:
-                                        _read_loop(ex, rank)
-                                read_q.put(None)
-
-                            reader_threads = []
-                            for _rk in range(n_read):
-                                rt = threading.Thread(target=_reader, args=(_rk,),
-                                                       daemon=True)
-                                rt.start()
-                                reader_threads.append(rt)
-
-                            n_readers_done = 0
-                            while True:
-                                t_wait = time.time()
-                                item = read_q.get()
-                                t_wait = time.time() - t_wait
-                                if item is None:
-                                    n_readers_done += 1
-                                    if n_readers_done >= n_read:
-                                        break
-                                    continue
-                                idx, deposits_or_exc, t_load_work = item
-                                key, subkey = jax.random.split(key)
-                                local_idx = idx - event_start
-                                event_key = f'event_{local_idx:03d}'
-
-                                if edepsim_event_table is not None:
-                                    event_id = int(edepsim_event_table[idx]['event_id'])
-                                else:
-                                    event_id = event_id_offset + idx
-
-                                n_deposits = -1
-                                try:
-                                    if isinstance(deposits_or_exc, Exception):
-                                        raise deposits_or_exc
-                                    deposits = deposits_or_exc
-                                    n_deposits = sum(v.n_actual for v in deposits.volumes)
-
-                                    if use_tiered:
-                                        max_ng = max(len(g2t) for g2t in deposits.group_to_track)
-                                        active_sim = sim_high if max_ng > args.maxg_medium else sim_medium
-                                        tier_label = 'H' if max_ng > args.maxg_medium else 'M'
-                                    else:
-                                        active_sim = simulator
-                                        tier_label = ''
-
-                                    t_sim = time.time()
-                                    response_signals, track_hits, deposits = \
-                                        active_sim.process_event(deposits, key=subkey)
-                                    # block here = per-event sync; the next sim
-                                    # then waits behind the workers' transfers.
-                                    for arr in response_signals.values():
-                                        if isinstance(arr, dict):
-                                            for a in arr.values():
-                                                jax.block_until_ready(a)
-                                        elif isinstance(arr, tuple):
-                                            jax.block_until_ready(arr[0])
-                                        else:
-                                            jax.block_until_ready(arr)
-                                    t_sim = time.time() - t_sim
-
-                                    # Hand off the raw device result; the workers do
-                                    # to_sparse (the dense host pull) off the main thread.
-                                    item = (event_key, response_signals, track_hits,
-                                            deposits, idx, event_id)
-
-                                    t_save = time.time()
-                                    if num_workers > 0:
-                                        _qd_before = save_queue.qsize() if _PROFILE_SAVE else 0
-                                        save_queue.put(item)
-                                    else:
-                                        _qd_before = 0
-                                        save_one_event(
-                                            f_sensor, f_step, f_hits_ctx, item,
-                                            (sen_lock, step_lock, hits_lock))
-                                    t_save = time.time() - t_save
-
-                                    # Wall on main = wait(get) + sim + save(put). Reader's
-                                    # load_work runs in parallel; wait≈0 ⇒ prefetch hides it.
-                                    t_total = t_wait + t_sim + t_save
-                                    _qd_str = (f'  qd_before_put={_qd_before}/{save_queue.maxsize}'
-                                               if _PROFILE_SAVE and num_workers > 0 else '')
-                                    _tier_str = f'  [{tier_label}]' if tier_label else ''
-                                    print(f'    [{local_idx+1:3d}/{n_in_file}] '
-                                          f'event {idx:6d}  {n_deposits:6,} deps  '
-                                          f'wait={t_wait:.2f}s (load_work={t_load_work:.2f}s)  '
-                                          f'sim={t_sim:.2f}s  '
-                                          f'save={t_save:.2f}s  '
-                                          f'total={t_total:.1f}s{_tier_str}{_qd_str}')
-                                    total_processed += 1
-                                    if tier_label == 'M':
-                                        tier_medium_count += 1
-                                    elif tier_label == 'H':
-                                        tier_high_count += 1
-
-                                    del response_signals
-
-                                except RuntimeError as e:
-                                    err_type = _classify_runtime_error(str(e))
-                                    by_error[err_type] += 1
-                                    total_skipped += 1
-                                    _log_overflow(
-                                        overflow_csv, source_path, src_file_idx,
-                                        idx, event_id, n_deposits, err_type, str(e))
-                                    print(f'    [SKIP {idx:6d}] {err_type}: '
-                                          f'{str(e)[:140]}')
-
-                                # Per-event gc.collect() starves the GPU (full heap
-                                # scan, growing over the run = the slowdown). Amortize
-                                # it: collect every 50 events instead of every event.
-                                if (local_idx + 1) % 50 == 0:
-                                    gc.collect()
-
-                            for rt in reader_threads:
-                                rt.join()
-
-                            if num_workers > 0:
-                                for _ in range(num_workers):
-                                    save_queue.put(None)
-                                for t in workers:
-                                    t.join()
-
-                        finally:
-                            for fs, fe, fh in extra_sets:
-                                fs.close()
-                                fe.close()
-                                if fh:
-                                    fh.close()
-                            if f_hits_ctx:
-                                f_hits_ctx.close()
+                    # --per-worker-files: each save worker gets its OWN output
+                    # file set (suffixed _wNN) so HDF5 writes run on separate
+                    # cores instead of serializing on one file's lock. The win
+                    # case is one GPU + many CPU workers (the GPU is the ceiling;
+                    # the save just has to keep up). Worker 0 keeps the canonical
+                    # name; workers 1..N-1 get extra files (read as a set).
+                    wsets = _open_outputs(paths, [source_path], n_in_file, event_start,
+                                          cfg_file_idx, provenance)
+                    try:
+                        save_queue, workers = _start_workers(wsets)
+                        _run_events(extractor, src, event_start, event_end, 0, 0,
+                                    wsets, save_queue)
+                        _stop_workers(save_queue, workers)
+                    finally:
+                        _close_outputs(wsets)
 
                     # File sizes (sum across per-worker shards if any)
-                    try:
-                        def _tot_mb(p):
-                            files = [p] + (glob.glob(p[:-3] + '_w*.h5')
-                                           if args.per_worker_files else [])
-                            return sum(os.path.getsize(f) for f in files
-                                       if os.path.exists(f)) / (1024 * 1024)
-                        sensor_mb = _tot_mb(sensor_path)
-                        step_mb = _tot_mb(step_path)
-                        msg = f'  → sensor: {sensor_mb:.1f} MB, step: {step_mb:.1f} MB'
-                        if hits_path and os.path.exists(hits_path):
-                            hits_mb = _tot_mb(hits_path)
-                            msg += f', hits: {hits_mb:.1f} MB'
-                        print(msg)
-                    except OSError:
-                        pass
+                    _print_sizes(paths)
 
                     # Output fully written + closed -> drop the resume marker.
                     if args.skip_existing:

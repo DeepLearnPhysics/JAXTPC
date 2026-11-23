@@ -4,8 +4,8 @@ generated: '2026-06-02T01:14:51.446394'
 total_pad: 450000
 response_chunk: 28125
 hits_chunk: 28125
-max_keys: 3100000
-maxg: 110000
+max_keys: 3500000
+maxg: 125000
 maxg_medium: 50000
 inter_thresh: 1.0
 threshold_adc: 2.0
