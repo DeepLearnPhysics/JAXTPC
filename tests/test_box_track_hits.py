@@ -118,3 +118,17 @@ def test_maxg_overflow_raises(wire_config):
     """maxg below the group count raises (not silent clip); message classifiable."""
     with pytest.raises(RuntimeError, match="maxg overflow"):
         _run(wire_config, box_enabled=True, maxg=5)
+
+
+@pytest.mark.parametrize("readout,dims", [
+    ("pixel", dict(box_bpy=10, box_bpz=10, box_bt=95)),
+    ("wire", dict(box_bw=16, box_btw=96))])
+def test_box_index_limit(readout, dims):
+    """A box beyond int32 indexing raises at construction, not silently wraps."""
+    from tools.track_hits import check_box_capacity
+    cells = int(np.prod(list(dims.values())))
+    ok = (2**31 - 1) // cells
+    check_box_capacity(create_track_hits_config(maxg=ok, box_enabled=True, **dims), readout)
+    with pytest.raises(ValueError, match="int32"):
+        check_box_capacity(
+            create_track_hits_config(maxg=ok + 1, box_enabled=True, **dims), readout)

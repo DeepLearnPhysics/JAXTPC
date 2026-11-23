@@ -70,6 +70,24 @@ def compute_box_dims(volumes, time_step_us, readout_type, group_size,
     return {'box_bw': int(bw), 'box_btw': int(bt)}
 
 
+def check_box_capacity(track_hits, readout_type):
+    """Raise if the group box has more cells than an int32 index can address.
+
+    The box is flattened to ``maxg * cells`` and scanned with int32 indices
+    (JAX default); beyond 2**31 - 1 they wrap and hits are silently wrong.
+    """
+    tc = track_hits
+    dims = ((tc.box_bpy, tc.box_bpz, tc.box_bt) if readout_type == 'pixel'
+            else (tc.box_bw, tc.box_btw))
+    cells = math.prod(dims)
+    limit = 2**31 - 1
+    if tc.maxg * cells > limit:
+        raise ValueError(
+            f"track-hits box too large: maxg={tc.maxg:,} x {cells:,} cells/group "
+            f"{dims} exceeds the int32 index limit. maxg can be at most "
+            f"{limit // cells:,} with these box dims.")
+
+
 from tools.wires import (
     compute_angular_scaling_vmap,
     compute_deposit_wire_angles_vmap,

@@ -249,6 +249,7 @@ class DetectorSimulator:
                 pixel_pitch_cm=vol_geom.pixel_pitch_cm,
                 max_sigma_trans_unitless=d.max_sigma_trans_unitless,
                 max_sigma_long_unitless=d.max_sigma_long_unitless,
+                pixel_bin_cm=vol_geom.pixel_response_bin_cm,
             )
         else:
             _, _, global_sigma_trans, global_sigma_long = calculate_max_diffusion_sigmas(
@@ -269,7 +270,7 @@ class DetectorSimulator:
         # pixel kernel window) and freeze them into cfg.track_hits. Explicit
         # dims passed by the caller (tests / SCE margin) are left untouched.
         if include_track_hits and cfg.track_hits is not None and cfg.track_hits.box_enabled:
-            from tools.track_hits import compute_box_dims
+            from tools.track_hits import check_box_capacity, compute_box_dims
             tc = cfg.track_hits
             box_kw = compute_box_dims(
                 cfg.volumes, cfg.time_step_us, self._readout_type,
@@ -281,6 +282,7 @@ class DetectorSimulator:
                 cfg = cfg._replace(track_hits=tc._replace(**updates))
                 self._sim_config = cfg
                 print(f"   Box dims (analytic): {updates}")
+            check_box_capacity(cfg.track_hits, self._readout_type)
 
         # Build shared factories
         sce_factory, _build_response_fn, _build_response_fn_diff, _recomb_fn = \

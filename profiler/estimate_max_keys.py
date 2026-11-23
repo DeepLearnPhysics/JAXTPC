@@ -99,7 +99,8 @@ def build_pixel_element_table(sim_config, vol_geom, num_s=32,
         time_spacing=sim_config.time_step_us,
         pixel_pitch_cm=vol_geom.pixel_pitch_cm,
         max_sigma_trans_unitless=diff.max_sigma_trans_unitless,
-        max_sigma_long_unitless=diff.max_sigma_long_unitless)
+        max_sigma_long_unitless=diff.max_sigma_long_unitless,
+        pixel_bin_cm=vol_geom.pixel_response_bin_cm)
 
     s_batch = jnp.linspace(0.0, 1.0, num_s)
     zero = jnp.zeros(num_s, dtype=jnp.float32)
@@ -166,7 +167,8 @@ def build_pixel_value_table(sim_config, vol_geom, num_s=32,
         pixel_kernel_path, num_s=num_s, time_spacing=sim_config.time_step_us,
         pixel_pitch_cm=vol_geom.pixel_pitch_cm,
         max_sigma_trans_unitless=diff.max_sigma_trans_unitless,
-        max_sigma_long_unitless=diff.max_sigma_long_unitless)
+        max_sigma_long_unitless=diff.max_sigma_long_unitless,
+        pixel_bin_cm=vol_geom.pixel_response_bin_cm)
     s_batch = jnp.linspace(0.0, 1.0, num_s)
     zero = jnp.zeros(num_s, dtype=jnp.float32)
     output = apply_pixel_diffusion_response(

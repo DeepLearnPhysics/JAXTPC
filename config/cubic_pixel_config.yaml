@@ -12,6 +12,7 @@ volumes:
     readout:
       type: pixel
       pixel_pitch: 0.432     # cm (= 4.32 mm → 432cm / 0.432 = 1000 pixels)
+      response_pixel_bin: 0.0432  # cm; response table scaled to this pitch (pitch / 10)
       pixel_shape: [1000, 1000]
 
   - id: 1
@@ -22,13 +23,14 @@ volumes:
     readout:
       type: pixel
       pixel_pitch: 0.432     # cm
+      response_pixel_bin: 0.0432  # cm; response table scaled to this pitch (pitch / 10)
       pixel_shape: [1000, 1000]
 
 readout:
   sampling_rate: 2.0  # MHz
   electrons_per_adc: 182
-  pre_window_fraction: 0.0
-  post_window_fraction: 0.0
+  pre_window_fraction: 0.3   # fraction of max drift time before t=0
+  post_window_fraction: 0.3  # fraction of max drift time after max drift
 
 simulation:
   drift:
