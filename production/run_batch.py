@@ -62,6 +62,10 @@ from production.save import (
     set_codec,
 )
 from production.entries import entry_key
+from production.save import (
+    encode_hits, save_event_hits3, save_event_presupera, write_config3,
+)
+from production.stepfile import StepFileExtractor, is_step_file
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -167,8 +171,22 @@ def load_deposit(extractor, event_idx, sim_config,
     )
 
 
+def open_extractor(path):
+    return StepFileExtractor(path) if is_step_file(path) else ParticleStepExtractor(path)
+
+
+def load_any(extractor, event_idx, sim_config, group_size, gap_threshold, regroup):
+    """(DepositData, group2_to_group1) of an event; the maps only for step files."""
+    if isinstance(extractor, StepFileExtractor):
+        return extractor.load(event_idx, sim_config,
+                              (group_size, gap_threshold) if regroup else None)
+    return load_deposit(extractor, event_idx, sim_config, group_size, gap_threshold), None
+
+
 def get_num_events(data_path):
     with h5py.File(data_path, 'r') as f:
+        if 'schema' in f:
+            return f['event/geant4'].shape[0]
         return f['pstep/lar_vol'].shape[0]
 
 
@@ -303,6 +321,9 @@ def main():
     parser.add_argument('--group-size', type=int, default=5)
     parser.add_argument('--gap-threshold', type=float, default=5.0,
                         help='Gap threshold in mm for group splitting')
+    parser.add_argument('--regroup', action='store_true',
+                        help='Step file input: define groups here (--group-size, '
+                             '--gap-threshold) instead of taking the file\'s')
     parser.add_argument('--hits-threshold', type=float, default=1.0,
                         help='Charge threshold for per-particle hits at CSR encode '
                              '(YAML key: corr_threshold). Units: ENC for wire (signed, '
@@ -412,6 +433,19 @@ def main():
               f'(range={args.file_range}). Total available: {len(source_files_all)}.')
         return
 
+    # Step file input (format 3): outputs are sensor, hits and presupera, no step
+    kinds = {is_step_file(p) for p in source_files}
+    if len(kinds) > 1:
+        raise SystemExit('ERROR: step files and edep-sim files cannot be mixed')
+    step_input = kinds.pop()
+    if step_input and (args.no_track_hits or not args.merge_output):
+        raise SystemExit('ERROR: step file input needs track hits and --merge-output')
+    if step_input and not args.regroup:
+        # the group definition is the file's; it also sizes the per-group boxes
+        with h5py.File(source_files[0], 'r') as f:
+            args.group_size = int(f['schema'].attrs['group_size'])
+            args.gap_threshold = float(f['schema'].attrs['group_gap_mm'])
+
     # Detect readout type early for pixel-specific defaults
     detector_config = generate_detector(args.config)
     readout_type = detector_config['volumes'][0].get('readout', {}).get('type', 'wire')
@@ -423,7 +457,8 @@ def main():
 
     # Top-level output dirs (per-source subfolders by run_id added inside loop)
     base_sensor_dir = os.path.join(args.outdir, 'sensor')
-    base_step_dir = os.path.join(args.outdir, 'step')
+    second_role = 'presupera' if step_input else 'step'
+    base_step_dir = os.path.join(args.outdir, second_role)
     base_hits_dir = os.path.join(args.outdir, 'hits') if include_track_hits else None
     logs_dir = os.path.join(args.outdir, 'logs')
     # Per-file done markers (resume): written only after an output file's HDF5
@@ -560,9 +595,9 @@ def main():
     print("  Real-data warmup...", end='', flush=True)
     t0 = time.time()
     try:
-        warmup_dep = load_deposit(
-            ParticleStepExtractor(source_files[0]), 0, cfg,
-            args.group_size, args.gap_threshold)
+        warmup_dep, _ = load_any(
+            open_extractor(source_files[0]), 0, cfg,
+            args.group_size, args.gap_threshold, args.regroup)
         warmup_r, _, warmup_dep = simulator.process_event(warmup_dep, key=jax.random.PRNGKey(0))
         for a in warmup_r.values():
             if isinstance(a, dict):
@@ -578,6 +613,19 @@ def main():
         print('  Continuing — affected events will be logged and skipped.')
     gc.collect()
     print(f" {time.time() - t0:.1f}s\n")
+
+    # Pixel value unit, from the response file itself
+    pixel_units = None
+    if step_input and readout_type == 'pixel':
+        import hashlib
+        npz_path = simulator.pixel_response_path
+        with np.load(npz_path) as z, open(npz_path, 'rb') as fb:
+            full = float((z['response'].sum(-1) * float(z['time_bin_size'])).max())
+            pixel_units = {
+                'pixel_units': 'electron/us (mean induced current over the tick)',
+                'pixel_units_per_electron_full_collection': full / float(cfg.time_step_us),
+                'pixel_response_src': str(z['src']),
+                'pixel_response_sha256': hashlib.sha256(fb.read()).hexdigest()}
 
     # ---- Batch timestamp + git provenance (shared across all sources) ----
     batch_timestamp = int(time.time())
@@ -619,7 +667,7 @@ def main():
         # to_sparse runs here (off the main thread), pulling the dense device
         # result to host and thresholding it.
         (event_key, response_payload, track_hits_raw, deposits,
-         source_idx, ev_id, entry_attrs) = item
+         source_idx, ev_id, entry_attrs, g2g1) = item
         if _PROFILE_SAVE:
             _tid = threading.get_ident() & 0xFFFF
             _t_enter = time.time()
@@ -644,7 +692,16 @@ def main():
                     continue
                 vol_idx, plane_idx = plane_key
                 sk, tk, gid, ch, count, _ = raw
-                if cfg.volumes[vol_idx].readout_type == 'pixel':
+                if step_input:
+                    P = int(count)
+                    s, t, g_, q = (np.asarray(x[:P]) for x in (sk, tk, gid, ch))
+                    if cfg.volumes[vol_idx].readout_type == 'pixel':
+                        num_pz = cfg.volumes[vol_idx].pixel_shape[1]
+                        coords = {'py': s // num_pz, 'pz': s % num_pz, 'time': t}
+                    else:
+                        coords = {'wire': s, 'time': t}
+                    hits_data[plane_key] = encode_hits(g_, coords, q, args.hits_threshold)
+                elif cfg.volumes[vol_idx].readout_type == 'pixel':
                     num_pz = cfg.volumes[vol_idx].pixel_shape[1]
                     hits_data[plane_key] = encode_correspondence_csr_pixel(
                         sk, tk, gid, ch, count, num_pz,
@@ -667,15 +724,19 @@ def main():
             save_event_sensor(f_sensor, event_key, response_np, threshold_adc,
                             source_idx, deposits, cfg=cfg,
                             digitized=include_digitize, event_id=ev_id,
-                            attrs=entry_attrs)
+                            attrs=entry_attrs, pixel_as_int=step_input)
             if _PROFILE_SAVE: _t_sen = time.time() - _t0
 
         if _PROFILE_SAVE: _t0 = time.time()
         with locks[1]:
             if _PROFILE_SAVE:
                 _lw_step = time.time() - _t0; _t0 = time.time()
-            save_event_step(f_step, event_key, deposits, source_idx, cfg=cfg,
-                            event_id=ev_id, attrs=entry_attrs)
+            if step_input:
+                save_event_presupera(f_step, event_key, deposits, g2g1, source_idx,
+                                     cfg, event_id=ev_id, attrs=entry_attrs)
+            else:
+                save_event_step(f_step, event_key, deposits, source_idx, cfg=cfg,
+                                event_id=ev_id, attrs=entry_attrs)
             if _PROFILE_SAVE: _t_step = time.time() - _t0
 
         if hits_data is not None and f_hits is not None:
@@ -683,10 +744,15 @@ def main():
             with locks[2]:
                 if _PROFILE_SAVE:
                     _lw_hits = time.time() - _t0; _t0 = time.time()
-                save_event_hits(f_hits, event_key, hits_data, deposits,
-                                source_idx,
-                                hits_threshold=args.hits_threshold, cfg=cfg,
-                                event_id=ev_id, attrs=entry_attrs)
+                if step_input:
+                    save_event_hits3(f_hits, event_key, hits_data, deposits, source_idx,
+                                     args.hits_threshold, cfg, event_id=ev_id,
+                                     attrs=entry_attrs)
+                else:
+                    save_event_hits(f_hits, event_key, hits_data, deposits,
+                                    source_idx,
+                                    hits_threshold=args.hits_threshold, cfg=cfg,
+                                    event_id=ev_id, attrs=entry_attrs)
                 if _PROFILE_SAVE: _t_hits = time.time() - _t0
         elif _PROFILE_SAVE:
             _lw_hits = 0.0; _t_hits = 0.0
@@ -793,6 +859,20 @@ def main():
                 trio.append(h5py.File(pe, 'w'))
                 trio.append(h5py.File(ph, 'w') if ph else None)
                 fs, fe, fh = trio
+                if step_input:
+                    thr = dict(sensor=threshold_adc, hits=args.hits_threshold,
+                               inter=args.inter_thresh, sce=args.sce)
+                    grp = dict(group_size=args.group_size,
+                               gap_threshold_mm=args.gap_threshold,
+                               groups_from='simulation' if args.regroup else 'step file')
+                    with open(args.config) as fy:
+                        det_yaml = fy.read()
+                    for fo, role in ((fs, 'sensor'), (fe, 'presupera'), (fh, 'hits')):
+                        write_config3(fo, role, cfg, params, simulator.recomb_model,
+                                      dataset_name, sources, n_events, thr, grp, det_yaml,
+                                      digitization_config=dig_config, provenance=provenance,
+                                      pixel_units=pixel_units)
+                    continue
                 write_config_sensor(
                     fs, cfg, params, simulator.recomb_model, dataset_name,
                     file_index, sources, n_events, event_start, threshold_adc,
@@ -875,9 +955,9 @@ def main():
             for r_idx in range(event_start + rank, event_end, n_read):
                 try:
                     t0 = time.time()
-                    d = load_deposit(
+                    d = load_any(
                         ex, r_idx, cfg,
-                        args.group_size, args.gap_threshold)
+                        args.group_size, args.gap_threshold, args.regroup)
                     read_q.put((r_idx, d, time.time() - t0))
                 except Exception as exc:
                     read_q.put((r_idx, exc, 0.0))
@@ -886,7 +966,7 @@ def main():
             if rank == 0:
                 _read_loop(extractor, rank)
             else:
-                with ParticleStepExtractor(source_path) as ex:
+                with open_extractor(source_path) as ex:
                     _read_loop(ex, rank)
             read_q.put(None)
 
@@ -916,7 +996,7 @@ def main():
             try:
                 if isinstance(deposits_or_exc, Exception):
                     raise deposits_or_exc
-                deposits = deposits_or_exc
+                deposits, g2g1 = deposits_or_exc
                 n_deposits = sum(v.n_actual for v in deposits.volumes)
 
                 if use_tiered:
@@ -945,7 +1025,7 @@ def main():
                 # Hand off the raw device result; the workers do
                 # to_sparse (the dense host pull) off the main thread.
                 item = (event_key, response_signals, track_hits,
-                        deposits, idx, event_id, entry_attrs)
+                        deposits, idx, event_id, entry_attrs, g2g1)
 
                 t_save = time.time()
                 if num_workers > 0:
@@ -1010,7 +1090,7 @@ def main():
         if any(s is None for s in srcs):
             raise SystemExit('ERROR: --merge-output needs every input; see above')
         paths = (os.path.join(base_sensor_dir, f'{dataset_name}_sensor_{args.merge_output}.h5'),
-                 os.path.join(base_step_dir, f'{dataset_name}_step_{args.merge_output}.h5'),
+                 os.path.join(base_step_dir, f'{dataset_name}_{second_role}_{args.merge_output}.h5'),
                  os.path.join(base_hits_dir, f'{dataset_name}_hits_{args.merge_output}.h5')
                  if base_hits_dir else None)
         run_ids = {s['run_id'] for s in srcs}
@@ -1026,7 +1106,7 @@ def main():
             for src in srcs:
                 _print_source(src)
                 print(f'  Entries:       {entry_base}–{entry_base + src["num_events"] - 1}')
-                with ParticleStepExtractor(src['path']) as extractor:
+                with open_extractor(src['path']) as extractor:
                     _run_events(extractor, src, 0, src['num_events'], entry_base,
                                 src['pos'], wsets, save_queue)
                 entry_base += src['num_events']

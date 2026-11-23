@@ -73,6 +73,17 @@ def set_codec(name):
     _COMPRESSION = codec_kwargs(name)
 
 
+def _put(g, name, data):
+    data = np.asarray(data)
+    return g.create_dataset(name, data=data, **_filters(data))
+
+
+def _filters(data):
+    """Dataset keywords: compressed as one chunk (an event is read whole; h5py's
+    default guess makes hundreds of small chunks)."""
+    return dict(chunks=data.shape, **_COMPRESSION) if data.size else {}
+
+
 _PLANE_LABELS = {0: 'U', 1: 'V', 2: 'Y'}
 
 
@@ -276,16 +287,16 @@ def _save_wire_plane(g, arr, threshold_adc, digitized, pedestals, vol_idx, plane
     time_s = time_idx[order].astype(np.int32)
     values_s = values[order]
 
-    g.create_dataset('delta_wire', data=np.diff(wire_s, prepend=wire_s[0]).astype(np.int16), **_COMPRESSION)
-    g.create_dataset('delta_time', data=np.diff(time_s, prepend=time_s[0]).astype(np.int16), **_COMPRESSION)
+    _put(g, 'delta_wire', np.diff(wire_s, prepend=wire_s[0]).astype(np.int16))
+    _put(g, 'delta_time', np.diff(time_s, prepend=time_s[0]).astype(np.int16))
 
     if digitized and pedestals is not None:
         ped = int(pedestals[vol_idx, plane_idx])
         values_unsigned = np.round(values_s + ped).clip(0, 65535).astype(np.uint16)
-        g.create_dataset('values', data=values_unsigned, **_COMPRESSION)
+        _put(g, 'values', values_unsigned)
         g.attrs['pedestal'] = ped
     else:
-        g.create_dataset('values', data=values_s.astype(np.float32), **_COMPRESSION)
+        _put(g, 'values', values_s.astype(np.float32))
 
     g.attrs['wire_start'] = int(wire_s[0])
     g.attrs['time_start'] = int(time_s[0])
@@ -306,23 +317,23 @@ def _save_wire_plane_sparse(g, sparse_dict, digitized, pedestals, vol_idx, plane
     time_s = time_s[order]
     values_s = values_s[order]
 
-    g.create_dataset('delta_wire', data=np.diff(wire_s, prepend=wire_s[0]).astype(np.int16), **_COMPRESSION)
-    g.create_dataset('delta_time', data=np.diff(time_s, prepend=time_s[0]).astype(np.int16), **_COMPRESSION)
+    _put(g, 'delta_wire', np.diff(wire_s, prepend=wire_s[0]).astype(np.int16))
+    _put(g, 'delta_time', np.diff(time_s, prepend=time_s[0]).astype(np.int16))
 
     if digitized and pedestals is not None:
         ped = int(pedestals[vol_idx, plane_idx])
         values_unsigned = np.round(values_s + ped).clip(0, 65535).astype(np.uint16)
-        g.create_dataset('values', data=values_unsigned, **_COMPRESSION)
+        _put(g, 'values', values_unsigned)
         g.attrs['pedestal'] = ped
     else:
-        g.create_dataset('values', data=values_s, **_COMPRESSION)
+        _put(g, 'values', values_s)
 
     g.attrs['wire_start'] = int(wire_s[0])
     g.attrs['time_start'] = int(time_s[0])
     g.attrs['n_pixels'] = len(wire_s)
 
 
-def _save_pixel_plane(g, sparse_dict):
+def _save_pixel_plane(g, sparse_dict, as_int=False):
     """Save one pixel plane's sparse signal as delta-encoded arrays.
 
     Parameters
@@ -347,10 +358,14 @@ def _save_pixel_plane(g, sparse_dict):
     time_s = time_idx[order].astype(np.int32)
     values_s = values[order]
 
-    g.create_dataset('delta_py', data=np.diff(py_s, prepend=py_s[0]).astype(np.int16), **_COMPRESSION)
-    g.create_dataset('delta_pz', data=np.diff(pz_s, prepend=pz_s[0]).astype(np.int16), **_COMPRESSION)
-    g.create_dataset('delta_time', data=np.diff(time_s, prepend=time_s[0]).astype(np.int16), **_COMPRESSION)
-    g.create_dataset('values', data=values_s.astype(np.float32), **_COMPRESSION)
+    _put(g, 'delta_py', np.diff(py_s, prepend=py_s[0]).astype(np.int16))
+    _put(g, 'delta_pz', np.diff(pz_s, prepend=pz_s[0]).astype(np.int16))
+    _put(g, 'delta_time', np.diff(time_s, prepend=time_s[0]).astype(np.int16))
+    if as_int:
+        values_s = np.round(values_s).astype(np.int32)
+    else:
+        values_s = values_s.astype(np.float32)
+    _put(g, 'values', values_s)
 
     g.attrs['py_start'] = int(py_s[0])
     g.attrs['pz_start'] = int(pz_s[0])
@@ -358,9 +373,126 @@ def _save_pixel_plane(g, sparse_dict):
     g.attrs['n_pixels'] = len(py_s)
 
 
+def _offsets(values, centers):
+    """Entry minus group center in the smallest signed type that holds it."""
+    d = values.astype(np.int32) - centers.astype(np.int32)
+    lim = int(np.abs(d).max()) if len(d) else 0
+    return d.astype(np.int8 if lim <= 127 else np.int16)
+
+
+def encode_hits(gids, coords, charges, threshold):
+    """One plane's hits: entries above threshold, sorted by group (format 3).
+
+    coords: {name: index array} e.g. wire/time or py/pz/time. Charges are stored as
+    signed integers in units of threshold/16 (``charge_scale``). Each group has a
+    reference cell (its largest entry); the entries are offsets from it.
+    """
+    if not threshold > 0:
+        raise ValueError('hits need a threshold > 0: it sets the charge unit')
+    keep = np.abs(charges) > threshold
+    gids, charges = gids[keep], charges[keep]
+    coords = {k: v[keep] for k, v in coords.items()}
+    order = np.argsort(gids, kind='stable')
+    gids, charges = gids[order], charges[order]
+    coords = {k: v[order] for k, v in coords.items()}
+    ids, start, count = np.unique(gids, return_index=True, return_counts=True)
+    label = np.repeat(np.arange(len(ids)), count)
+    out = {'group_ids': ids.astype(np.int32), 'group_sizes': _group_sizes(count)}
+    if len(ids):
+        mag = np.abs(charges)
+        peak = np.maximum.reduceat(mag, start)
+        where = np.flatnonzero(mag == peak[label])
+        ref = where[np.searchsorted(where, start)]
+    else:
+        ref = np.zeros(0, dtype=np.int64)
+    for k, v in coords.items():
+        c = v[ref].astype(np.int16)
+        out[f'group_center_{k}'] = c
+        out[f'offset_{k}'] = _offsets(v, c[label])
+    unit = threshold / 16.0
+    out['charge'] = np.round(charges.astype(np.float64) / unit).astype(np.int32)
+    return out
+
+
+def save_event_hits3(f, event_key, hits_data, deposits, source_event_idx, threshold,
+                     cfg, event_id=None, attrs=None):
+    """Hits of one event (format 3): per plane the cells of each group."""
+    evt = f.create_group(event_key)
+    _write_entry_attrs(evt, source_event_idx, event_id, attrs)
+    evt.attrs['n_volumes'] = len(deposits.volumes)
+    evt.attrs['threshold'] = threshold
+    for v in range(len(deposits.volumes)):
+        vg = evt.create_group(f'volume_{v}')
+        for (vi, pi), enc in hits_data.items():
+            if vi != v:
+                continue
+            g = vg.create_group(_plane_label(pi, vi, cfg))
+            for k, arr in enc.items():
+                d = _put(g, k, arr)
+                if k == 'charge':
+                    d.attrs['scale_factor'] = threshold / 16.0
+                    d.attrs['units'] = ('electron' if cfg.volumes[vi].readout_type == 'wire'
+                                        else 'electron/us')
+            g.attrs['n_entries'] = len(enc['charge'])
+
+
+def save_event_presupera(f, event_key, deposits, group2_to_group1, source_event_idx,
+                         cfg, event_id=None, attrs=None):
+    """What pysupera needs besides hits (format 3), per volume: group_to_track and
+    group2_to_group1 (row g-1 is group g), or deposit_to_group if the simulation
+    defined its own groups."""
+    evt = f.create_group(event_key)
+    _write_entry_attrs(evt, source_event_idx, event_id, attrs)
+    evt.attrs['n_volumes'] = len(deposits.volumes)
+    for v, vol in enumerate(deposits.volumes):
+        n = int(vol.n_actual)
+        vg = evt.create_group(f'volume_{v}')
+        vg.attrs['n_steps'] = n
+        def put(name, x):
+            d = _put(vg, name, x)
+            d.attrs['id_base'] = 1
+        put('group_to_track', np.asarray(deposits.group_to_track[v])[1:].astype(np.int32))
+        if group2_to_group1 is not None:
+            put('group2_to_group1', group2_to_group1[v])
+        else:
+            put('deposit_to_group', np.asarray(vol.group_ids[:n]).astype(np.int32))
+
+
+def write_config3(f, role, cfg, params, recomb_model, dataset_name, sources, n_events,
+                  thresholds, group_attrs, detector_yaml, digitization_config=None,
+                  provenance=None, pixel_units=None):
+    """Config group of a format 3 sensor, hits or presupera file: the same settings in
+    each, including what is needed to recompute charge and photons from step."""
+    write_config_sensor(f, cfg, params, recomb_model, dataset_name, 0, sources, n_events,
+                        0, thresholds['sensor'], digitization_config=digitization_config,
+                        provenance=provenance)
+    g = f['config']
+    g.attrs['format_version'] = 3
+    g.attrs['role'] = role
+    g.attrs['sensor_threshold'] = thresholds['sensor']
+    g.attrs['hits_threshold'] = thresholds['hits']
+    g.attrs['inter_thresh'] = thresholds['inter']
+    for k, v in group_attrs.items():
+        g.attrs[k] = v
+    g.attrs['include_sce'] = thresholds['sce'] is not None
+    if thresholds['sce'] is not None:
+        g.attrs['sce_path'] = thresholds['sce']
+    g.attrs['detector_config_yaml'] = detector_yaml
+    for k, v in params.recomb_params._asdict().items():
+        g.attrs[f'recomb_{k}'] = float(v)
+    g.attrs['drift_direction'] = np.array([v.drift_direction for v in cfg.volumes], np.int32)
+    if cfg.volumes[0].readout_type == 'pixel':
+        # values are mean induced current, not counts: no electrons_per_adc
+        del g.attrs['electrons_per_adc']
+        g.attrs['pixel_shape'] = np.array([v.pixel_shape for v in cfg.volumes], np.int32)
+        for k, v in (pixel_units or {}).items():
+            g.attrs[k] = v
+
+
 def save_event_sensor(f, event_key, response_signals, threshold_adc,
                       source_event_idx, deposits, cfg=None,
-                      digitized=False, event_id=None, attrs=None):
+                      digitized=False, event_id=None, attrs=None,
+                      pixel_as_int=False):
     """Save one event's raw sensor readout (sparse, delta-encoded).
 
     Handles both wire (2D) and pixel (3D) output formats.
@@ -389,7 +521,7 @@ def save_event_sensor(f, event_key, response_signals, threshold_adc,
 
         if isinstance(signal, dict) and 'pixel_y' in signal:
             # Pixel sparse from to_sparse
-            _save_pixel_plane(g, signal)
+            _save_pixel_plane(g, signal, as_int=pixel_as_int)
         elif isinstance(signal, dict) and 'wire' in signal:
             # Wire sparse from to_sparse
             _save_wire_plane_sparse(g, signal, digitized, pedestals,

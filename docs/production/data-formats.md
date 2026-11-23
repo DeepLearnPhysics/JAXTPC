@@ -380,6 +380,31 @@ group indirection in `hits/`.
 
 ---
 
+## Format 3 (step file input)
+
+With an edep-sim step file as input, the batch writes `sensor`, `hits` and
+`presupera` files. `config` has the same settings in each, with
+`format_version = 3`, the thresholds, the detector YAML and what is needed to
+recompute charge and photons from the steps. An event is one `entry_{NNNNNN}`
+per file; all datasets are one chunk.
+
+**Groups.** Group 1 is in the step file: consecutive steps of a track, event wide,
+may cross a cathode. The simulation starts a new group 2 at every change of group 1
+or volume, numbered from 1 in each volume (`production/stepfile.py:refine_groups`).
+Hits use group 2. `--regroup` defines the groups in the simulation instead.
+
+| File | Per volume (and plane) | |
+|---|---|---|
+| sensor | as format 2 | pixel `values` are `int32` |
+| hits | `group_ids`, `group_sizes` | cells of group i are consecutive |
+| | `group_center_<axis>`, `offset_<axis>` | cell = center of its group + offset |
+| | `charge` (int32) | times its `scale_factor` (`hits_threshold` / 16), units in `units` |
+| presupera | `group_to_track`, `group2_to_group1` | row g-1 is group g |
+| | `deposit_to_group` | instead of `group2_to_group1`, with `--regroup` |
+
+Axes are `wire`, `time` or `py`, `pz`, `time`. Read with `load_step3`, `load_hits3`
+and `charge_and_photons` of `production/load.py`.
+
 ## See also
 
 - [Capacities & overflow](../concepts/capacities.md) — the array budgets these
