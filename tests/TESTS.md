@@ -177,6 +177,7 @@ The modules above are documented test-by-test; the remaining suites are listed h
 | test_pixel_post_response_truth.py | 16 | Pixel readout post-response truth (`tools/track_hits.py` pixel path) |
 | test_pixel_kernel_grid.py | 2 | Pixel kernel lookup on the bin-centre grid: total charge over output pixels equals the pad-sum at every sub-pixel offset |
 | test_pixel_kernel_timing.py | 7 | Pixel kernel sub-tick timing (`tools/kernels.py`): placed output equals the tick-averaged response at the true arrival time, centroid linearity, d/d(arrival) vs finite differences |
+| test_pixel_response_bin.py | 3 | Pixel table applied at each preset's pitch (`response_pixel_bin`): full charge collected, bin = pitch / 10 |
 | test_production_io.py | 14 | Production HDF5 writers/readers (`production/save.py`, `production/load.py`): CSR + delta encoding round-trips |
 | test_box_track_hits.py | 2 | Box (group-as-bucket) track-hits path |
 | test_qs_fractions.py | 5 | Per-deposit charge-share fractions (`qs_fractions`) |

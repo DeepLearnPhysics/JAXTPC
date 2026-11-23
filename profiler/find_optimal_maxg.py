@@ -188,7 +188,8 @@ def find_optimal_maxg(data, config_path, group_size=5, gap=5.0, events_per_file=
         pkp = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'pixel_response.npz')
         pk = load_pixel_response_kernel(pkp, pixel_pitch_cm=sc.volumes[0].pixel_pitch_cm,
                                         time_spacing=sc.time_step_us,
-                                        max_sigma_trans_unitless=1.0, max_sigma_long_unitless=1.0)
+                                        max_sigma_trans_unitless=1.0, max_sigma_long_unitless=1.0,
+                                        pixel_bin_cm=sc.volumes[0].pixel_response_bin_cm)
         ker = (pk.kernel_py, pk.kernel_pz, pk.kernel_time)
     else:
         d = sc.volumes[0].diffusion

@@ -754,7 +754,8 @@ def apply_pixel_diffusion_response(DKernel, s_values, py_offsets, pz_offsets,
 def load_pixel_response_kernel(npz_path, num_s=32, time_spacing=0.5,
                                 pixel_pitch_cm=0.4,
                                 max_sigma_trans_unitless=None,
-                                max_sigma_long_unitless=None):
+                                max_sigma_long_unitless=None,
+                                pixel_bin_cm=None):
     """Load pixel response kernel from NPZ and build 3D DKernel table.
 
     The DKernel table is kept at native NPZ resolution (fine spatial and time
@@ -784,6 +785,11 @@ def load_pixel_response_kernel(npz_path, num_s=32, time_spacing=0.5,
         Max transverse sigma in pixel pitch units.
     max_sigma_long_unitless : float, optional
         Max longitudinal sigma in simulation time step units.
+    pixel_bin_cm : float, optional
+        Table bin size in cm, overriding the NPZ's ``pixel_bin_size``. Used to
+        apply a table computed for one pitch to another (bin = pitch / 10 for
+        the shipped table). Scales the transverse axes only; the time axis is
+        unchanged. None uses the NPZ's value.
 
     Returns
     -------
@@ -793,7 +799,7 @@ def load_pixel_response_kernel(npz_path, num_s=32, time_spacing=0.5,
 
     data = np.load(npz_path)
     response = jnp.array(data['response'], dtype=jnp.float32)  # (Hpy, Hpz, Ht)
-    npz_pixel_bin = float(data['pixel_bin_size'])
+    npz_pixel_bin = float(data['pixel_bin_size'] if pixel_bin_cm is None else pixel_bin_cm)
     npz_time_bin = float(data['time_bin_size'])
 
     # pixel_spacing: NPZ bin / pixel pitch (unitless ratio, like wire_spacing)

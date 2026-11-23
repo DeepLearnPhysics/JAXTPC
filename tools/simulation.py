@@ -246,6 +246,7 @@ class DetectorSimulator:
                 pixel_pitch_cm=vol_geom.pixel_pitch_cm,
                 max_sigma_trans_unitless=d.max_sigma_trans_unitless,
                 max_sigma_long_unitless=d.max_sigma_long_unitless,
+                pixel_bin_cm=vol_geom.pixel_response_bin_cm,
             )
         else:
             _, _, global_sigma_trans, global_sigma_long = calculate_max_diffusion_sigmas(

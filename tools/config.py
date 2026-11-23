@@ -336,6 +336,8 @@ def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50
         if readout_type == 'pixel':
             # Pixel volume — no wire planes
             pixel_pitch = float(readout_cfg['pixel_pitch'])
+            response_bin = readout_cfg.get('response_pixel_bin')
+            response_bin = None if response_bin is None else float(response_bin)
             pixel_shape_cfg = readout_cfg['pixel_shape']
             num_py, num_pz = int(pixel_shape_cfg[0]), int(pixel_shape_cfg[1])
             # Pixel grid origin in the volume-LOCAL frame. Deposits are
@@ -388,6 +390,7 @@ def create_sim_config(detector_config, total_pad=200_000, response_chunk_size=50
                 pixel_shape=(num_py, num_pz),
                 pixel_pitch_cm=pixel_pitch,
                 pixel_origins_cm=(y_origin, z_origin),
+                pixel_response_bin_cm=response_bin,
             ))
         else:
             # Wire volume
@@ -604,6 +607,7 @@ class VolumeGeometry(NamedTuple):
     pixel_shape: Any                # (num_py, num_pz) or None
     pixel_pitch_cm: Any             # float or None
     pixel_origins_cm: Any           # (y_origin_cm, z_origin_cm) or None
+    pixel_response_bin_cm: Any = None  # response-table bin size (cm); None = use the NPZ's
 
 
 class VolumeIntermediates(NamedTuple):
