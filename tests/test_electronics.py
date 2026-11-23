@@ -136,6 +136,30 @@ class TestFFTConvolution:
                 err_msg=f"Dense mismatch on wire {w}"
             )
 
+    @pytest.mark.parametrize("chunk_size", [8, 50])
+    def test_edge_wires_survive_padding(self, chunk_size):
+        """Wire 0 and the last wire are convolved correctly when n_active < chunk_size.
+
+        Regression: padded gather indices used fill_value=0, so padding rows were
+        scattered onto wire 0 and overwrote it with zeros.
+        """
+        num_wires, num_time = 50, 251
+        active = [0, 7, 49]
+        signals = np.zeros((num_wires, num_time), dtype=np.float32)
+        rng = np.random.RandomState(7)
+        for w in active:
+            signals[w] = rng.randn(num_time).astype(np.float32)
+        kernel = create_rcrc_response(tau_us=100.0, time_step_us=0.5, n_tau=3.0)
+        fft_size = compute_fft_size(num_time, len(kernel))
+        out = np.array(electronics_response_core(
+            jnp.array(signals), jnp.array(kernel), 0.0, chunk_size, fft_size, num_time))
+        for w in active:
+            ref = fftconvolve(signals[w], kernel, mode='full')[:num_time]
+            np.testing.assert_allclose(out[w], ref, rtol=1e-4, atol=1e-5,
+                                       err_msg=f"wire {w}, chunk {chunk_size}")
+        inactive = [w for w in range(num_wires) if w not in active]
+        assert np.all(out[inactive] == 0)
+
     def test_inactive_wires_stay_zero(self, fft_test_data):
         """Wires with no signal remain zero after convolution."""
         d = fft_test_data

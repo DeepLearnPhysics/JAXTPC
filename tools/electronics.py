@@ -121,11 +121,14 @@ def electronics_response_core(signals, response, threshold, chunk_size, fft_size
 
     # Find active wires
     max_abs = jnp.max(jnp.abs(signals), axis=1)
-    active_indices = jnp.where(max_abs > threshold, size=chunk_size, fill_value=0)[0]
+    # Pad with an out-of-range index, not 0: padded rows must not alias wire 0 in the
+    # scatter below (duplicate indices in .at[].set are applied in unspecified order,
+    # so fill_value=0 zeroed wire 0 whenever n_active < chunk_size).
+    active_indices = jnp.where(max_abs > threshold, size=chunk_size, fill_value=num_wires)[0]
     n_active = jnp.sum(max_abs > threshold)
 
     # Gather active wires
-    active_signals = signals[active_indices]  # (chunk_size, num_time)
+    active_signals = signals.at[active_indices].get(mode='fill', fill_value=0)  # (chunk_size, num_time)
 
     # FFT convolution
     S = jnp.fft.rfft(active_signals, n=fft_size, axis=1)
@@ -141,7 +144,7 @@ def electronics_response_core(signals, response, threshold, chunk_size, fft_size
 
     # Scatter back to dense output
     output = jnp.zeros_like(signals)
-    output = output.at[active_indices].set(convolved)
+    output = output.at[active_indices].set(convolved, mode='drop')
 
     return output
 
