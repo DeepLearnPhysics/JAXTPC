@@ -238,7 +238,7 @@ from production.load import build_viz_config, load_event_sensor, load_event_step
 viz_config = build_viz_config('output/sensor/sim_sensor_0000.h5')
 dense_signals, attrs, pedestals = load_event_sensor(sensor_path, event_idx=0)
 volumes = load_event_step(step_path, event_idx=0)
-track_hits, truth_dense, g2t = load_event_hits(hits_path, event_idx=0)
+track_hits, truth_dense, g2t, d2g, qs = load_event_hits(hits_path, event_idx=0)
 ```
 
 ### Tests

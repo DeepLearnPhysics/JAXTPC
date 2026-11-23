@@ -4,7 +4,7 @@ Tools for sizing simulation capacities and generating production configs.
 
 The production sim's capacities (`total_pad`, `max_keys`, `maxg`, box dims, chunk
 sizes, thresholds) must be sized for the data — otherwise the sim raises
-`RuntimeError` (`total_pad`), reprocesses (`maxg`), or or refuses the event (`max_keys`)
+`RuntimeError` (`total_pad`), reprocesses (`maxg`), or refuses the event (`max_keys`)
 at runtime. The profiler scans the data and benchmarks the sim to set them.
 
 ## Quick start
