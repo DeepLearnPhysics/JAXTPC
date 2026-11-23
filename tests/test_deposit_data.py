@@ -29,7 +29,7 @@ def raw_data():
     Each track is a contiguous run of deposits spanning x = -180 -> +180 cm, so
     every track crosses the x=0 volume boundary: this populates BOTH volumes and
     keeps per-track deposits contiguous (needed for group-id computation). Mirrors
-    what load_particle_step_data('out.h5') used to provide.
+    the layout returned by load_particle_step_data.
     """
     rng = np.random.RandomState(1234)
     n_tracks = 8
