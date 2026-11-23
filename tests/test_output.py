@@ -104,11 +104,27 @@ class TestToSparse:
         sparse = to_sparse(signals, mock_config)
 
         # Reconstruct dense from sparse
-        sp = sparse[(0, 0)]
-        reconstructed = np.zeros_like(arr)
-        reconstructed[sp['wire'], sp['time']] = sp['values']
+        reconstructed = to_dense(sparse, mock_config)[(0, 0)]
 
         np.testing.assert_array_equal(reconstructed, arr)
+
+    def test_threshold_keeps_sign(self, mock_config):
+        """threshold_adc filters on |value| (inclusive) and keeps the sign."""
+        arr = np.zeros((100, 200), dtype=np.float32)
+        arr[0, :5] = [0.5, 1.0, 2.0, 3.0, -2.5]
+        sp = to_sparse({(0, 0): arr}, mock_config, threshold_adc=2.0)[(0, 0)]
+        np.testing.assert_array_equal(np.sort(sp['values']), [-2.5, 2.0, 3.0])
+
+    def test_wire_sparse_dict_to_dense_sums_duplicates(self, mock_config):
+        """Duplicate (wire, time) entries accumulate; empty input gives zeros."""
+        sp = {'wire': np.array([1, 1, 3], np.int32), 'time': np.array([2, 2, 4], np.int32),
+              'values': np.array([1.0, 2.0, 5.0], np.float32)}
+        d = to_dense({(0, 2): sp}, mock_config)[(0, 2)]
+        assert d.shape == (80, 200)
+        assert d[1, 2] == 3.0 and d[3, 4] == 5.0 and d.sum() == 8.0
+        empty = {'wire': np.array([], np.int32), 'time': np.array([], np.int32),
+                 'values': np.array([], np.float32)}
+        assert not to_dense({(0, 0): empty}, mock_config)[(0, 0)].any()
 
 
 class TestBucketedToDense:

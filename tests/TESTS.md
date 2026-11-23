@@ -96,29 +96,6 @@ Detector geometry parsing (`tools/geometry.py`).
 | Missing YAML returns None | Non-existent file handled gracefully |
 | Incomplete YAML returns None | Missing required keys handled gracefully |
 
-### test_track_hits.py (5 tests)
-
-Track hit labeling (`tools/track_hits.py`).
-
-| Test | What it checks |
-|------|----------------|
-| Single track aggregation | 5 hits same location sum to total charge |
-| Threshold filtering | Hits below threshold removed |
-| Multiple tracks separated | 3 distinct tracks counted correctly |
-| Dominant track labeling | Highest-charge track wins at shared location |
-| Sparse hits to dense | Known hits produce correct dense array |
-
-### test_sparse_utils.py (4 tests)
-
-Dense/sparse conversion (`tools/sparse_utils.py`).
-
-| Test | What it checks |
-|------|----------------|
-| Dense-sparse-dense roundtrip | Exact reconstruction |
-| Threshold filtering | Only |value| > threshold kept, sign preserved |
-| Duplicate index accumulation | Same (wire, time) values summed |
-| Empty sparse array | Produces all-zero dense output |
-
 ### test_noise.py (11 tests)
 
 Noise generation and threshold analysis (`tools/noise.py`).

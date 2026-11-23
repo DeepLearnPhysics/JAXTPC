@@ -205,7 +205,7 @@ Sparse thresholded raw readout after full detector simulation.
     attrs: format_version, dataset_name, n_sources, source_file (single input), n_events, global_event_offset,
            num_time_steps, time_step_us, electrons_per_adc,
            velocity_cm_us, lifetime_us, recombination_model,
-           include_noise, include_electronics, include_digitize,
+           include_intrinsic_noise, include_electronics, include_digitize,
            threshold_adc, n_bits (if digitized)
     num_wires           (2, 3) int32
     pedestals           (2, 3) int32    per-plane pedestal (if digitized)

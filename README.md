@@ -28,9 +28,7 @@ JAXTPC/
 │   ├── losses.py                 # Sobolev / spectral loss functions
 │   ├── coherent_noise.py         # Tagged coherent (per-wire-group) noise model
 │   ├── pixel_visualization.py    # Pixel-readout signal visualization (sparse/dense projections)
-│   ├── nn_utils.py               # NN inference utilities
-│   ├── sparse_utils.py           # Dense ↔ truly-sparse format conversion
-│   ├── utils.py                  # Misc shared helpers
+│   ├── utils.py                  # SCE map HDF5 I/O
 │   └── responses/                # Pre-computed wire response kernels (U/V/Y NPZ)
 ├── production/                   # Batch production pipeline
 │   ├── run_batch.py              # Batch simulation with threaded save workers
@@ -239,7 +237,7 @@ Profiler-tuned `production_*.yaml` variants (including the doraemon wire/pixel c
 | `iterate_mode` | `'scan'` | Volume iteration: `'scan'` or `'vmap'` |
 | `use_bucketed` | False | Optional wire-only sparse bucket accumulation (memory saver; not required for pixel) |
 | `max_active_buckets` | 1,000 | Max buckets per plane (bucketed mode) |
-| `include_noise` | False | Enable intrinsic noise |
+| `include_intrinsic_noise` | False | Enable intrinsic noise |
 | `include_electronics` | False | Enable RC-RC electronics response |
 | `include_digitize` | False | Enable ADC digitization |
 | `include_track_hits` | True | Enable track correspondence |

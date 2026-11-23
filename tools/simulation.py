@@ -108,6 +108,9 @@ class DetectorSimulator:
         print("--- Creating DetectorSimulator ---")
 
         if include_noise is not None:
+            import warnings
+            warnings.warn("include_noise is deprecated; use include_intrinsic_noise",
+                          DeprecationWarning, stacklevel=2)
             include_intrinsic_noise = include_noise
 
         # Detect readout type early (needed for pixel-specific defaults)
@@ -419,7 +422,10 @@ class DetectorSimulator:
                         dkernel, s_values, py_offsets, pz_offsets, time_offsets,
                         pk.pixel_spacing, pk.kernel_py, pk.kernel_pz, pk.rebin_factor)
                 return response_fn
-            _build_response_fn_diff = _build_response_fn  # TODO: pixel diff response
+            def _build_response_fn_diff(sim_params, plane_type):
+                # Unreachable: __init__ rejects differentiable=True for pixel readout.
+                raise NotImplementedError(
+                    "differentiable=True is not supported for pixel readout")
         else:
             def _build_response_fn(sim_params, plane_type):
                 kernel = kernels[plane_type]

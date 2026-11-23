@@ -19,7 +19,6 @@ from tools.geometry import generate_detector
 from tools.loader import build_deposit_data
 from tools.config import create_track_hits_config
 from tools.output import to_sparse, _detect_format
-from tools.track_hits import finalize_track_hits
 
 
 # Heavy integration test: runs a full native-resolution (1000x1000) pixel
