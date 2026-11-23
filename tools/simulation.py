@@ -251,9 +251,13 @@ class DetectorSimulator:
                 max_sigma_long_unitless=d.max_sigma_long_unitless,
             )
         else:
-            _, _, global_sigma_trans, global_sigma_long = calculate_max_diffusion_sigmas(
-                global_max_drift, d.velocity_cm_us, d.trans_cm2_us, d.long_cm2_us,
-                vol_geom.wire_spacings_cm[0], cfg.time_step_us)
+            # Transverse sigma is in wire pitches, so it depends on the plane.
+            global_sigma_trans = {}
+            for plane_type, spacing in zip(cfg.plane_names[0], vol_geom.wire_spacings_cm):
+                _, _, global_sigma_trans[plane_type], global_sigma_long = \
+                    calculate_max_diffusion_sigmas(
+                        global_max_drift, d.velocity_cm_us, d.trans_cm2_us,
+                        d.long_cm2_us, spacing, cfg.time_step_us)
             self.response_kernels = load_response_kernels(
                 response_path=response_path,
                 num_s=d.num_s,
