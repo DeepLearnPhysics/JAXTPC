@@ -221,7 +221,8 @@ def run_rank_validate(args):
         except RuntimeError as e:
             # sim raises on track_hits overflow; record as >= probe, continue
             act_max = args.probe_max_keys
-            over = f' *** OVERFLOW >= probe ({str(e)[-40:].strip()}) ***'
+            kind = 'MAXG' if 'maxg overflow' in str(e) else 'MAX_KEYS >= probe'
+            over = f' *** {kind} OVERFLOW ({str(e)[:90].strip()}) ***'
             n_overflow += 1
         with h5py.File(fp, 'r') as _f:
             pstep = _f['pstep/lar_vol'][idx]

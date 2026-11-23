@@ -78,6 +78,13 @@ def bench_one(detector_config, data_path, event_idx, total_pad,
         track_config = create_track_hits_config(
             max_keys=max_keys, hits_chunk_size=hits_chunk,
             inter_thresh=inter_thresh, box_enabled=True, maxg=maxg)
+    elif any(v.get('readout', {}).get('type') == 'pixel'
+             for v in detector_config['volumes']):
+        # The pixel sensor comes from the hits pass even with track hits off, so
+        # it needs the estimated max_keys, not TrackHitsConfig's 4M default.
+        track_config = create_track_hits_config(
+            max_keys=max_keys, hits_chunk_size=response_chunk,
+            inter_thresh=inter_thresh, box_enabled=False)
 
     sim = DetectorSimulator(
         detector_config,

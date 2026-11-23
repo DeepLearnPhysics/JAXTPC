@@ -6,7 +6,7 @@ over all files, then patches an existing production config's max_keys/maxg/box
 optimization does. Saves distribution plots.
 """
 import sys, glob, yaml, math, os, argparse
-sys.path.insert(0, '/sdf/group/neutrino/omara/JAXTPC')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 
 
