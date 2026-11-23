@@ -1,33 +1,29 @@
 """
-Production pipeline integration tests.
+Production pipeline integration tests (synthetic deposits).
 
-One simulator (dense + track_hits) shared across all tests via module scope.
-Plus one bucketed simulator for dense==bucketed comparison.
+One dense + track-hits simulator on a compact detector is shared by the module,
+plus one bucketed simulator for the dense == bucketed comparison.
 
-Tests: signal shapes, track hits, qs_fractions, warm_up,
-custom sim_params, edge cases, bucketed equivalence,
-synthetic deterministic pipeline.
+Tests: output layout, track-hit charge and labels, qs_fractions, SimParams response,
+recompilation, warm_up, volume mirror symmetry, bucketed equivalence,
+hand-placed deposits on the full-size detector.
 """
 
 import os
-import time
 import numpy as np
-import jax
 import jax.numpy as jnp
 import pytest
 
+from tools.config import create_track_hits_config
 from tools.geometry import generate_detector
 from tools.simulation import DetectorSimulator
-from tools.loader import load_event, build_deposit_data
-from tools.wires import sparse_buckets_to_dense
+from tools.loader import build_deposit_data
+from tools.output import to_dense
 
 
 CONFIG_PATH = 'config/cubic_wireplane_config.yaml'
-DATA_PATH = 'out.h5'
-EVENT_IDX = 2
-
-needs_data = pytest.mark.skipif(
-    not os.path.exists(DATA_PATH), reason="out.h5 not found")
+PAD = 64
+PLANES = [(v, p) for v in range(2) for p in range(3)]
 
 
 # ---------------------------------------------------------------------------
@@ -35,22 +31,18 @@ needs_data = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def detector_config():
-    return generate_detector(CONFIG_PATH)
-
-
-@pytest.fixture(scope="module")
-def sim(detector_config):
+def sim(compact_detector):
     """Dense + track_hits simulator. Shared across all tests."""
     return DetectorSimulator(
-        detector_config, total_pad=200_000, response_chunk_size=50_000,
-        use_bucketed=False, include_intrinsic_noise=False, include_electronics=False,
-        include_track_hits=True, include_digitize=False)
+        compact_detector(), total_pad=PAD, response_chunk_size=PAD // 2,
+        include_track_hits=True,
+        track_config=create_track_hits_config(
+            max_keys=50_000, hits_chunk_size=PAD // 2, maxg=64, inter_thresh=0.01))
 
 
 @pytest.fixture(scope="module")
-def deposits(sim):
-    return load_event(DATA_PATH, sim.config, event_idx=EVENT_IDX)
+def deposits(sim, synthetic_tracks):
+    return synthetic_tracks(sim.config)
 
 
 @pytest.fixture(scope="module")
@@ -60,160 +52,170 @@ def sim_results(sim, deposits):
 
 
 # ---------------------------------------------------------------------------
-# Signal shapes
+# Output layout
 # ---------------------------------------------------------------------------
 
-@needs_data
-class TestSignalShapes:
+class TestOutputLayout:
 
-    def test_signal_shapes(self, sim, sim_results):
-        signals, _, _ = sim_results
+    def test_planes_and_shapes(self, sim, sim_results):
+        """Exactly one (num_wires, num_time) signal and one hit tuple per plane."""
+        signals, hits, _ = sim_results
         cfg = sim.config
-        for vi in range(cfg.n_volumes):
-            for pi in range(cfg.volumes[vi].n_planes):
-                assert signals[(vi, pi)].shape == (
-                    cfg.volumes[vi].num_wires[pi], cfg.num_time_steps)
-
-    def test_all_planes_present(self, sim, sim_results):
-        signals, _, _ = sim_results
-        cfg = sim.config
-        for vi in range(cfg.n_volumes):
-            for pi in range(cfg.volumes[vi].n_planes):
-                assert (vi, pi) in signals
+        assert cfg.volumes[0].num_wires[0] != cfg.volumes[0].num_wires[2]
+        assert set(signals) == set(PLANES)
+        assert set(hits) == set(PLANES) | {'group_to_track'}
+        for v, p in PLANES:
+            assert signals[(v, p)].shape == (
+                cfg.volumes[v].num_wires[p], cfg.num_time_steps)
 
 
 # ---------------------------------------------------------------------------
 # Track hits
 # ---------------------------------------------------------------------------
 
-@needs_data
 class TestTrackHits:
 
-    def test_track_hits_keys(self, sim, sim_results):
-        _, track_hits_raw, _ = sim_results
-        cfg = sim.config
-        for vi in range(cfg.n_volumes):
-            for pi in range(cfg.volumes[vi].n_planes):
-                assert (vi, pi) in track_hits_raw
+    @pytest.mark.parametrize("vol,plane", PLANES)
+    def test_charge_per_track(self, sim, sim_results, vol, plane):
+        """Hits of each track on each plane sum to its attenuated charge."""
+        _, hits, filled = sim_results
+        sk, tk, gk, ch, count, _ = hits[(vol, plane)]
+        count = int(count)
+        assert 0 < count < sim.config.track_hits.max_keys
+        hit_tracks = np.asarray(hits['group_to_track'][vol])[np.asarray(gk[:count])]
+        ch = np.asarray(ch[:count], dtype=np.float64)
+
+        d = filled.volumes[vol]
+        n = int(d.n_actual)
+        geom, params = sim.config.volumes[vol], sim.default_sim_params
+        dist = np.asarray(d.positions_mm[:n, 0]) / 10 - geom.plane_distances_cm[plane]
+        arriving = np.asarray(d.charge[:n], np.float64) * np.exp(
+            -dist / float(params.velocity_cm_us) / float(params.lifetime_us))
+        tracks = np.asarray(d.track_ids[:n])
+        assert set(hit_tracks) == set(tracks) == {1, 2, 3}
+        for t in (1, 2, 3):
+            assert ch[hit_tracks == t].sum() == pytest.approx(
+                arriving[tracks == t].sum(), rel=1e-2)
 
     def test_qs_fractions(self, sim, sim_results):
-        _, _, filled_deposits = sim_results
-        for v in range(sim.config.n_volumes):
-            vol = filled_deposits.volumes[v]
-            qs = vol.qs_fractions[:vol.n_actual]
-            assert float(jnp.sum(jnp.abs(qs))) > 0, f"Volume {v}: qs_fractions should be non-zero"
+        """qs_fractions is each deposit's share of its group's charge, 0 on padding."""
+        _, _, filled = sim_results
+        for d in filled.volumes:
+            n = int(d.n_actual)
+            assert 0 < n < PAD
+            q, g = np.asarray(d.charge[:n]), np.asarray(d.group_ids[:n])
+            assert np.all(q > 0)
+            total = np.bincount(g, weights=q)
+            assert np.sum(np.bincount(g) > 1) >= 2     # several multi-deposit groups
+            np.testing.assert_allclose(np.asarray(d.qs_fractions[:n]), q / total[g],
+                                       rtol=1e-5)
+            assert np.all(np.asarray(d.qs_fractions[n:]) == 0)
 
 
 # ---------------------------------------------------------------------------
 # SimParams
 # ---------------------------------------------------------------------------
 
-@needs_data
 class TestSimParams:
 
-    def test_different_velocity_changes_output(self, sim, deposits, sim_results):
-        signals_default, _, _ = sim_results
-        s1 = float(signals_default[(1, 2)].sum())
+    def test_velocity_shifts_arrival_time(self, sim):
+        """A slower drift delays the Y pulse by d(1/v2 - 1/v1) and attenuates it."""
+        params = sim.default_sim_params
+        x_mm, v2 = -500.0, 0.17
+        deps = build_deposit_data(
+            np.array([[x_mm, 0.0, 0.0]], np.float32), np.array([2.0], np.float32),
+            np.array([3.0], np.float32), sim.config)
+        pulse = []
+        for p in (params, params._replace(velocity_cm_us=jnp.array(v2))):
+            y = np.asarray(sim.process_event(deps, sim_params=p)[0][(0, 2)], np.float64)
+            t = np.arange(y.shape[1])
+            pulse.append((y.sum(), (y.sum(0) * t).sum() / y.sum()))
+        (q1, t1), (q2, t2) = pulse
+        dt_us = (216.0 + x_mm / 10) * (1 / v2 - 1 / float(params.velocity_cm_us))
+        assert (t2 - t1) * sim.config.time_step_us == pytest.approx(dt_us, abs=0.05)
+        assert q2 / q1 == pytest.approx(
+            np.exp(-dt_us / float(params.lifetime_us)), rel=1e-4)
 
-        params2 = sim.default_sim_params._replace(velocity_cm_us=jnp.array(0.17))
-        sigs2, _, _ = sim.process_event(deposits, sim_params=params2)
-        s2 = float(sigs2[(1, 2)].sum())
-        assert abs(s1 - s2) > 1.0
-
-    def test_no_recompile(self, sim, deposits):
-        """Second call with same params should be ~same speed as first (no recompile)."""
-        params2 = sim.default_sim_params._replace(velocity_cm_us=jnp.array(0.17))
-        # First timed call
-        t0 = time.time()
-        sigs1, _, _ = sim.process_event(deposits, sim_params=params2)
-        jax.block_until_ready(sigs1[(1, 2)])
-        t_first = time.time() - t0
-
-        # Second timed call — should be similar speed (no recompile)
-        t0 = time.time()
-        sigs2, _, _ = sim.process_event(deposits, sim_params=params2)
-        jax.block_until_ready(sigs2[(1, 2)])
-        t_second = time.time() - t0
-
-        # Second call should not be dramatically slower (recompile would 10x+ it)
-        assert t_second < t_first * 2.0, \
-            f"Second call ({t_second:.1f}s) much slower than first ({t_first:.1f}s)"
-
-    def test_default_params_accessible(self, sim):
+    def test_defaults_match_config(self, sim):
+        """Default SimParams are the YAML values in cm, us units."""
         p = sim.default_sim_params
-        assert p.velocity_cm_us is not None
-        assert p.recomb_params is not None
+        got = [p.velocity_cm_us, p.lifetime_us, p.diffusion_trans_cm2_us,
+               p.diffusion_long_cm2_us, p.recomb_params.alpha,
+               p.recomb_params.beta_90, p.recomb_params.R]
+        np.testing.assert_allclose(
+            np.array(got, np.float64),
+            [0.16, 1.0e4, 12.0e-6, 7.2e-6, 0.904, 0.204, 1.25], rtol=1e-6)
 
 
 # ---------------------------------------------------------------------------
-# Warm-up
+# Compilation
 # ---------------------------------------------------------------------------
 
-@needs_data
-class TestWarmUp:
-    def test_completes(self, sim):
-        sim.warm_up()
+class TestCompilation:
+
+    def test_params_change_without_recompile(self, sim, deposits, sim_results):
+        n = sim._calculator_jit._cache_size()
+        assert n == 1
+        p = sim.default_sim_params._replace(velocity_cm_us=jnp.array(0.17),
+                                            lifetime_us=jnp.array(5000.0))
+        sim.process_event(deposits, sim_params=p)
+        assert sim._calculator_jit._cache_size() == n
+
+    def test_warm_up_covers_process_event(self, compact_detector, synthetic_tracks):
+        """After warm_up() the first real event triggers no compilation."""
+        fresh = DetectorSimulator(
+            compact_detector(), total_pad=PAD, response_chunk_size=PAD,
+            include_track_hits=False)
+        assert fresh._calculator_jit._cache_size() == 0
+        fresh.warm_up()
+        assert fresh._calculator_jit._cache_size() == 1
+        fresh.process_event(synthetic_tracks(fresh.config))
+        assert fresh._calculator_jit._cache_size() == 1
 
 
 # ---------------------------------------------------------------------------
-# Edge cases
+# Volumes
 # ---------------------------------------------------------------------------
 
-@needs_data
-class TestEdgeCases:
+class TestVolumes:
 
-    def test_single_volume_deposits(self, sim):
-        pos = np.ones((100, 3), dtype=np.float32) * 500
-        deps = build_deposit_data(pos, np.ones(100, dtype=np.float32) * 2.0,
-                                   np.ones(100, dtype=np.float32) * 0.5,
-                                   sim.config)
-        sigs, _, _ = sim.process_event(deps)
+    def test_mirrored_deposits(self, sim):
+        """x -> -x moves the signal to the other volume unchanged, the rest is zero."""
+        rng = np.random.RandomState(5)
+        pos = rng.uniform([200, -250, -250], [2000, 250, 250], (60, 3)).astype(np.float32)
+        out = {}
+        for sign in (-1, 1):
+            p = pos * np.array([sign, 1, 1], np.float32)
+            deps = build_deposit_data(p, np.full(60, 2.0, np.float32),
+                                      np.full(60, 3.0, np.float32), sim.config)
+            out[sign], _, _ = sim.process_event(deps)
         for p in range(3):
-            assert float(jnp.abs(sigs[(0, p)]).sum()) < 1e-3
-            assert float(jnp.abs(sigs[(1, p)]).sum()) > 0
-
-    def test_zero_energy_zero_signal(self, sim):
-        pos = np.ones((50, 3), dtype=np.float32) * -500
-        deps = build_deposit_data(pos, np.zeros(50, dtype=np.float32),
-                                   np.ones(50, dtype=np.float32) * 0.5, sim.config)
-        sigs, _, _ = sim.process_event(deps)
-        total = sum(float(jnp.abs(v).sum()) for v in sigs.values())
-        assert total < 1e-3
+            east, west = np.asarray(out[-1][(0, p)]), np.asarray(out[1][(1, p)])
+            assert np.abs(east).max() > 1.0
+            # x_local = +-(x_anode - x) rounds identically for both signs
+            np.testing.assert_array_equal(east, west)
+            assert not np.any(np.asarray(out[-1][(1, p)]))
+            assert not np.any(np.asarray(out[1][(0, p)]))
 
 
 # ---------------------------------------------------------------------------
 # Bucketed equivalence (2nd JIT compile)
 # ---------------------------------------------------------------------------
 
-@needs_data
 class TestBucketed:
 
-    @pytest.fixture(scope="class")
-    def sim_bucketed(self, detector_config):
-        return DetectorSimulator(
-            detector_config, total_pad=200_000, response_chunk_size=50_000,
-            use_bucketed=True, max_active_buckets=1000,
-            include_intrinsic_noise=False, include_electronics=False,
-            include_track_hits=False, include_digitize=False)
-
-    def test_dense_equals_bucketed(self, sim, sim_bucketed, sim_results):
+    def test_dense_equals_bucketed(self, compact_detector, deposits, sim_results):
         signals_dense, _, _ = sim_results
-
-        deps_b = load_event(DATA_PATH, sim_bucketed.config, event_idx=EVENT_IDX)
-        sig_bucketed, _, _ = sim_bucketed.process_event(deps_b)
-
-        cfg = sim.config
-        for vi in range(cfg.n_volumes):
-            for pi in range(cfg.volumes[vi].n_planes):
-                d = np.asarray(signals_dense[(vi, pi)])
-                b_tuple = sig_bucketed[(vi, pi)]
-                buckets, num_active, ctk, B1, B2 = b_tuple
-                nw = cfg.volumes[vi].num_wires[pi]
-                nt = cfg.num_time_steps
-                b = np.asarray(sparse_buckets_to_dense(
-                    buckets, ctk, num_active, int(B1), int(B2), nw, nt, 1000))
-                max_diff = float(np.max(np.abs(d - b)))
-                assert max_diff < 0.01, f"({vi},{pi}): {max_diff:.4f}"
+        sim_b = DetectorSimulator(
+            compact_detector(), total_pad=PAD, response_chunk_size=PAD // 2,
+            use_bucketed=True, max_active_buckets=1000, include_track_hits=False)
+        signals_b, _, _ = sim_b.process_event(deposits)
+        dense_b = to_dense(signals_b, sim_b.config)
+        for key in PLANES:
+            d, b = np.asarray(signals_dense[key]), np.asarray(dense_b[key])
+            peak = np.abs(d).max()
+            assert peak > 1.0
+            assert np.abs(d - b).max() < 1e-5 * peak, key
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +232,7 @@ has_kernels = all(
 @pytest.mark.requires_kernels
 @pytest.mark.skipif(not has_kernels, reason="Response kernel files not found")
 class TestSyntheticPipeline:
-    """Full pipeline test with hand-placed deposits — no out.h5 needed.
+    """Full pipeline test with hand-placed deposits.
 
     Five deposits placed at known positions in volume 0 (east).
     Validates physics invariants rather than comparing to frozen snapshots.

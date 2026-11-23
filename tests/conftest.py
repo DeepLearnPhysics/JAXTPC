@@ -199,3 +199,87 @@ def small_deposit_data():
         positions_mm, de, dx, sim_config,
         theta=theta, phi=phi, track_ids=track_ids,
     )
+
+
+# ---------------------------------------------------------------------------
+# Compact wire detector + synthetic tracks (pipeline tests)
+# ---------------------------------------------------------------------------
+
+_CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       'config', 'cubic_wireplane_config.yaml')
+
+
+@pytest.fixture(scope="session")
+def compact_detector():
+    """Factory: cubic_wireplane with the full 216 cm drift but a 60 x 60 cm readout.
+
+    ``pitches`` overrides the U, V, Y wire spacing (cm). The drift length is kept so
+    that diffusion and attenuation are as large as in the real detector.
+    """
+    from tools.geometry import generate_detector
+
+    def make(pitches=(0.3, 0.3, 0.3)):
+        det = generate_detector(_CONFIG)
+        for vol in det['volumes']:
+            ranges = vol['geometry']['ranges']
+            ranges[1], ranges[2] = [-30.0, 30.0], [-30.0, 30.0]
+            for plane, pitch in zip(vol['planes'], pitches):
+                plane['wire_spacing'] = pitch
+        return det
+    return make
+
+
+@pytest.fixture(scope="session")
+def synthetic_tracks():
+    """Factory: deterministic deposits of three tracks, each with charge in both volumes.
+
+    Tracks 1 and 2 span 5-210 cm of |x| with one deposit per group; track 3 is two short
+    stubs with deposits 3 mm apart, i.e. groups of five. dE is non-uniform, angles are
+    the true ones. Leaves padding entries in every volume for total_pad >= 64.
+    Coordinates are irregular on purpose: a deposit arriving exactly on a tick edge sits
+    on a kink of the sub-tick interpolation, where finite differences are one-sided.
+    """
+    from tools.loader import build_deposit_data
+
+    def make(sim_config):
+        ends = [((-2103.3, -201.3, -151.9), (2097.1, 148.3, 221.7)),
+                ((-51.3, 152.1, -218.9), (-2047.9, -251.7, 101.3)),
+                ((2001.9, -218.3, 181.7), (83.3, 191.9, -58.7)),
+                ((-903.1, 40.3, 60.7), (-890.2, 62.9, 69.4)),
+                ((1203.3, -70.9, -30.1), (1219.7, -52.8, -18.3))]
+        counts = [40, 20, 20, 10, 10]
+        tracks = [1, 2, 2, 3, 3]
+        pos, theta, phi, tid = [], [], [], []
+        for (a, b), n, t in zip(ends, counts, tracks):
+            a, b = np.array(a), np.array(b)
+            d = (b - a) / np.linalg.norm(b - a)
+            pos.append(a + np.linspace(0, 1, n)[:, None] * (b - a))
+            theta.append(np.full(n, np.arccos(d[2])))
+            phi.append(np.full(n, np.arctan2(d[1], d[0])))
+            tid.append(np.full(n, t, dtype=np.int32))
+        n = sum(counts)
+        return build_deposit_data(
+            np.concatenate(pos).astype(np.float32),
+            np.linspace(0.5, 1.5, n, dtype=np.float32),
+            np.full(n, 3.0, dtype=np.float32), sim_config,
+            theta=np.concatenate(theta).astype(np.float32),
+            phi=np.concatenate(phi).astype(np.float32),
+            track_ids=np.concatenate(tid))
+    return make
+
+
+@pytest.fixture
+def count_compiles():
+    """Factory: number of XLA compilations triggered while running ``fn``."""
+    def count(fn):
+        events = []
+
+        def listen(event, duration, **kwargs):
+            if event.endswith('backend_compile_duration'):
+                events.append(event)
+        jax.monitoring.register_event_duration_secs_listener(listen)
+        fn()
+        # Listeners cannot be removed through the public API in every supported
+        # JAX; copy the count so later events are ignored.
+        return len(events)
+    return count

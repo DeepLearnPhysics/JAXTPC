@@ -1,6 +1,6 @@
 # JAXTPC Test Suite
 
-264 tests covering software correctness and physics validation across all simulation modules. All tests run on CPU with synthetic data. The per-module tables below highlight representative checks; the test counts in each heading are the authoritative totals.
+Tests covering software correctness and physics validation across all simulation modules. All tests run on CPU with synthetic data; none needs a file outside the repo. The per-module tables below highlight representative checks; the test counts in each heading are the authoritative totals.
 
 ## Running Tests
 
@@ -144,6 +144,13 @@ Integration tests and physics validation (`tools/simulation.py`). Tests marked `
 | Y-plane signal polarity | Collection plane has net positive signal |
 | Diffusion broadens with distance | Longer drift gives wider signal spread |
 
+### Pipeline fixtures
+
+`tests/conftest.py` provides `compact_detector` (cubic_wireplane with the full 216 cm drift but
+a 60 x 60 cm readout, optional per-plane pitch), `synthetic_tracks` (80 deterministic deposits,
+three tracks, both volumes) and `count_compiles`. `tests/gradient_checks.py` holds the
+AD-vs-finite-difference helpers.
+
 ### Additional modules
 
 The modules above are documented test-by-test; the remaining suites are listed here with their totals and focus. Run `pytest <file> -v` for the per-test breakdown.
@@ -154,9 +161,9 @@ The modules above are documented test-by-test; the remaining suites are listed h
 | test_efield_distortions.py | 40 | Space charge effects (`tools/efield_distortions.py`): SCE maps, trilinear interpolation, E-field + spatial displacement |
 | test_electronics.py | 21 | RC⊗RC electronics shaping (`tools/electronics.py`) and ADC digitization |
 | test_output.py | 8 | Output format conversion (`tools/output.py`): dense ↔ sparse ↔ bucketed, threshold application |
-| test_pipeline.py | 17 | End-to-end production-path integration (`process_event`) |
-| test_pipeline_forward.py | 15 | Differentiable-path forward + finite-difference gradient checks (`forward`/`forward_segments`) |
-| test_pipeline_forward_slow.py | 12 | Kernel-dependent differentiable-path integration (marked `slow`) |
+| test_pipeline.py | 20 | Production path (`process_event`) on a compact detector: output layout, track-hit charge per track = attenuated charge, `qs_fractions`, velocity response, default SimParams, compile-cache counts, mirror symmetry of the volumes, dense == bucketed; plus hand-placed deposits on the full detector |
+| test_pipeline_forward.py | 22 (4 xfail) | Differentiable path: relative L2 against production per plane at uniform pitch, and at mixed pitch (V, Y strict xfail: production uses plane 0's pitch for every plane's transverse diffusion); `forward_segments` == `forward`; XLA compile counts; every EMB SimParams gradient vs float64 finite differences |
+| test_pipeline_forward_slow.py | 4 | EMB / Modified Box signal ratio = survival ratio, Modified Box gradients, gradients through deposit positions (marked `slow`) |
 | test_pixel_post_response_truth.py | 16 | Pixel readout post-response truth (`tools/track_hits.py` pixel path) |
 | test_pixel_kernel_grid.py | 2 | Pixel kernel lookup on the bin-centre grid: total charge over output pixels equals the pad-sum at every sub-pixel offset |
 | test_pixel_kernel_timing.py | 7 | Pixel kernel sub-tick timing (`tools/kernels.py`): placed output equals the tick-averaged response at the true arrival time, centroid linearity, d/d(arrival) vs finite differences |

@@ -1,195 +1,116 @@
 """
-Slow differentiable tests: multi-model gradients, all-field SimParams,
-muon optimization through position generation.
+Slow differentiable tests: Modified Box gradients, recombination model selection,
+gradients with respect to deposit positions. Synthetic deposits only.
 
 Skip with: pytest -m "not slow"
-
-2 diff simulators (modified_box + emb) shared via module scope.
 """
 
-import os
 import numpy as np
 import jax
 import jax.numpy as jnp
 import pytest
 
-from tools.geometry import generate_detector
+from gradient_checks import check_param_gradient, param_gradients
+from tools.loader import build_deposit_data
 from tools.simulation import DetectorSimulator
-from tools.loader import load_particle_step_data, build_deposit_data
-
-
-CONFIG_PATH = 'config/cubic_wireplane_config.yaml'
-DATA_PATH = 'out.h5'
-N = 500
-
-needs_data = pytest.mark.skipif(
-    not os.path.exists(DATA_PATH), reason="out.h5 not found")
 
 pytestmark = pytest.mark.slow
 
-
-@pytest.fixture(scope="module")
-def detector_config():
-    return generate_detector(CONFIG_PATH)
+N = 64
 
 
 @pytest.fixture(scope="module")
-def raw():
-    return load_particle_step_data(DATA_PATH, event_idx=2)
+def x64():
+    was_enabled = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", was_enabled)
 
 
 @pytest.fixture(scope="module")
-def sim_box(detector_config):
-    return DetectorSimulator(
-        detector_config, differentiable=True, n_segments=N,
-        recombination_model='modified_box')
-
-
-@pytest.fixture(scope="module")
-def sim_emb(detector_config):
-    return DetectorSimulator(
-        detector_config, differentiable=True, n_segments=N,
-        recombination_model='emb')
+def sims(x64, compact_detector):
+    return {m: DetectorSimulator(compact_detector(), differentiable=True,
+                                 n_segments=N, recombination_model=m)
+            for m in ('modified_box', 'emb')}
 
 
 # ---------------------------------------------------------------------------
-# Multi-model recombination
+# Recombination model selection and Modified Box gradients
 # ---------------------------------------------------------------------------
 
-@needs_data
+def _survival(model, dedx, cos_drift):
+    """Survival fraction written out independently of tools/recombination.py."""
+    field_density = 1.396 * 0.5            # g/cm3 * kV/cm
+    if model == 'modified_box':
+        alpha, beta = 0.93, 0.212
+    else:
+        alpha, r = 0.904, 1.25
+        beta = 0.204 / np.sqrt(1 - cos_drift ** 2 + cos_drift ** 2 / r ** 2)
+    xi = beta * dedx / field_density
+    return np.log(alpha + xi) / xi
+
+
 class TestRecombModels:
 
-    def test_different_models_different_output(self, sim_box, sim_emb, raw):
-        deps_box = build_deposit_data(
-            raw['positions_mm'][:N], raw['de'][:N], raw['dx'][:N], sim_box.config,
-            theta=raw['theta'][:N], phi=raw['phi'][:N])
-        deps_emb = build_deposit_data(
-            raw['positions_mm'][:N], raw['de'][:N], raw['dx'][:N], sim_emb.config,
-            theta=raw['theta'][:N], phi=raw['phi'][:N])
-
-        sigs_box = sim_box.forward(sim_box.default_sim_params, deps_box)
-        sigs_emb = sim_emb.forward(sim_emb.default_sim_params, deps_emb)
-
-        box_sum = sum(float(jnp.sum(jnp.abs(s))) for s in sigs_box)
-        emb_sum = sum(float(jnp.sum(jnp.abs(s))) for s in sigs_emb)
-        assert abs(box_sum - emb_sum) > 1.0
-
-    def test_box_alpha_beta_gradients(self, sim_box, raw):
-        deps = build_deposit_data(
-            raw['positions_mm'][:N], raw['de'][:N], raw['dx'][:N], sim_box.config,
-            theta=raw['theta'][:N], phi=raw['phi'][:N])
-
-        def loss(params):
-            return sum(jnp.sum(s ** 2) for s in sim_box.forward(params, deps))
-
-        grads = jax.grad(loss)(sim_box.default_sim_params)
-        assert float(grads.recomb_params.alpha) != 0.0
-        assert float(grads.recomb_params.beta) != 0.0
-
-    def test_emb_alpha_beta90_R_gradients(self, sim_emb, raw):
-        deps = build_deposit_data(
-            raw['positions_mm'][:N], raw['de'][:N], raw['dx'][:N], sim_emb.config,
-            theta=raw['theta'][:N], phi=raw['phi'][:N])
-
-        def loss(params):
-            return sum(jnp.sum(s ** 2) for s in sim_emb.forward(params, deps))
-
-        grads = jax.grad(loss)(sim_emb.default_sim_params)
-        assert float(grads.recomb_params.alpha) != 0.0
-        assert float(grads.recomb_params.beta_90) != 0.0
-        assert float(grads.recomb_params.R) != 0.0
+    def test_signal_ratio_is_survival_ratio(self, sims):
+        """emb / box signals differ by exactly the ratio of survival fractions."""
+        dedx, cos_drift = 8.0, np.cos(0.4)
+        sigs = {}
+        for model, sim in sims.items():
+            pos = np.stack([np.full(N, -700.0), np.linspace(-150, 150, N),
+                            np.linspace(-120, 200, N)], axis=1).astype(np.float32)
+            # track along x rotated by 0.4 rad about z
+            deps = build_deposit_data(
+                pos, np.full(N, dedx * 0.3, np.float32), np.full(N, 3.0, np.float32),
+                sim.config, theta=np.full(N, np.pi / 2, np.float32),
+                phi=np.full(N, 0.4, np.float32))
+            sigs[model] = sim.forward(sim.default_sim_params, deps)
+        expected = _survival('emb', dedx, cos_drift) / _survival('modified_box', dedx, cos_drift)
+        assert abs(expected - 1) > 0.05        # the models must be distinguishable here
+        for p in range(3):                     # volume 0 holds all the charge
+            box, emb = (np.asarray(sigs[m][p]) for m in ('modified_box', 'emb'))
+            scale = np.vdot(box, emb) / np.vdot(box, box)
+            assert scale == pytest.approx(expected, rel=1e-4)
+            assert np.linalg.norm(emb - scale * box) < 1e-5 * np.linalg.norm(emb)
 
 
-# ---------------------------------------------------------------------------
-# All SimParams fields (uses EMB — has more recomb params)
-# ---------------------------------------------------------------------------
-
-@needs_data
-class TestAllSimParamsGradients:
+class TestBoxGradients:
 
     @pytest.fixture(scope="class")
-    def grads(self, sim_emb, raw):
-        deps = build_deposit_data(
-            raw['positions_mm'][:N], raw['de'][:N], raw['dx'][:N], sim_emb.config,
-            theta=raw['theta'][:N], phi=raw['phi'][:N])
+    def box_gradients(self, sims, synthetic_tracks):
+        return param_gradients(sims['modified_box'], synthetic_tracks(sims['modified_box'].config))
 
-        def loss(params):
-            return sum(jnp.sum(s ** 2) for s in sim_emb.forward(params, deps))
-
-        return jax.grad(loss)(sim_emb.default_sim_params)
-
-    def test_velocity(self, grads):
-        assert float(grads.velocity_cm_us) != 0.0
-
-    def test_lifetime(self, grads):
-        assert float(grads.lifetime_us) != 0.0
-
-    def test_diffusion_trans(self, grads):
-        assert float(grads.diffusion_trans_cm2_us) != 0.0
-
-    def test_diffusion_long(self, grads):
-        assert float(grads.diffusion_long_cm2_us) != 0.0
-
-    def test_recomb_alpha(self, grads):
-        assert float(grads.recomb_params.alpha) != 0.0
-
-    def test_recomb_beta90(self, grads):
-        assert float(grads.recomb_params.beta_90) != 0.0
-
-    def test_recomb_R(self, grads):
-        assert float(grads.recomb_params.R) != 0.0
+    @pytest.mark.parametrize("field", ['recomb_params.alpha', 'recomb_params.beta'])
+    def test_matches_finite_difference(self, box_gradients, field):
+        check_param_gradient(box_gradients, field)
 
 
 # ---------------------------------------------------------------------------
-# Muon optimization (gradient through position generation)
+# Gradients through deposit positions
 # ---------------------------------------------------------------------------
 
-@needs_data
-class TestMuonOptimization:
+class TestPositionGradients:
 
-    @pytest.fixture(scope="class")
-    def sim_muon(self, detector_config):
-        return DetectorSimulator(
-            detector_config, differentiable=True, n_segments=200)
+    def test_track_parameter_gradients(self, sims):
+        """d loss / d (x0, y0, z0, angle) through forward_segments == central FD."""
+        sim = sims['emb']
+        params = sim.default_sim_params
+        t = jnp.linspace(0.0, 100.0, N)
 
-    def test_gradient_flows_through_positions(self, sim_muon):
-        def generate(start_x, angle, n):
-            t = jnp.linspace(0, 100, n)
-            x = start_x + t * jnp.cos(angle)
-            y = t * jnp.sin(angle) * 0.5
-            z = t * jnp.sin(angle) * 0.866
-            return jnp.stack([x, y, z], axis=-1), jnp.ones(n) * 0.5
+        @jax.jit
+        def loss(q):
+            x = q[0] + t * jnp.cos(q[3])
+            y = q[1] + t * jnp.sin(q[3]) * 0.5
+            z = q[2] + t * jnp.sin(q[3]) * 0.866
+            pos = jnp.stack([x, y, z], axis=-1)
+            sigs = sim.forward_segments(params, pos, jnp.full(N, 0.5), 5.0)
+            return sum(jnp.sum(s ** 2) for s in sigs)
 
-        params = sim_muon.default_sim_params
-        pp = jnp.array([500.0, 0.3])
-
-        def fwd(pp):
-            pos, de = generate(pp[0], pp[1], 200)
-            return sum(jnp.sum(s ** 2) for s in
-                       sim_muon.forward_segments(params, pos, de, 5.0))
-
-        grads = jax.grad(fwd)(pp)
-        assert not jnp.any(jnp.isnan(grads))
-        assert jnp.any(grads != 0)
-
-    def test_optimization_step_reduces_loss(self, sim_muon):
-        def generate(start_x, angle, n):
-            t = jnp.linspace(0, 100, n)
-            x = start_x + t * jnp.cos(angle)
-            y = t * jnp.sin(angle) * 0.5
-            z = t * jnp.sin(angle) * 0.866
-            return jnp.stack([x, y, z], axis=-1), jnp.ones(n) * 0.5
-
-        params = sim_muon.default_sim_params
-        pp = jnp.array([500.0, 0.3])
-
-        def fwd(pp):
-            pos, de = generate(pp[0], pp[1], 200)
-            return sum(jnp.sum(s ** 2) for s in
-                       sim_muon.forward_segments(params, pos, de, 5.0))
-
-        loss0 = float(fwd(pp))
-        grads = jax.grad(fwd)(pp)
-        pp_new = pp - 1e-6 * grads
-        loss1 = float(fwd(pp_new))
-        assert loss1 <= loss0 + 1e-6
+        q0 = jnp.array([503.17, 3.1, -7.3, 0.3])
+        ad = np.asarray(jax.grad(loss)(q0))
+        fd = np.empty(4)
+        for i, eps in enumerate([1e-5, 1e-5, 1e-5, 1e-7]):
+            d = jnp.zeros(4).at[i].set(eps)
+            fd[i] = float(loss(q0 + d) - loss(q0 - d)) / (2 * eps)
+        assert np.all(np.abs(fd) > 0), fd
+        np.testing.assert_allclose(ad, fd, rtol=1e-3)
