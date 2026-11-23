@@ -29,8 +29,8 @@ volumes:
 readout:
   sampling_rate: 2.0  # MHz
   electrons_per_adc: 182
-  pre_window_fraction: 0.0
-  post_window_fraction: 0.0
+  pre_window_fraction: 0.3   # fraction of max drift time before t=0
+  post_window_fraction: 0.3  # fraction of max drift time after max drift
 
 simulation:
   drift:

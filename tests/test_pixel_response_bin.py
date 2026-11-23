@@ -40,3 +40,10 @@ def test_table_bin_matches_pitch():
         vol, _ = _charge(config)
         bin_cm = vol.pixel_response_bin_cm or float(np.load(NPZ)["pixel_bin_size"])
         assert vol.pixel_pitch_cm / bin_cm == pytest.approx(10.0)
+
+
+def test_cubic_pixel_and_wire_share_the_readout_window():
+    pix, wire = (create_sim_config(generate_detector(f"config/{c}_config.yaml"), total_pad=100)
+                 for c in ("cubic_pixel", "cubic_wireplane"))
+    for f in ("num_time_steps", "time_step_us", "pre_window_us", "post_window_us"):
+        assert getattr(pix, f) == getattr(wire, f), f
