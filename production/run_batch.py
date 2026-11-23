@@ -440,11 +440,18 @@ def main():
     step_input = kinds.pop()
     if step_input and (args.no_track_hits or not args.merge_output):
         raise SystemExit('ERROR: step file input needs track hits and --merge-output')
+    if step_input and not args.hits_threshold > 0:
+        raise SystemExit('ERROR: step file input needs --hits-threshold > 0: it sets the charge unit')
     if step_input and not args.regroup:
         # the group definition is the file's; it also sizes the per-group boxes
-        with h5py.File(source_files[0], 'r') as f:
-            args.group_size = int(f['schema'].attrs['group_size'])
-            args.gap_threshold = float(f['schema'].attrs['group_gap_mm'])
+        defs = set()
+        for p in source_files:
+            with h5py.File(p, 'r') as f:
+                a = f['schema'].attrs
+                defs.add((int(a['group_size']), float(a['group_gap_mm'])))
+        if len(defs) > 1:
+            raise SystemExit(f'ERROR: step files with different groups: {sorted(defs)}')
+        args.group_size, args.gap_threshold = defs.pop()
 
     # Detect readout type early for pixel-specific defaults
     detector_config = generate_detector(args.config)
