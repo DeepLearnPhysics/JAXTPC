@@ -9,6 +9,7 @@ production/
 ├── run_batch.py              # Main batch simulation script
 ├── save.py                   # HDF5 save functions (sensor/step/hits encoding)
 ├── load.py                   # HDF5 load/decode functions
+├── stepfile.py               # read edep-sim step files, refine groups (format 3)
 ├── entries.py                # entry naming + event identity attributes (format 2)
 ├── view_production.ipynb     # Visualize production output (no simulation needed)
 └── README.md                 # This file
@@ -121,6 +122,7 @@ See `profiler/` for individual scripts to tune each parameter separately.
 | `--max-buckets` | 1,000 | Max active buckets per plane (bucketed mode) |
 | `--group-size` | 5 | Deposits per hits (correspondence) group |
 | `--gap-threshold` | 5.0 | Group split threshold in mm |
+| `--regroup` | off | Step file input: define groups with the two options above instead of taking the file's |
 | `--seed` | 42 | Random seed for noise generation |
 
 ## Pipeline
@@ -397,6 +399,12 @@ python3 production/make_labl.py --outdir dataset_20 --source out.h5
 Runtime is trivial (<2 s per 20-event file). This script is explicitly
 out of the simulation pipeline and **not JIT-compiled** — replace with
 an edepsim-side integrated writer when productionizing.
+
+## Format 3 (step file input)
+
+If `--data` is an edep-sim step file (`/edep/db/set/stepTruth true`), the output
+is `sensor`, `hits` and `presupera` (no `step`), and `--merge-output` is required.
+See [docs/production/data-formats.md](../docs/production/data-formats.md).
 
 ## Bidirectional Correspondence
 

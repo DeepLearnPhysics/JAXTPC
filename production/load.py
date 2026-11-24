@@ -89,7 +89,7 @@ def build_viz_config(sensor_path):
         n_volumes=n_vol,
         num_time_steps=int(meta['num_time_steps']),
         time_step_us=float(meta['time_step_us']),
-        electrons_per_adc=float(meta['electrons_per_adc']),
+        electrons_per_adc=float(meta.get('electrons_per_adc', np.nan)),
         plane_names=plane_names,
     )
 
@@ -587,3 +587,58 @@ def deposit_charge_per_plane(corr, plane_label):
     grp_tot = np.bincount(d['gid'], weights=d['charge'],
                           minlength=corr['g2t'].size).astype(np.float32)
     return corr['qs'] * grp_tot[corr['d2g']]
+
+
+# =============================================================================
+# Format 3 (step / hits / presupera / label; see production/stepfile.py)
+# =============================================================================
+
+def load_step3(step_path, event_idx, volume_ranges_cm=None):
+    """Steps of one event. With volume_ranges_cm also 'volume' and 'group2'."""
+    from production import stepfile
+    with h5py.File(step_path, 'r') as f:
+        s = stepfile.read_step(f, event_idx)
+    if volume_ranges_cm is not None:
+        s['volume'] = stepfile.volume_of(s['positions_mm'].astype(np.float32),
+                                         volume_ranges_cm)
+        s['group2'], _ = stepfile.refine_groups(s['group1'], s['volume'],
+                                                len(volume_ranges_cm))
+    return s
+
+
+def load_hits3(hits_path, entry):
+    """Hits of one entry: {(volume, plane name): {coordinates..., group, charge}}."""
+    out = {}
+    with h5py.File(hits_path, 'r') as f:
+        e = f[entry]
+        for vk in e:
+            for plane in e[vk]:
+                g = e[vk][plane]
+                sizes = g['group_sizes'][()].astype(np.int64)
+                d = {'group': np.repeat(g['group_ids'][()], sizes),
+                     'charge': g['charge'][()] * float(g['charge'].attrs['scale_factor'])}
+                for k in g:
+                    if k.startswith('group_center_'):
+                        c = k[len('group_center_'):]
+                        d[c] = (np.repeat(g[k][()].astype(np.int32), sizes)
+                                + g[f'offset_{c}'][()])
+                out[(int(vk.split('_')[1]), plane)] = d
+    return out
+
+
+def charge_and_photons(step, config_attrs):
+    """Electrons and photons per step from step columns and the recombination settings
+    in a format 3 config group (uniform field along x; not valid with SCE)."""
+    from types import SimpleNamespace
+    from tools.recombination import XI_FN, compute_quanta
+    if config_attrs['include_sce']:
+        raise NotImplementedError('needs the field map of the simulation')
+    pars = SimpleNamespace(**{k[len('recomb_'):]: config_attrs[k] for k in config_attrs
+                              if k.startswith('recomb_')})
+    model = config_attrs['recombination_model']
+    model = model.decode() if isinstance(model, bytes) else model
+    c = np.abs(np.sin(step['theta'].astype(np.float32)) * np.cos(step['phi'].astype(np.float32)))
+    q, l = compute_quanta(step['de'], step['dx'].astype(np.float32) / 10.0,
+                          np.arccos(np.clip(c, 0.0, 1.0)), pars.field_strength_Vcm, pars,
+                          XI_FN[model])
+    return np.asarray(q), np.asarray(l)

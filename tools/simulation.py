@@ -242,6 +242,7 @@ class DetectorSimulator:
             pixlar_path = '/tmp/pixlar-detsim-jax/pixlar/data/pixel_response_shielded.npz'
             if not os.path.exists(pixel_response_path) and os.path.exists(pixlar_path):
                 pixel_response_path = pixlar_path
+            self.pixel_response_path = pixel_response_path
             self.response_kernels = load_pixel_response_kernel(
                 pixel_response_path,
                 num_s=d.num_s,
